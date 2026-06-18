@@ -283,6 +283,53 @@ class TwoPassSession:
         return []
 
 
+class AdaptiveBackend:
+    """Wrap an ordered list of backends (slowest/best first). If the current one
+    can't keep up — real-time factor (process_time / audio_seconds) over budget
+    for `patience` consecutive calls — drop to the next faster tier. One-way:
+    never flaps back up. Models load lazily on first use, so the slower tiers
+    cost no RAM until reached."""
+
+    def __init__(self, backends, models, *, sample_rate=16000, rtf_budget=0.8,
+                 patience=2, clock=None):
+        self.backends = backends
+        self.models = models
+        self.sr = sample_rate
+        self.rtf_budget = rtf_budget
+        self.patience = patience
+        self.idx = 0
+        self._over = 0
+        self._notice = None
+        if clock is None:
+            import time as _t
+            clock = _t.monotonic
+        self.clock = clock
+
+    @property
+    def current_model(self):
+        return self.models[self.idx]
+
+    def pop_notice(self):
+        n, self._notice = self._notice, None
+        return n
+
+    def __call__(self, window_bytes):
+        t0 = self.clock()
+        out = self.backends[self.idx](window_bytes)
+        dur = len(window_bytes) / (self.sr * 2)
+        if dur > 0:
+            rtf = (self.clock() - t0) / dur
+            if rtf > self.rtf_budget and self.idx < len(self.backends) - 1:
+                self._over += 1
+                if self._over >= self.patience:
+                    self.idx += 1
+                    self._over = 0
+                    self._notice = f"模型跑不動,已切換較快模型:{self.models[self.idx]}"
+            else:
+                self._over = 0
+        return out
+
+
 def mlx_whisper_live_backend(model="mlx-community/whisper-small-mlx"):
     """Real live backend — Apple Silicon only, lazy import. Takes int16 PCM
     bytes for one window, returns whisper segments."""

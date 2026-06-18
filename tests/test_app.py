@@ -77,6 +77,15 @@ def test_transcribe_without_backend_returns_503(tmp_path):
     assert c.post(f"/meetings/{mid}/transcribe").status_code == 503
 
 
+def test_meeting_not_finalized_until_explicit(tmp_path):
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    assert store.get_meeting(mid)["status"] == "recording"  # not finalized on create
+    r = c.post(f"/meetings/{mid}/finalize")
+    assert r.status_code == 200
+    assert store.get_meeting(mid)["status"] == "finalized"  # only after the call
+
+
 def test_index_page_served(tmp_path):
     c, _ = make_client(tmp_path)
     r = c.get("/")

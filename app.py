@@ -119,6 +119,7 @@ startBtn.onclick = async () => {
       if(tentative){ tentative.style.color=''; tentative.textContent=line; tentative=null; }
       else { T.insertAdjacentHTML('afterbegin', `<p>${line}</p>`); }  // 倒敘
     }
+    else if(m.type==='notice'){ S.textContent=' ⚡ '+m.msg; }
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
   };
   ws.onopen = () => {
@@ -198,8 +199,10 @@ def _detail_page(mid, meeting, transcripts, summaries):
         "<h2>摘要</h2>"
         "<select id=kind><option value=minutes>會議記錄</option>"
         "<option value=bullets>條列</option></select> "
-        "<button id=go>產生摘要</button>"
-        "<p style='color:#888'>※ 摘要只在你按下按鈕時才產生。可先校正逐字稿再按。</p>"
+        "<button id=go>產生摘要</button> "
+        "<button id=fin>完成會議</button> <span id=finmsg></span>"
+        "<p style='color:#888'>※ 摘要只在你按下按鈕時才產生。停止錄音不會自動完成 —"
+        " 校正/再跑都做完後再按「完成會議」。</p>"
         "<div id=out>" + sums + "</div>"
         "<h2>逐字稿</h2><table border=1 cellpadding=4>" + rows + "</table>"
         "<script>"
@@ -211,6 +214,9 @@ def _detail_page(mid, meeting, transcripts, summaries):
         "const j=await r.json();const p=document.createElement('pre');"
         "p.style.whiteSpace='pre-wrap';p.textContent=j.text;"
         "o.innerHTML='';o.appendChild(p);};"
+        "document.getElementById('fin').onclick=async()=>{"
+        "await fetch('/meetings/" + str(mid) + "/finalize',{method:'POST'});"
+        "document.getElementById('finmsg').textContent=' 已完成。';};"
         "</script>"
     )
 
@@ -260,11 +266,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 await ws.send_json({"type": "final", **ev})
             else:
                 await ws.send_json({"type": "interim", **ev})
+        pop_notice = getattr(live_backend, "pop_notice", None)
         try:
             while True:
                 data = await ws.receive_bytes()
                 for ev in await run_in_threadpool(sess.feed, data):
                     await _emit(ev)
+                if pop_notice and (msg := pop_notice()):  # model auto-downgraded
+                    await ws.send_json({"type": "notice", "msg": msg})
         except WebSocketDisconnect:
             pass
         finally:
@@ -272,7 +281,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 if ev["kind"] == "final":
                     store.add_transcript(mid, "live", track, ev["start_ms"],
                                          ev["start_ms"], speaker, ev["text"])
-            store.finalize_meeting(mid)
+            # Stop != finalize: leave the meeting unfinalized so it can be
+            # resumed / re-run. Finalize only on explicit user action.
 
     @app.post("/meetings")
     def create_meeting(m: MeetingIn):
@@ -343,6 +353,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
                           summary_model, time.time())
         return {"text": out, "kind": body.kind}
 
+    @app.post("/meetings/{mid}/finalize")
+    def finalize_meeting(mid: int):
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        store.finalize_meeting(mid)  # explicit only — stopping live does not
+        return {"status": "finalized"}
+
     return app
 
 
@@ -366,6 +383,11 @@ if __name__ == "__main__":  # pragma: no cover
     live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "250"))
     live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "1.2"))
     live_rms = int(os.environ.get("LIVE_RMS", "500"))
+    # Auto-fallback chain for the final model: if it can't keep up (RTF over
+    # budget) it drops to the next faster model. LIVE_FALLBACK = comma list.
+    live_fallback = os.environ.get(
+        "LIVE_FALLBACK", "mlx-community/whisper-small-mlx,mlx-community/whisper-base-mlx")
+    live_rtf_budget = float(os.environ.get("LIVE_RTF_BUDGET", "0.8"))
 
     # Lazy-load the LLM on first request so the server starts instantly;
     # mlx-whisper already loads per-call. First /ingest downloads both models.
@@ -376,13 +398,19 @@ if __name__ == "__main__":  # pragma: no cover
             _llm["fn"] = mlx_lm_backend(llm_model)
         return _llm["fn"](prompt)
 
-    from live import mlx_whisper_live_backend
+    from live import AdaptiveBackend, mlx_whisper_live_backend
+
+    final_models = [live_model] + [m for m in live_fallback.split(",")
+                                   if m and m != live_model]
+    live_final = AdaptiveBackend(
+        [mlx_whisper_live_backend(m) for m in final_models],
+        final_models, rtf_budget=live_rtf_budget)
 
     app = create_app(
         Store("data/meetings.db"),
         summary_backend=summary_backend,
         asr_backend=asr.mlx_whisper_backend(asr_model),
-        live_backend=mlx_whisper_live_backend(live_model),
+        live_backend=live_final,
         live_interim_backend=(mlx_whisper_live_backend(live_interim_model)
                               if live_interim_model else None),
         live_silence_ms=live_silence,

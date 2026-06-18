@@ -1,7 +1,7 @@
 import numpy as np
 
-from live import (FixedWindowChunker, LiveSession, TwoPassSession, VadChunker,
-                  preprocess)
+from live import (AdaptiveBackend, FixedWindowChunker, LiveSession,
+                  TwoPassSession, VadChunker, preprocess)
 
 
 def tone(ms, sr=16000, amp=8000):
@@ -125,6 +125,32 @@ def test_twopass_adaptive_detects_quiet_speech():
     finals = [e for e in s.feed(tone(300, amp=250) + silence(150))
               if e["kind"] == "final"]
     assert len(finals) == 1
+
+
+def test_adaptive_downgrades_when_slow_then_stays():
+    # clock returns 2 values per call (t0, t1). dur(1s window)=1.0 -> rtf=elapsed.
+    ticks = iter([0, 2, 0, 2, 0, 0.1])  # slow, slow, fast
+    slow = lambda b: [{"start": 0, "end": 1, "text": "x"}]
+    fast = lambda b: [{"start": 0, "end": 1, "text": "y"}]
+    ab = AdaptiveBackend([slow, fast], ["turbo", "small"], sample_rate=16000,
+                         rtf_budget=0.8, patience=2, clock=lambda: next(ticks))
+    win = b"\x00" * 32000  # 1.0 s
+    ab(win)
+    assert ab.current_model == "turbo"        # 1 overrun, not yet
+    ab(win)
+    assert ab.current_model == "small"        # 2nd overrun -> downgrade
+    assert "切換" in ab.pop_notice() and ab.pop_notice() is None
+    assert ab(win)[0]["text"] == "y"          # now using the fast tier
+
+
+def test_adaptive_stays_on_fast_backend():
+    ticks = iter([0, 0.1, 0, 0.1])
+    fast = lambda b: [{"start": 0, "end": 1, "text": "ok"}]
+    ab = AdaptiveBackend([fast, fast], ["a", "b"], rtf_budget=0.8, patience=2,
+                         clock=lambda: next(ticks))
+    win = b"\x00" * 32000
+    ab(win); ab(win)
+    assert ab.current_model == "a" and ab.pop_notice() is None
 
 
 def test_preprocess_removes_dc_and_normalizes():
