@@ -18,9 +18,40 @@ def route(model):
 
 
 def make_live_backend(model):
-    """Live = whisper-MLX only (Qwen3-ASR live streaming needs vLLM/CUDA, which
-    Apple Silicon can't run). Returns a callable(pcm_bytes) -> segments."""
+    """Live backend, callable(pcm_bytes) -> segments. whisper-MLX (fast, default)
+    or Qwen3-ASR per-utterance (NOT native streaming — that needs vLLM/CUDA — but
+    our two-pass already finalizes per utterance, so offline transcribe works on
+    Mac at higher latency). AdaptiveBackend downgrades to a whisper fallback if it
+    can't keep up."""
+    if route(model) == "qwen3":
+        return qwen3_live_backend(model)
     return mlx_whisper_live_backend(model)
+
+
+def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B"):
+    """Per-utterance Qwen3-ASR for live finals (experimental). Slower than
+    whisper-MLX + ~63s cold load; best zh accuracy. Interim must stay whisper."""
+    import sys  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+    from qwen_asr import Qwen3ASRModel  # noqa: PLC0415
+
+    asr_model = Qwen3ASRModel.from_pretrained(model)
+
+    def _run(window_bytes):
+        if len(window_bytes) < 2:
+            return []
+        if len(window_bytes) % 2:
+            window_bytes = window_bytes[:-1]
+        audio = np.frombuffer(window_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        try:
+            out = asr_model.transcribe((audio, 16000), language=None)
+        except Exception as e:
+            print(f"qwen3 live error (skipped): {e}", file=sys.stderr)
+            return []
+        text = " ".join(t.text for t in out).strip()
+        return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
+
+    return _run
 
 
 def make_batch_backend(model):

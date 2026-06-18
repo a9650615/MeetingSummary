@@ -76,6 +76,7 @@ _LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
     <option value="mlx-community/whisper-large-v3-turbo">turbo(較準)</option>
     <option value="mlx-community/whisper-small-mlx">small(快)</option>
     <option value="mlx-community/whisper-base-mlx">base(最快)</option>
+    <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR(最準·較慢·首次載入久)</option>
   </select>
   <span id=curmodel style="color:#888"></span>
   <span style="color:#888"> · 精校: <b id=accmodel>-</b></span>
