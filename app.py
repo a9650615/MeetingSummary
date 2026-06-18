@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 import asr
-from live import LiveSession, VadChunker
+from live import TwoPassSession
 from summarize import summarize
 
 _INDEX = """<!doctype html><meta charset=utf-8><title>MeetingSummary</title>
@@ -36,7 +36,7 @@ _INDEX = """<!doctype html><meta charset=utf-8><title>MeetingSummary</title>
 <script>
 fetch('/meetings').then(r=>r.json()).then(ms=>{
   document.getElementById('meetings').innerHTML =
-    ms.map(m=>`<li><a href="/meetings/${m.id}">${m.title}</a> (${m.status})</li>`).join('');
+    ms.map(m=>`<li><a href="/m/${m.id}">${m.title}</a> (${m.status})</li>`).join('');
 });
 </script>"""
 
@@ -78,19 +78,34 @@ startBtn.onclick = async () => {
   const ratio = ctx.sampleRate/16000;
   ws = new WebSocket(`ws://${location.host}/ws/live`);
   ws.binaryType='arraybuffer';
+  let tentative = null;  // current in-progress (interim) line, replaced on final
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
     if(m.type==='meeting'){ mid=m.id; S.textContent=' 會議 #'+mid+' 錄製中…'; }
-    else if(m.type==='segment'){
-      C.textContent = m.text;  // big live caption
-      T.insertAdjacentHTML('afterbegin',  // newest on top (倒敘)
-        `<p>[${(m.start_ms/1000).toFixed(1)}s] ${m.text}</p>`); }
+    else if(m.type==='interim'){
+      C.textContent = m.text;
+      if(!tentative){ tentative=document.createElement('p');
+        tentative.style.color='#aaa'; T.insertAdjacentElement('afterbegin',tentative); }
+      tentative.textContent = '… '+m.text;
+    }
+    else if(m.type==='final'){
+      C.textContent = m.text;
+      const line = `[${(m.start_ms/1000).toFixed(1)}s] ${m.text}`;
+      if(tentative){ tentative.style.color=''; tentative.textContent=line; tentative=null; }
+      else { T.insertAdjacentHTML('afterbegin', `<p>${line}</p>`); }  // 倒敘
+    }
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
   };
   ws.onopen = () => {
+    let hangover = 0;  // keep sending ~680ms after speech so server sees the pause
     node.onaudioprocess = ev => {
       if(ws.readyState!==1) return;
       const input = ev.inputBuffer.getChannelData(0);
+      // client-side silence gate (perf): skip sending when idle
+      let sum=0; for(let i=0;i<input.length;i++) sum+=input[i]*input[i];
+      const rms = Math.sqrt(sum/input.length);
+      if(rms > 0.01) hangover = 8; else if(hangover > 0) hangover--;
+      if(rms <= 0.01 && hangover <= 0) return;  // silent -> don't transmit
       const outLen = Math.floor(input.length/ratio);
       const pcm = new Int16Array(outLen);
       for(let i=0;i<outLen;i++){
@@ -131,9 +146,44 @@ def _transcript_text(rows):
     return "\n".join(f"{r['speaker']}: {r['text']}" for r in rows)
 
 
+def _detail_page(mid, meeting, transcripts, summaries):
+    rows = "".join(
+        f"<tr><td>{r['track']}</td><td>{html.escape(r['text'])}</td></tr>"
+        for r in transcripts)
+    sums = "".join(
+        f"<h3>{html.escape(s['kind'])}</h3>"
+        f"<pre style='white-space:pre-wrap'>{html.escape(s['text'])}</pre>"
+        for s in summaries)
+    return (
+        "<!doctype html><meta charset=utf-8><title>"
+        + html.escape(meeting["title"]) + "</title>"
+        "<p><a href='/'>&larr; 回首頁</a></p>"
+        "<h1>" + html.escape(meeting["title"])
+        + " <small>(" + html.escape(meeting["status"]) + ")</small></h1>"
+        "<h2>摘要</h2>"
+        "<select id=kind><option value=minutes>會議記錄</option>"
+        "<option value=bullets>條列</option></select> "
+        "<button id=go>產生摘要</button>"
+        "<p style='color:#888'>※ 摘要只在你按下按鈕時才產生。可先校正逐字稿再按。</p>"
+        "<div id=out>" + sums + "</div>"
+        "<h2>逐字稿</h2><table border=1 cellpadding=4>" + rows + "</table>"
+        "<script>"
+        "document.getElementById('go').onclick=async()=>{"
+        "const k=document.getElementById('kind').value;"
+        "const o=document.getElementById('out');o.textContent='產生中…';"
+        "const r=await fetch('/meetings/" + str(mid) + "/summary',{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k})});"
+        "const j=await r.json();const p=document.createElement('pre');"
+        "p.style.whiteSpace='pre-wrap';p.textContent=j.text;"
+        "o.innerHTML='';o.appendChild(p);};"
+        "</script>"
+    )
+
+
 def create_app(store, *, summary_backend, asr_backend=None,
-               live_backend=None, summary_model="mlx-lm",
-               live_silence_ms=400, live_max_window_s=8.0, live_rms_threshold=500):
+               live_backend=None, live_interim_backend=None,
+               summary_model="mlx-lm", live_silence_ms=500, live_min_speech_ms=250,
+               live_interim_s=1.2, live_max_utt_s=15.0, live_rms_threshold=500):
     app = FastAPI()
 
     @app.get("/", response_class=HTMLResponse)
@@ -144,6 +194,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def live_page():
         return _LIVE
 
+    @app.get("/m/{mid}", response_class=HTMLResponse)
+    def meeting_page(mid: int):
+        meeting = store.get_meeting(mid)
+        if meeting is None:
+            raise HTTPException(404, "meeting not found")
+        return _detail_page(mid, dict(meeting), _rows(store.list_transcripts(mid)),
+                            _rows(store.list_summaries(mid)))
+
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket):
         await ws.accept()
@@ -152,26 +210,32 @@ def create_app(store, *, summary_backend, asr_backend=None,
             await ws.close()
             return
         mid = store.create_meeting("Live", time.time(), "zh-TW")
-        chunker = VadChunker(sample_rate=16000, silence_ms=live_silence_ms,
-                             max_window_s=live_max_window_s,
-                             rms_threshold=live_rms_threshold)
-        sess = LiveSession(backend=live_backend, chunker=chunker, track="mic")
+        sess = TwoPassSession(
+            backend=live_backend, interim_backend=live_interim_backend,
+            sample_rate=16000, silence_ms=live_silence_ms,
+            min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
+            max_utt_s=live_max_utt_s, rms_threshold=live_rms_threshold, track="mic")
         await ws.send_json({"type": "meeting", "id": mid})
 
-        def _store(seg):
-            store.add_transcript(mid, "live", "mic", seg["start_ms"],
-                                 seg["end_ms"], "我", seg["text"])
+        async def _emit(ev):
+            if ev["kind"] == "final":
+                store.add_transcript(mid, "live", "mic", ev["start_ms"],
+                                     ev["start_ms"], "我", ev["text"])
+                await ws.send_json({"type": "final", **ev})
+            else:
+                await ws.send_json({"type": "interim", **ev})
         try:
             while True:
                 data = await ws.receive_bytes()
-                for seg in await run_in_threadpool(sess.feed, data):
-                    _store(seg)
-                    await ws.send_json({"type": "segment", **seg})
+                for ev in await run_in_threadpool(sess.feed, data):
+                    await _emit(ev)
         except WebSocketDisconnect:
             pass
         finally:
-            for seg in await run_in_threadpool(sess.flush):
-                _store(seg)
+            for ev in await run_in_threadpool(sess.flush):
+                if ev["kind"] == "final":
+                    store.add_transcript(mid, "live", "mic", ev["start_ms"],
+                                         ev["start_ms"], "我", ev["text"])
             store.finalize_meeting(mid)
 
     @app.post("/meetings")
@@ -254,12 +318,17 @@ if __name__ == "__main__":  # pragma: no cover
 
     asr_model = os.environ.get("ASR_MODEL", "mlx-community/whisper-large-v3-turbo")
     llm_model = os.environ.get("LLM_MODEL", "mlx-community/Qwen2.5-3B-Instruct-4bit")
-    # Live subtitles: small model + VAD chunking (cut at pauses, not mid-word).
-    # Tune: LIVE_MODEL (base/tiny for speed), LIVE_SILENCE_MS (lower = snappier,
-    # more fragments), LIVE_MAX_WINDOW_S (latency ceiling), LIVE_RMS (mic level).
+    # Live two-pass: fast interim model while speaking, accurate final model per
+    # finished utterance (Teams-style retro-correction). No ASR runs on silence.
+    # Tune: LIVE_MODEL (final/accurate), LIVE_INTERIM_MODEL (fast; "" disables
+    # interim), LIVE_SILENCE_MS (pause = sentence end), LIVE_MIN_SPEECH_MS (drop
+    # blips), LIVE_INTERIM_S (interim cadence), LIVE_RMS (mic level).
     live_model = os.environ.get("LIVE_MODEL", "mlx-community/whisper-large-v3-turbo")
-    live_silence = int(os.environ.get("LIVE_SILENCE_MS", "400"))
-    live_max_window = float(os.environ.get("LIVE_MAX_WINDOW_S", "8.0"))
+    live_interim_model = os.environ.get("LIVE_INTERIM_MODEL",
+                                        "mlx-community/whisper-small-mlx")
+    live_silence = int(os.environ.get("LIVE_SILENCE_MS", "500"))
+    live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "250"))
+    live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "1.2"))
     live_rms = int(os.environ.get("LIVE_RMS", "500"))
 
     # Lazy-load the LLM on first request so the server starts instantly;
@@ -278,8 +347,11 @@ if __name__ == "__main__":  # pragma: no cover
         summary_backend=summary_backend,
         asr_backend=asr.mlx_whisper_backend(asr_model),
         live_backend=mlx_whisper_live_backend(live_model),
+        live_interim_backend=(mlx_whisper_live_backend(live_interim_model)
+                              if live_interim_model else None),
         live_silence_ms=live_silence,
-        live_max_window_s=live_max_window,
+        live_min_speech_ms=live_min_speech,
+        live_interim_s=live_interim_s,
         live_rms_threshold=live_rms,
         summary_model=llm_model,
     )

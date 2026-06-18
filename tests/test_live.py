@@ -1,6 +1,7 @@
 import numpy as np
 
-from live import FixedWindowChunker, LiveSession, VadChunker
+from live import (FixedWindowChunker, LiveSession, TwoPassSession, VadChunker,
+                  preprocess)
 
 
 def tone(ms, sr=16000, amp=8000):
@@ -61,6 +62,76 @@ def test_live_session_uses_injected_vad_chunker():
     s = LiveSession(backend=backend, chunker=VadChunker(frame_ms=30, silence_ms=90))
     out = s.feed(tone(300) + silence(150))
     assert len(out) == 1 and out[0]["profile"] == "live"
+
+
+def test_twopass_finalizes_on_silence():
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "完整句"}],
+                       frame_ms=30, silence_ms=90, interim_s=100)
+    finals = [e for e in s.feed(tone(300) + silence(150)) if e["kind"] == "final"]
+    assert len(finals) == 1
+    assert finals[0]["text"] == "完整句" and finals[0]["start_ms"] == 0
+
+
+def test_twopass_emits_interim_while_speaking():
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "定"}],
+                       interim_backend=lambda a: [{"start": 0, "end": 1, "text": "暫"}],
+                       frame_ms=30, silence_ms=100000, interim_s=0.09)
+    kinds = [e["kind"] for e in s.feed(tone(300))]  # speaking, no pause
+    assert "interim" in kinds and "final" not in kinds
+
+
+def test_twopass_no_work_on_silence():
+    # Perf: pure silence must not call any backend.
+    calls = []
+    s = TwoPassSession(backend=lambda a: calls.append(1) or [],
+                       interim_backend=lambda a: calls.append(1) or [],
+                       frame_ms=30, silence_ms=90, interim_s=0.03)
+    s.feed(silence(500))
+    assert calls == []
+
+
+def test_twopass_drops_repetition_final():
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "a a a a a"}],
+                       frame_ms=30, silence_ms=90)
+    assert [e for e in s.feed(tone(300) + silence(150)) if e["kind"] == "final"] == []
+
+
+def test_twopass_flush_finalizes_tail():
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "尾"}])
+    s.feed(tone(300))
+    fin = s.flush()
+    assert fin and fin[0]["kind"] == "final"
+
+
+def test_twopass_drops_short_blip_without_calling_asr():
+    # Cough/breath: brief energy, below min_speech -> no final, ASR NOT called.
+    calls = []
+    s = TwoPassSession(backend=lambda a: calls.append(1) or [],
+                       frame_ms=30, silence_ms=90, min_speech_ms=250)
+    finals = [e for e in s.feed(tone(60) + silence(150)) if e["kind"] == "final"]
+    assert finals == [] and calls == []
+
+
+def test_twopass_drops_filler_word():
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "Yeah"}],
+                       frame_ms=30, silence_ms=90)
+    assert [e for e in s.feed(tone(300) + silence(150)) if e["kind"] == "final"] == []
+
+
+def test_twopass_adaptive_detects_quiet_speech():
+    # rms 250 is below the old fixed 500 threshold — adaptive VAD still catches it.
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "輕聲細語"}],
+                       frame_ms=30, silence_ms=90)
+    finals = [e for e in s.feed(tone(300, amp=250) + silence(150))
+              if e["kind"] == "final"]
+    assert len(finals) == 1
+
+
+def test_preprocess_removes_dc_and_normalizes():
+    sig = (np.sin(np.linspace(0, 12, 1000)) * 0.02 + 0.1).astype(np.float32)
+    out = preprocess(sig)
+    assert abs(float(out.mean())) < 1e-4              # DC offset removed
+    assert abs(float(np.max(np.abs(out))) - 0.95) < 1e-3  # peak-normalized
 
 
 def test_emits_one_segment_per_full_window_with_offset():

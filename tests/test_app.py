@@ -82,3 +82,13 @@ def test_index_page_served(tmp_path):
     r = c.get("/")
     assert r.status_code == 200
     assert "MeetingSummary" in r.text
+
+
+def test_meeting_page_renders_without_auto_summary(tmp_path):
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    store.add_transcript(mid, "live", "mic", 0, 1000, "我", "測試內容")
+    r = c.get(f"/m/{mid}")
+    assert r.status_code == 200
+    assert "測試內容" in r.text and "產生摘要" in r.text
+    assert store.list_summaries(mid) == []  # viewing must NOT trigger summary
