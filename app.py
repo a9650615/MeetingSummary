@@ -3,8 +3,10 @@ design, loopback-only. Backends injected so tests run without MLX.
 
 Phase 1 = batch loop: create meeting -> transcribe saved PCM -> summarize -> view.
 Live websocket + recording start/stop (Swift helper) land in Phase 2."""
+import asyncio
 import html
 import os
+import sys
 import time
 
 from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
@@ -224,7 +226,8 @@ def _detail_page(mid, meeting, transcripts, summaries):
 def create_app(store, *, summary_backend, asr_backend=None,
                live_backend=None, live_interim_backend=None,
                summary_model="mlx-lm", live_silence_ms=400, live_min_speech_ms=250,
-               live_interim_s=0.6, live_max_utt_s=15.0, live_rms_threshold=500):
+               live_interim_s=0.6, live_max_utt_s=15.0, live_rms_threshold=500,
+               live_max_lag_s=4.0):
     app = FastAPI()
 
     @app.get("/", response_class=HTMLResponse)
@@ -267,16 +270,53 @@ def create_app(store, *, summary_backend, asr_backend=None,
             else:
                 await ws.send_json({"type": "interim", **ev})
         pop_notice = getattr(live_backend, "pop_notice", None)
+
+        # Producer/consumer: the receiver just buffers (cheap); the consumer
+        # grabs ALL accumulated audio per pass (batches small chunks into one ASR
+        # call) so it catches up under load. If the buffer exceeds the lag ceiling
+        # the oldest audio is dropped (timeout — stay current, not complete). When
+        # behind, skip interim and only do finals (priority: final > interim).
+        buf = bytearray()
+        got = asyncio.Event()
+        closed = False
+        max_lag_bytes = int(live_max_lag_s * 16000) * 2
+        interim_lag_bytes = int(2 * live_interim_s * 16000) * 2
+
+        async def receiver():
+            nonlocal closed
+            try:
+                while True:
+                    buf.extend(await ws.receive_bytes())
+                    if len(buf) > max_lag_bytes:
+                        del buf[:len(buf) - max_lag_bytes]  # drop oldest
+                    got.set()
+            except WebSocketDisconnect:
+                closed = True
+                got.set()
+
+        rtask = asyncio.create_task(receiver())
         try:
             while True:
-                data = await ws.receive_bytes()
-                for ev in await run_in_threadpool(sess.feed, data):
-                    await _emit(ev)
-                if pop_notice and (msg := pop_notice()):  # model auto-downgraded
-                    await ws.send_json({"type": "notice", "msg": msg})
-        except WebSocketDisconnect:
-            pass
+                await got.wait()
+                got.clear()
+                if buf:
+                    chunk = bytes(buf)
+                    buf.clear()
+                    want_interim = len(chunk) <= interim_lag_bytes  # not behind
+                    try:
+                        events = await run_in_threadpool(sess.feed, chunk, want_interim)
+                        for ev in events:
+                            await _emit(ev)
+                        if pop_notice and (msg := pop_notice()):
+                            await ws.send_json({"type": "notice", "msg": msg})
+                    except WebSocketDisconnect:
+                        raise
+                    except Exception as e:  # transient ASR/encode error -> keep going
+                        print(f"live consumer error (continuing): {e}", file=sys.stderr)
+                if closed and not buf:
+                    break
         finally:
+            rtask.cancel()
             for ev in await run_in_threadpool(sess.flush):
                 if ev["kind"] == "final":
                     store.add_transcript(mid, "live", track, ev["start_ms"],
@@ -388,6 +428,7 @@ if __name__ == "__main__":  # pragma: no cover
     live_fallback = os.environ.get(
         "LIVE_FALLBACK", "mlx-community/whisper-small-mlx,mlx-community/whisper-base-mlx")
     live_rtf_budget = float(os.environ.get("LIVE_RTF_BUDGET", "0.8"))
+    live_max_lag = float(os.environ.get("LIVE_MAX_LAG_S", "4.0"))  # drop audio beyond this lag
 
     # Lazy-load the LLM on first request so the server starts instantly;
     # mlx-whisper already loads per-call. First /ingest downloads both models.
@@ -417,6 +458,7 @@ if __name__ == "__main__":  # pragma: no cover
         live_min_speech_ms=live_min_speech,
         live_interim_s=live_interim_s,
         live_rms_threshold=live_rms,
+        live_max_lag_s=live_max_lag,
         summary_model=llm_model,
     )
     uvicorn.run(app, host="127.0.0.1", port=8000)  # loopback only (G2)

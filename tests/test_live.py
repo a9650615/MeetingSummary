@@ -80,6 +80,18 @@ def test_twopass_emits_interim_while_speaking():
     assert "interim" in kinds and "final" not in kinds
 
 
+def test_twopass_skips_interim_when_not_wanted():
+    # want_interim=False (we're behind) -> no interim ASR, finals still happen.
+    calls = []
+    s = TwoPassSession(
+        backend=lambda a: calls.append("final") or [{"start": 0, "end": 1, "text": "句"}],
+        interim_backend=lambda a: calls.append("interim") or [{"start": 0, "end": 1, "text": "暫"}],
+        frame_ms=30, silence_ms=90, interim_s=0.03)
+    kinds = [e["kind"] for e in s.feed(tone(300) + silence(150), want_interim=False)]
+    assert "interim" not in kinds and "final" in kinds
+    assert "interim" not in calls  # interim model never called
+
+
 def test_twopass_no_work_on_silence():
     # Perf: pure silence must not call any backend.
     calls = []

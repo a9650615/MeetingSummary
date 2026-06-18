@@ -254,7 +254,7 @@ class TwoPassSession:
         return {"kind": "final", "text": text, "track": self.track,
                 "start_ms": offset_ms, "profile": "live"}
 
-    def feed(self, pcm):
+    def feed(self, pcm, want_interim=True):
         self._utt.extend(pcm)
         events = []
         while self._scan + self.frame_bytes <= len(self._utt):
@@ -271,7 +271,7 @@ class TwoPassSession:
         if self._has_speech and len(self._utt) >= self.max_bytes:
             events.append(self._finalize())
         # interim only once there's real sustained speech (no work on blips/silence)
-        if (self.interim_backend and self._enough_speech()
+        if (want_interim and self.interim_backend and self._enough_speech()
                 and len(self._utt) - self._last_interim_len >= self.interim_bytes):
             self._last_interim_len = len(self._utt)
             tail = bytes(self._utt[-self.interim_tail_bytes:])
@@ -340,12 +340,22 @@ def mlx_whisper_live_backend(model="mlx-community/whisper-small-mlx"):
     import mlx_whisper  # noqa: PLC0415
 
     def _run(window_bytes):
+        if len(window_bytes) < 2:
+            return []
+        # Keep 16-bit alignment (a dropped/odd tail byte would crash frombuffer).
+        if len(window_bytes) % 2:
+            window_bytes = window_bytes[:-1]
         audio = np.frombuffer(window_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         audio = preprocess(audio)  # DC removal + normalize for poor recordings
-        segs = mlx_whisper.transcribe(
-            audio, path_or_hf_repo=model,
-            condition_on_previous_text=False,  # don't propagate a loop forward
-        )["segments"]
+        try:
+            segs = mlx_whisper.transcribe(
+                audio, path_or_hf_repo=model,
+                condition_on_previous_text=False,  # don't propagate a loop forward
+            )["segments"]
+        except Exception as e:  # one bad window must not kill the live session
+            import sys
+            print(f"live ASR error (skipped): {e}", file=sys.stderr)
+            return []
         # Whisper's standard hallucination guards: drop non-speech / repetitive /
         # low-confidence segments before they reach the subtitle.
         return [s for s in segs
