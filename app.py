@@ -70,6 +70,12 @@ _LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
   </select>
 </label>
 <label><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
+<label>辨識單元:
+  <select id=unit>
+    <option value="sentence">句子(快)</option>
+    <option value="paragraph">段落(較準,等較久)</option>
+  </select>
+</label>
 <button id=start>開始</button> <button id=stop disabled>停止</button>
 <span id=status></span>
 <p>
@@ -159,7 +165,10 @@ startBtn.onclick = async () => {
   gain.connect(ctx.destination);
   const ratio = ctx.sampleRate/16000;
   const diar = document.getElementById('diarize').checked ? '&diarize=1' : '';
-  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}`);
+  // bigger unit = longer pause + bigger ceiling -> more context per accurate pass
+  const unit = document.getElementById('unit').value==='paragraph'
+    ? '&silence_ms=1000&max_utt_s=30' : '';
+  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}`);
   ws.binaryType='arraybuffer';
   const tentative = {};  // per-speaker in-progress line
   function colored(speaker){ return COLORS[speaker]||'#444'; }
@@ -352,11 +361,17 @@ def create_app(store, *, summary_backend, asr_backend=None,
             tracks = {0: ("mic", "我"), 1: ("system", "對方")}
         else:
             tracks = {0: _src_labels(src)}
+        # Per-connection unit size: a longer finalize pause + bigger max means the
+        # accurate pass transcribes a whole sentence/paragraph in one call (more
+        # context -> better wording/punctuation, not cut mid-thought).
+        q = ws.query_params
+        sil = max(200, min(3000, int(q.get("silence_ms") or live_silence_ms)))
+        maxu = max(5.0, min(40.0, float(q.get("max_utt_s") or live_max_utt_s)))
         sessions = {tag: TwoPassSession(
             backend=live_manager, interim_backend=live_interim_backend,
-            sample_rate=16000, silence_ms=live_silence_ms,
+            sample_rate=16000, silence_ms=sil,
             min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
-            max_utt_s=live_max_utt_s, rms_threshold=live_rms_threshold,
+            max_utt_s=maxu, rms_threshold=live_rms_threshold,
             track=lbl[0]) for tag, lbl in tracks.items()}
         buffers = {tag: bytearray() for tag in tracks}
 
