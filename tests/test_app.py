@@ -86,6 +86,12 @@ def test_meeting_not_finalized_until_explicit(tmp_path):
     assert store.get_meeting(mid)["status"] == "finalized"  # only after the call
 
 
+def test_health_endpoint(tmp_path):
+    c, _ = make_client(tmp_path)
+    r = c.get("/health")
+    assert r.status_code == 200 and r.json()["status"] == "ok"
+
+
 def test_index_page_served(tmp_path):
     c, _ = make_client(tmp_path)
     r = c.get("/")

@@ -260,6 +260,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
                live_max_lag_s=4.0):
     app = FastAPI()
 
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}  # fast — supervisor probes this for liveness
+
     @app.get("/", response_class=HTMLResponse)
     def index():
         return _INDEX

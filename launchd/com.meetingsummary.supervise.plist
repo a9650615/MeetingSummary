@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Optional: run the supervisor at login and keep IT alive too (survives crash,
+     logout, reboot). Install:
+       cp launchd/com.meetingsummary.supervise.plist ~/Library/LaunchAgents/
+       # edit WorkingDirectory below to this repo's absolute path
+       launchctl load ~/Library/LaunchAgents/com.meetingsummary.supervise.plist
+     Stop: launchctl unload ~/Library/LaunchAgents/com.meetingsummary.supervise.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.meetingsummary.supervise</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>supervise.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/mingyou.tsai/Project/MeetingSummary</string>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/meeting_supervise.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/meeting_supervise.log</string>
+</dict>
+</plist>
