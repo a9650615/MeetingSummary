@@ -66,6 +66,7 @@ _LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
     <option value="mic">麥克風(我)</option>
     <option value="system">系統音(對方)</option>
     <option value="both">兩者(混合)</option>
+    <option value="dual">分軌(我 + 對方,分開標示)</option>
   </select>
 </label>
 <button id=start>開始</button> <button id=stop disabled>停止</button>
@@ -86,11 +87,12 @@ _LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
   font-size:2em;font-weight:bold;background:#111;color:#fff;border-radius:6px"></div>
 <div id=transcript style="margin-top:1em;font-size:1em;color:#444"></div>
 <script>
-let ws, ctx, node, gain, streams=[], mid;
+let ws, ctx, gain, streams=[], nodes=[], mid;
 const T=document.getElementById('transcript'), S=document.getElementById('status');
 const C=document.getElementById('caption');
 const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
 const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
+const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
 
 function showModels(m){
   curModel.textContent = '(目前 '+(m.live||'-').split('/').pop()+')';
@@ -115,64 +117,80 @@ async function getStreams(source){
   const mic = await navigator.mediaDevices.getUserMedia({audio:true});
   const sys = await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
   sys.getVideoTracks().forEach(t=>t.stop());
-  return [mic, sys];
+  return [mic, sys];  // both / dual
+}
+
+// One ScriptProcessor for a stream. tag=null -> send raw PCM; tag=0/1 -> prepend
+// a track byte (dual mode). Per-node silence gate + hangover so the server VAD
+// still sees the pause.
+function attach(stream, tag, ratio){
+  const node = ctx.createScriptProcessor(4096,1,1);
+  ctx.createMediaStreamSource(stream).connect(node);
+  let hangover = 0;
+  node.onaudioprocess = ev => {
+    if(ws.readyState!==1) return;
+    const input = ev.inputBuffer.getChannelData(0);
+    let sum=0; for(let i=0;i<input.length;i++) sum+=input[i]*input[i];
+    const rms = Math.sqrt(sum/input.length);
+    if(rms > 0.01) hangover = 8; else if(hangover > 0) hangover--;
+    if(rms <= 0.01 && hangover <= 0) return;
+    const outLen = Math.floor(input.length/ratio);
+    const pcm = new Int16Array(outLen);
+    for(let i=0;i<outLen;i++){
+      const s = Math.max(-1,Math.min(1,input[Math.floor(i*ratio)]));
+      pcm[i] = s*32767;
+    }
+    if(tag===null){ ws.send(pcm.buffer); }
+    else { const b=new Uint8Array(1+pcm.byteLength); b[0]=tag;
+           b.set(new Uint8Array(pcm.buffer),1); ws.send(b.buffer); }
+  };
+  node.connect(gain);
+  nodes.push(node);
 }
 
 startBtn.onclick = async () => {
   const source = document.getElementById('source').value;
+  const dual = source==='dual';
   try { streams = await getStreams(source); }
   catch(e){ S.textContent=' 取得音源失敗: '+e.message; return; }
   ctx = new AudioContext();
-  node = ctx.createScriptProcessor(4096,1,1);
   gain = ctx.createGain(); gain.gain.value = 0;  // mute: no self-echo
-  streams.forEach(st => ctx.createMediaStreamSource(st).connect(node));  // sum/mix
+  gain.connect(ctx.destination);
   const ratio = ctx.sampleRate/16000;
   ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}`);
   ws.binaryType='arraybuffer';
-  let tentative = null;  // current in-progress (interim) line, replaced on final
+  const tentative = {};  // per-speaker in-progress line
+  function colored(speaker){ return COLORS[speaker]||'#444'; }
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
     if(m.type==='meeting'){ mid=m.id; S.textContent=' 會議 #'+mid+' 錄製中…'; }
     else if(m.type==='interim'){
-      C.textContent = m.text;
-      if(!tentative){ tentative=document.createElement('p');
-        tentative.style.color='#aaa'; T.insertAdjacentElement('afterbegin',tentative); }
-      tentative.textContent = '… '+m.text;
+      const sp=m.speaker||'';
+      C.textContent = (sp?sp+': ':'')+m.text; C.style.color=colored(sp);
+      if(!tentative[sp]){ const p=document.createElement('p');
+        p.style.color='#aaa'; T.insertAdjacentElement('afterbegin',p); tentative[sp]=p; }
+      tentative[sp].textContent = '… '+(sp?sp+': ':'')+m.text;
     }
     else if(m.type==='final'){
-      C.textContent = m.text;
-      const line = `[${(m.start_ms/1000).toFixed(1)}s] ${m.text}`;
-      if(tentative){ tentative.style.color=''; tentative.textContent=line; tentative=null; }
-      else { T.insertAdjacentHTML('afterbegin', `<p>${line}</p>`); }  // 倒敘
+      const sp=m.speaker||'';
+      C.textContent = (sp?sp+': ':'')+m.text; C.style.color=colored(sp);
+      const line = `[${(m.start_ms/1000).toFixed(1)}s] ${sp?sp+': ':''}${m.text}`;
+      const p = tentative[sp] || document.createElement('p');
+      if(!tentative[sp]) T.insertAdjacentElement('afterbegin', p);
+      p.style.color = colored(sp); p.textContent = line; tentative[sp]=null;
     }
     else if(m.type==='notice'){ S.textContent=' ⚡ '+m.msg;
       fetch('/models').then(r=>r.json()).then(showModels); }
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
   };
   ws.onopen = () => {
-    let hangover = 0;  // keep sending ~680ms after speech so server sees the pause
-    node.onaudioprocess = ev => {
-      if(ws.readyState!==1) return;
-      const input = ev.inputBuffer.getChannelData(0);
-      // client-side silence gate (perf): skip sending when idle
-      let sum=0; for(let i=0;i<input.length;i++) sum+=input[i]*input[i];
-      const rms = Math.sqrt(sum/input.length);
-      if(rms > 0.01) hangover = 8; else if(hangover > 0) hangover--;
-      if(rms <= 0.01 && hangover <= 0) return;  // silent -> don't transmit
-      const outLen = Math.floor(input.length/ratio);
-      const pcm = new Int16Array(outLen);
-      for(let i=0;i<outLen;i++){
-        const s = Math.max(-1,Math.min(1,input[Math.floor(i*ratio)]));
-        pcm[i] = s*32767;
-      }
-      ws.send(pcm.buffer);
-    };
-    node.connect(gain); gain.connect(ctx.destination);
+    if(dual){ attach(streams[0],0,ratio); attach(streams[1],1,ratio); }  // 我 / 對方
+    else { streams.forEach(st=>attach(st,null,ratio)); }  // mic/system/both(mixed)
   };
   startBtn.disabled=true; stopBtn.disabled=false;
 };
 stopBtn.onclick = () => {
-  if(node) node.disconnect();
+  nodes.forEach(n=>n.disconnect()); nodes=[];
   streams.forEach(st => st.getTracks().forEach(t=>t.stop()));
   if(ws) ws.close();
   if(ctx) ctx.close();
@@ -304,33 +322,39 @@ def create_app(store, *, summary_backend, asr_backend=None,
             await ws.send_json({"type": "error", "msg": "no live backend"})
             await ws.close()
             return
-        track, speaker = _src_labels(ws.query_params.get("src", "mic"))
+        src = ws.query_params.get("src", "mic")
+        dual = src == "dual"
         t0 = time.time()
         mid = store.create_meeting("Live", t0, "zh-TW")
-        sess = TwoPassSession(
+        await ws.send_json({"type": "meeting", "id": mid})
+
+        # Per-track. Dual = separate tagged streams (0=mic/我, 1=system/對方);
+        # otherwise one track. Frame in dual mode = [1 byte tag] + PCM.
+        if dual:
+            tracks = {0: ("mic", "我"), 1: ("system", "對方")}
+        else:
+            tracks = {0: _src_labels(src)}
+        sessions = {tag: TwoPassSession(
             backend=live_manager, interim_backend=live_interim_backend,
             sample_rate=16000, silence_ms=live_silence_ms,
             min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
-            max_utt_s=live_max_utt_s, rms_threshold=live_rms_threshold, track=track)
-        await ws.send_json({"type": "meeting", "id": mid})
+            max_utt_s=live_max_utt_s, rms_threshold=live_rms_threshold,
+            track=lbl[0]) for tag, lbl in tracks.items()}
+        buffers = {tag: bytearray() for tag in tracks}
 
-        async def _emit(ev):
+        async def _emit(ev, label):
+            track, speaker = label
             if ev["kind"] == "final":
-                # Wall-clock time the utterance landed — monotonic, unlike the
-                # session's committed-bytes offset (skewed by silence-gating/drops).
-                ev["start_ms"] = int((time.time() - t0) * 1000)
+                ev["start_ms"] = int((time.time() - t0) * 1000)  # wall-clock, monotonic
                 store.add_transcript(mid, "live", track, ev["start_ms"],
                                      ev["start_ms"], speaker, ev["text"])
-                await ws.send_json({"type": "final", **ev})
+                await ws.send_json({"type": "final", "speaker": speaker, **ev})
             else:
-                await ws.send_json({"type": "interim", **ev})
+                await ws.send_json({"type": "interim", "speaker": speaker, **ev})
 
-        # Producer/consumer: the receiver just buffers (cheap); the consumer
-        # grabs ALL accumulated audio per pass (batches small chunks into one ASR
-        # call) so it catches up under load. If the buffer exceeds the lag ceiling
-        # the oldest audio is dropped (timeout — stay current, not complete). When
-        # behind, skip interim and only do finals (priority: final > interim).
-        buf = bytearray()
+        # Producer/consumer per track: receiver buffers (cheap, drops oldest beyond
+        # the lag ceiling); consumer batches each track's queued audio into one ASR
+        # call, skips interim when behind (final > interim).
         got = asyncio.Event()
         closed = False
         max_lag_bytes = int(live_max_lag_s * 16000) * 2
@@ -340,9 +364,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
             nonlocal closed
             try:
                 while True:
-                    buf.extend(await ws.receive_bytes())
+                    data = await ws.receive_bytes()
+                    tag, pcm = (data[0], data[1:]) if dual else (0, data)
+                    buf = buffers.get(tag)
+                    if buf is None:
+                        continue
+                    buf.extend(pcm)
                     if len(buf) > max_lag_bytes:
-                        del buf[:len(buf) - max_lag_bytes]  # drop oldest
+                        del buf[:len(buf) - max_lag_bytes]
                     got.set()
             except WebSocketDisconnect:
                 closed = True
@@ -354,31 +383,34 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 await got.wait()
                 got.clear()
                 if closed:
-                    break  # disconnected — never send on a closed socket
-                if buf:
+                    break
+                for tag, buf in buffers.items():
+                    if not buf:
+                        continue
                     chunk = bytes(buf)
                     buf.clear()
-                    want_interim = len(chunk) <= interim_lag_bytes  # not behind
+                    want_interim = len(chunk) <= interim_lag_bytes
                     try:
-                        events = await run_in_threadpool(sess.feed, chunk, want_interim)
+                        events = await run_in_threadpool(
+                            sessions[tag].feed, chunk, want_interim)
                         for ev in events:
-                            await _emit(ev)
-                        pop_notice = getattr(live_manager.backend, "pop_notice", None)
-                        if pop_notice and (msg := pop_notice()):
-                            await ws.send_json({"type": "notice", "msg": msg})
+                            await _emit(ev, tracks[tag])
                     except WebSocketDisconnect:
                         raise
-                    except Exception as e:  # transient ASR/encode error -> keep going
+                    except Exception as e:  # transient ASR error -> keep going
                         print(f"live consumer error (continuing): {e}", file=sys.stderr)
+                pop_notice = getattr(live_manager.backend, "pop_notice", None)
+                if pop_notice and (msg := pop_notice()):
+                    await ws.send_json({"type": "notice", "msg": msg})
         finally:
             rtask.cancel()
-            for ev in await run_in_threadpool(sess.flush):
-                if ev["kind"] == "final":
-                    ts = int((time.time() - t0) * 1000)
-                    store.add_transcript(mid, "live", track, ts, ts,
-                                         speaker, ev["text"])
-            # Stop != finalize: leave the meeting unfinalized so it can be
-            # resumed / re-run. Finalize only on explicit user action.
+            for tag, s in sessions.items():
+                for ev in await run_in_threadpool(s.flush):
+                    if ev["kind"] == "final":
+                        ts = int((time.time() - t0) * 1000)
+                        store.add_transcript(mid, "live", tracks[tag][0], ts, ts,
+                                             tracks[tag][1], ev["text"])
+            # Stop != finalize — explicit only.
 
     @app.post("/meetings")
     def create_meeting(m: MeetingIn):
