@@ -70,7 +70,17 @@ _LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
 </label>
 <button id=start>開始</button> <button id=stop disabled>停止</button>
 <span id=status></span>
-<p style="color:#888">系統音/兩者:會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>。兩者建議戴耳機(否則麥克風會收到喇叭回音)。</p>
+<p>
+  即時模型:
+  <select id=model>
+    <option value="mlx-community/whisper-large-v3-turbo">turbo(較準)</option>
+    <option value="mlx-community/whisper-small-mlx">small(快)</option>
+    <option value="mlx-community/whisper-base-mlx">base(最快)</option>
+  </select>
+  <span id=curmodel style="color:#888"></span>
+  <span style="color:#888"> · 精校: <b id=accmodel>-</b></span>
+</p>
+<p style="color:#888">系統音/兩者:會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>。兩者建議戴耳機(否則麥克風會收到喇叭回音)。模型可即時切換,免重啟。</p>
 <div id=caption style="margin:0.6em 0;padding:0.5em;min-height:1.6em;
   font-size:2em;font-weight:bold;background:#111;color:#fff;border-radius:6px"></div>
 <div id=transcript style="margin-top:1em;font-size:1em;color:#444"></div>
@@ -79,6 +89,19 @@ let ws, ctx, node, gain, streams=[], mid;
 const T=document.getElementById('transcript'), S=document.getElementById('status');
 const C=document.getElementById('caption');
 const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
+const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
+
+function showModels(m){
+  curModel.textContent = '(目前 '+(m.live||'-').split('/').pop()+')';
+  if(m.live_requested) modelSel.value = m.live_requested;
+  document.getElementById('accmodel').textContent = (m.accurate||'-').split('/').pop();
+}
+fetch('/models').then(r=>r.json()).then(showModels).catch(()=>{});
+modelSel.onchange = () => {
+  fetch('/models',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({live:modelSel.value})})
+    .then(r=>r.json()).then(()=>fetch('/models').then(r=>r.json()).then(showModels));
+};
 
 async function getStreams(source){
   if(source==='mic') return [await navigator.mediaDevices.getUserMedia({audio:true})];
@@ -121,7 +144,8 @@ startBtn.onclick = async () => {
       if(tentative){ tentative.style.color=''; tentative.textContent=line; tentative=null; }
       else { T.insertAdjacentHTML('afterbegin', `<p>${line}</p>`); }  // 倒敘
     }
-    else if(m.type==='notice'){ S.textContent=' ⚡ '+m.msg; }
+    else if(m.type==='notice'){ S.textContent=' ⚡ '+m.msg;
+      fetch('/models').then(r=>r.json()).then(showModels); }
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
   };
   ws.onopen = () => {
@@ -164,6 +188,10 @@ class MeetingIn(BaseModel):
 
 class SummaryIn(BaseModel):
     kind: str = "minutes"
+
+
+class ModelIn(BaseModel):
+    live: str
 
 
 def _rows(rows):
@@ -224,7 +252,8 @@ def _detail_page(mid, meeting, transcripts, summaries):
 
 
 def create_app(store, *, summary_backend, asr_backend=None,
-               live_backend=None, live_interim_backend=None,
+               live_manager=None, live_interim_backend=None, model_names=None,
+               on_model_change=None,
                summary_model="mlx-lm", live_silence_ms=400, live_min_speech_ms=250,
                live_interim_s=0.6, live_max_utt_s=15.0, live_rms_threshold=500,
                live_max_lag_s=4.0):
@@ -246,10 +275,27 @@ def create_app(store, *, summary_backend, asr_backend=None,
         return _detail_page(mid, dict(meeting), _rows(store.list_transcripts(mid)),
                             _rows(store.list_summaries(mid)))
 
+    @app.get("/models")
+    def get_models():
+        info = dict(model_names or {})
+        if live_manager is not None:
+            info["live"] = live_manager.current        # may differ after auto-downgrade
+            info["live_requested"] = live_manager.requested
+        return info
+
+    @app.post("/models")
+    def set_models(body: ModelIn):
+        if live_manager is None:
+            raise HTTPException(503, "no live model manager")
+        live_manager.set_model(body.live)  # hot reload — no restart
+        if on_model_change:
+            on_model_change(body.live)
+        return {"live": live_manager.requested}
+
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket):
         await ws.accept()
-        if live_backend is None:
+        if live_manager is None:
             await ws.send_json({"type": "error", "msg": "no live backend"})
             await ws.close()
             return
@@ -257,7 +303,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         t0 = time.time()
         mid = store.create_meeting("Live", t0, "zh-TW")
         sess = TwoPassSession(
-            backend=live_backend, interim_backend=live_interim_backend,
+            backend=live_manager, interim_backend=live_interim_backend,
             sample_rate=16000, silence_ms=live_silence_ms,
             min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
             max_utt_s=live_max_utt_s, rms_threshold=live_rms_threshold, track=track)
@@ -273,7 +319,6 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 await ws.send_json({"type": "final", **ev})
             else:
                 await ws.send_json({"type": "interim", **ev})
-        pop_notice = getattr(live_backend, "pop_notice", None)
 
         # Producer/consumer: the receiver just buffers (cheap); the consumer
         # grabs ALL accumulated audio per pass (batches small chunks into one ASR
@@ -313,6 +358,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                         events = await run_in_threadpool(sess.feed, chunk, want_interim)
                         for ev in events:
                             await _emit(ev)
+                        pop_notice = getattr(live_manager.backend, "pop_notice", None)
                         if pop_notice and (msg := pop_notice()):
                             await ws.send_json({"type": "notice", "msg": msg})
                     except WebSocketDisconnect:
@@ -448,10 +494,10 @@ if __name__ == "__main__":  # pragma: no cover
             _llm["fn"] = mlx_lm_backend(llm_model)
         return _llm["fn"](prompt)
 
-    from live import AdaptiveBackend, mlx_whisper_live_backend
+    import backends
+    from live import mlx_whisper_live_backend
 
-    final_models = [live_model] + [m for m in live_fallback.split(",")
-                                   if m and m != live_model]
+    fallback = [m for m in live_fallback.split(",") if m and m != live_model]
 
     # Startup probe: VALIDATE each candidate loads+runs on a 1 s clip; pick the
     # first that WORKS (skips belle-type incompatibilities so a broken pick can't
@@ -462,24 +508,27 @@ if __name__ == "__main__":  # pragma: no cover
     import time as _time
     _clip = _np.zeros(16000, dtype=_np.int16).tobytes()
     live_model = mp.probe_models(
-        final_models, audio_seconds=1.0,
+        [live_model] + fallback, audio_seconds=1.0,
         run=lambda m: mlx_whisper_live_backend(m)(_clip),
         clock=_time.monotonic, target_rtf=float("inf"))
-    final_models = [live_model] + [m for m in final_models if m != live_model]
     print(f"[profile] probed live model -> {live_model}", flush=True)
 
-    live_final = AdaptiveBackend(
-        [mlx_whisper_live_backend(m) for m in final_models],
-        final_models, rtf_budget=live_rtf_budget,
-        on_change=lambda m: mp.save_chosen(profile_path, m))  # remember downgrade
+    # Modular + hot-reloadable: manager rebuilds the live AdaptiveBackend on swap.
+    live_manager = backends.LiveModelManager(
+        make=backends.make_live_backend, model=live_model, fallback=fallback,
+        rtf_budget=live_rtf_budget,
+        on_change=lambda m: mp.save_chosen(profile_path, m))
 
     app = create_app(
         Store("data/meetings.db"),
         summary_backend=summary_backend,
-        asr_backend=asr.mlx_whisper_backend(asr_model),
-        live_backend=live_final,
+        asr_backend=backends.make_batch_backend(asr_model),  # routes qwen3/whisper
+        live_manager=live_manager,
         live_interim_backend=(mlx_whisper_live_backend(live_interim_model)
                               if live_interim_model else None),
+        model_names={"interim": live_interim_model, "accurate": asr_model,
+                     "summary": llm_model},
+        on_model_change=lambda m: mp.save_chosen(profile_path, m),
         live_silence_ms=live_silence,
         live_min_speech_ms=live_min_speech,
         live_interim_s=live_interim_s,
