@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS summaries(
 class Store:
     def __init__(self, db_path):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(db_path)
+        # ponytail: single shared connection across FastAPI's threadpool;
+        # sqlite serializes writes by default. Per-request connections only
+        # if write contention ever shows up (single-user local app — unlikely).
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
 
@@ -41,6 +44,11 @@ class Store:
         return self.db.execute(
             "SELECT * FROM meetings WHERE id=?", (meeting_id,)
         ).fetchone()
+
+    def list_meetings(self):
+        return self.db.execute(
+            "SELECT * FROM meetings ORDER BY created_at DESC"
+        ).fetchall()
 
     def finalize_meeting(self, meeting_id):
         self.db.execute(

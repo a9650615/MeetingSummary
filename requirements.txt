@@ -1,5 +1,7 @@
 # Dev + light runtime (cross-platform, safe in CI)
 pytest
+httpx          # FastAPI TestClient
+httpx2         # silences starlette TestClient deprecation warning
 fastapi
 uvicorn[standard]
 
