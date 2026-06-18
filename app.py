@@ -61,10 +61,13 @@ _LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
 <h1>🔴 Live 逐字稿</h1>
 <button id=start>開始</button> <button id=stop disabled>停止</button>
 <span id=status></span>
-<div id=transcript style="margin-top:1em;font-size:1.1em"></div>
+<div id=caption style="margin:0.6em 0;padding:0.5em;min-height:1.6em;
+  font-size:2em;font-weight:bold;background:#111;color:#fff;border-radius:6px"></div>
+<div id=transcript style="margin-top:1em;font-size:1em;color:#444"></div>
 <script>
 let ws, ctx, node, gain, src, stream, mid;
 const T=document.getElementById('transcript'), S=document.getElementById('status');
+const C=document.getElementById('caption');
 const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
 startBtn.onclick = async () => {
   stream = await navigator.mediaDevices.getUserMedia({audio:true});
@@ -79,6 +82,7 @@ startBtn.onclick = async () => {
     const m = JSON.parse(e.data);
     if(m.type==='meeting'){ mid=m.id; S.textContent=' 會議 #'+mid+' 錄製中…'; }
     else if(m.type==='segment'){
+      C.textContent = m.text;  // big live caption
       T.innerHTML += `<p>[${(m.start_ms/1000).toFixed(1)}s] ${m.text}</p>`; }
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
   };
@@ -246,6 +250,10 @@ if __name__ == "__main__":  # pragma: no cover
 
     asr_model = os.environ.get("ASR_MODEL", "mlx-community/whisper-large-v3-turbo")
     llm_model = os.environ.get("LLM_MODEL", "mlx-community/Qwen2.5-3B-Instruct-4bit")
+    # Live subtitles: small model + short window for low latency. Override
+    # LIVE_MODEL=...whisper-base/tiny-mlx + LIVE_WINDOW_S=1.0 for snappier (worse zh).
+    live_model = os.environ.get("LIVE_MODEL", "mlx-community/whisper-small-mlx")
+    live_window = float(os.environ.get("LIVE_WINDOW_S", "1.5"))
 
     # Lazy-load the LLM on first request so the server starts instantly;
     # mlx-whisper already loads per-call. First /ingest downloads both models.
@@ -262,7 +270,8 @@ if __name__ == "__main__":  # pragma: no cover
         Store("data/meetings.db"),
         summary_backend=summary_backend,
         asr_backend=asr.mlx_whisper_backend(asr_model),
-        live_backend=mlx_whisper_live_backend(asr_model),
+        live_backend=mlx_whisper_live_backend(live_model),
+        live_window_s=live_window,
         summary_model=llm_model,
     )
     uvicorn.run(app, host="127.0.0.1", port=8000)  # loopback only (G2)
