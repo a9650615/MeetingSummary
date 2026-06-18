@@ -452,6 +452,21 @@ if __name__ == "__main__":  # pragma: no cover
 
     final_models = [live_model] + [m for m in live_fallback.split(",")
                                    if m and m != live_model]
+
+    # Startup probe (邊跑邊測試): load+run each candidate on a 1 s clip, pick the
+    # first that WORKS and is fast enough. Skips models that error (e.g. belle on
+    # mlx-whisper 0.4.3) so a broken pick never silently kills finals. Measures
+    # real Metal throughput (RTF) for the starting choice.
+    import numpy as _np
+    import time as _time
+    _clip = _np.zeros(16000, dtype=_np.int16).tobytes()
+    live_model = mp.probe_models(
+        final_models, audio_seconds=1.0,
+        run=lambda m: mlx_whisper_live_backend(m)(_clip),
+        clock=_time.monotonic, target_rtf=1.5)
+    final_models = [live_model] + [m for m in final_models if m != live_model]
+    print(f"[profile] probed live model -> {live_model}", flush=True)
+
     live_final = AdaptiveBackend(
         [mlx_whisper_live_backend(m) for m in final_models],
         final_models, rtf_budget=live_rtf_budget,

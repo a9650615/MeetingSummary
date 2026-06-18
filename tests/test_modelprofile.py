@@ -1,17 +1,14 @@
 import modelprofile as mp
 
 
-def test_16gb_zh_uses_belle():
+def test_16gb_uses_vanilla_turbo_large():
+    # belle dropped from auto-pick (incompatible with mlx-whisper 0.4.3).
     rec = mp.recommend({"ram_gb": 16, "arch": "arm64"}, lang="zh-TW")
-    assert "belle" in rec["live"] and "belle" in rec["accurate"]
+    assert rec["live"] == "mlx-community/whisper-large-v3-turbo"
+    assert rec["accurate"] == "mlx-community/whisper-large-v3"
+    assert "belle" not in rec["live"] and "belle" not in rec["accurate"]
     assert isinstance(rec["fallback"], list) and rec["fallback"]
     assert rec["interim"] and rec["summary"]
-
-
-def test_16gb_english_uses_vanilla_turbo():
-    rec = mp.recommend({"ram_gb": 16}, lang="en")
-    assert rec["live"] == "mlx-community/whisper-large-v3-turbo"
-    assert "belle" not in rec["accurate"]
 
 
 def test_smaller_ram_picks_smaller_models():
@@ -36,6 +33,20 @@ def test_probe_picks_best_within_rtf_budget():
     chosen = mp.probe_models(["A", "B"], audio_seconds=3.0, run=lambda m: None,
                              clock=lambda: next(ticks), target_rtf=0.5)
     assert chosen == "B"
+
+
+def test_probe_skips_models_that_error():
+    # A model that throws on load/run (e.g. belle on an unsupported runtime) is
+    # skipped, not chosen — so a broken model never silently kills finals.
+    ticks = iter([0, 0, 0.3])
+
+    def run(m):
+        if m == "broken":
+            raise RuntimeError("incompatible")
+
+    chosen = mp.probe_models(["broken", "good"], audio_seconds=3.0, run=run,
+                             clock=lambda: next(ticks), target_rtf=0.5)
+    assert chosen == "good"
 
 
 def test_probe_falls_back_to_smallest_if_all_slow():

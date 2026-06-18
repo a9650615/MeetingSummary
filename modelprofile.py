@@ -14,6 +14,10 @@ _LARGE = "mlx-community/whisper-large-v3"
 _SMALL = "mlx-community/whisper-small-mlx"
 _BASE = "mlx-community/whisper-base-mlx"
 _TINY = "mlx-community/whisper-tiny-mlx"
+# BELLE Chinese-finetuned whisper: better Mandarin CER, BUT the mlx-community
+# 8-bit ports are incompatible with mlx-whisper 0.4.3 (ModelDimensions rejects
+# 'activation_dropout'). NOT auto-selected — opt in via LIVE_MODEL/ASR_MODEL once
+# the runtime supports it. Startup probe skips it if still broken.
 _BELLE_TURBO = "mlx-community/belle-whisper-large-v3-turbo-zh-8bit"
 _BELLE_LARGE = "mlx-community/belle-whisper-large-v3-zh-8bit"
 
@@ -51,7 +55,10 @@ def probe_models(candidates, *, audio_seconds, run, clock, target_rtf=0.5):
     better than guessing from chip name. Falls back to the smallest if all lag."""
     for model in candidates:
         t0 = clock()
-        run(model)
+        try:
+            run(model)
+        except Exception:
+            continue  # broken/incompatible model (e.g. belle on this runtime)
         if (clock() - t0) / audio_seconds <= target_rtf:
             return model
     return candidates[-1]
@@ -80,12 +87,11 @@ def recommend(hw, lang="zh-TW"):
     Chinese-finetuned whisper (lower CER on Mandarin); the vanilla fallback chain
     covers English/code-switch if BELLE struggles."""
     ram = hw.get("ram_gb", 16)
-    zh = lang.lower().startswith("zh")
     if ram >= 16:
         return {
-            "live": _BELLE_TURBO if zh else _TURBO,
+            "live": _TURBO,
             "interim": _SMALL,
-            "accurate": _BELLE_LARGE if zh else _LARGE,
+            "accurate": _LARGE,
             "summary": "mlx-community/Qwen2.5-7B-Instruct-4bit",
             "fallback": [_SMALL, _BASE],
         }
