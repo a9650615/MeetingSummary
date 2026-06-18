@@ -1,0 +1,6 @@
+data/
+*.pcm
+*.wav
+__pycache__/
+.venv/
+.DS_Store
