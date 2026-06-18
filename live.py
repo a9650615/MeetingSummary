@@ -190,9 +190,9 @@ class TwoPassSession:
     long single utterances get sluggish."""
 
     def __init__(self, *, backend, interim_backend=None, sample_rate=16000,
-                 frame_ms=30, silence_ms=500, max_utt_s=15.0, interim_s=1.2,
-                 min_speech_ms=250, rms_threshold=80, speech_factor=2.0,
-                 track="mic"):
+                 frame_ms=30, silence_ms=400, max_utt_s=15.0, interim_s=0.6,
+                 interim_tail_s=8.0, min_speech_ms=250, rms_threshold=80,
+                 speech_factor=2.0, track="mic"):
         self.final_backend = backend
         self.interim_backend = interim_backend
         self.sr = sample_rate
@@ -202,6 +202,9 @@ class TwoPassSession:
         self.min_speech_frames = max(1, min_speech_ms // frame_ms)
         self.max_bytes = int(max_utt_s * sample_rate) * 2
         self.interim_bytes = int(interim_s * sample_rate) * 2
+        # interim transcribes only the recent tail so its cost stays flat as the
+        # utterance grows — keeps captions snappy ('live enough').
+        self.interim_tail_bytes = int(interim_tail_s * sample_rate) * 2
         self.min_floor = rms_threshold        # absolute noise-floor minimum
         self.speech_factor = speech_factor    # speech if rms >= noise * factor
         self._noise = float(rms_threshold)     # adaptive noise-floor estimate
@@ -271,7 +274,8 @@ class TwoPassSession:
         if (self.interim_backend and self._enough_speech()
                 and len(self._utt) - self._last_interim_len >= self.interim_bytes):
             self._last_interim_len = len(self._utt)
-            text = self._text(self.interim_backend, bytes(self._utt))
+            tail = bytes(self._utt[-self.interim_tail_bytes:])
+            text = self._text(self.interim_backend, tail)
             if text:
                 events.append({"kind": "interim", "text": text, "track": self.track})
         return [e for e in events if e]

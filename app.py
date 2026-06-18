@@ -223,8 +223,8 @@ def _detail_page(mid, meeting, transcripts, summaries):
 
 def create_app(store, *, summary_backend, asr_backend=None,
                live_backend=None, live_interim_backend=None,
-               summary_model="mlx-lm", live_silence_ms=500, live_min_speech_ms=250,
-               live_interim_s=1.2, live_max_utt_s=15.0, live_rms_threshold=500):
+               summary_model="mlx-lm", live_silence_ms=400, live_min_speech_ms=250,
+               live_interim_s=0.6, live_max_utt_s=15.0, live_rms_threshold=500):
     app = FastAPI()
 
     @app.get("/", response_class=HTMLResponse)
@@ -379,9 +379,9 @@ if __name__ == "__main__":  # pragma: no cover
     live_model = os.environ.get("LIVE_MODEL", "mlx-community/whisper-large-v3-turbo")
     live_interim_model = os.environ.get("LIVE_INTERIM_MODEL",
                                         "mlx-community/whisper-small-mlx")
-    live_silence = int(os.environ.get("LIVE_SILENCE_MS", "500"))
+    live_silence = int(os.environ.get("LIVE_SILENCE_MS", "400"))
     live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "250"))
-    live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "1.2"))
+    live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "0.6"))
     live_rms = int(os.environ.get("LIVE_RMS", "500"))
     # Auto-fallback chain for the final model: if it can't keep up (RTF over
     # budget) it drops to the next faster model. LIVE_FALLBACK = comma list.
