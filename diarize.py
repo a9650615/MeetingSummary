@@ -33,10 +33,14 @@ class SpeakerTracker:
     speaker. Less accurate than offline global clustering (no future context,
     threshold-sensitive) — the post-meeting /diarize pass can re-cluster to fix."""
 
-    def __init__(self, threshold=0.55):
+    def __init__(self, threshold=0.4):
+        # Lower threshold = merge more readily = fewer spurious speakers. 3D-Speaker
+        # cosine on short utterances is noisy, so default conservatively to avoid
+        # over-splitting (the common live failure). Tune via LIVE_DIAR_THRESHOLD.
         self.threshold = threshold
         self.centroids = []
         self.counts = []
+        self.last_id = 0
 
     def assign(self, emb):
         import numpy as np  # noqa: PLC0415
@@ -50,10 +54,12 @@ class SpeakerTracker:
                 c = (self.centroids[best] * n + emb) / (n + 1)
                 self.centroids[best] = c / (np.linalg.norm(c) + 1e-9)
                 self.counts[best] = n + 1
+                self.last_id = best
                 return best
         self.centroids.append(emb)
         self.counts.append(1)
-        return len(self.centroids) - 1
+        self.last_id = len(self.centroids) - 1
+        return self.last_id
 
 
 def embedding_extractor(model=None):

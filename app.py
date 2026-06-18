@@ -390,12 +390,18 @@ def create_app(store, *, summary_backend, asr_backend=None,
             try:
                 import diarize as diar
                 extractor = diar.embedding_extractor()
+                thr = float(os.environ.get("LIVE_DIAR_THRESHOLD", "0.4"))
+                min_bytes = int(1.2 * 16000) * 2  # <1.2s -> too short, reuse last
+
+                def make_fn(tr):
+                    def fn(audio):
+                        if len(audio) < min_bytes and tr.centroids:
+                            return f"說話者{tr.last_id + 1}"  # don't spawn on a blip
+                        return f"說話者{tr.assign(extractor(audio)) + 1}"
+                    return fn
                 for tag, (trk, spk) in tracks.items():
                     if spk != "我":
-                        tracker = diar.SpeakerTracker()
-                        sessions[tag].speaker_fn = (
-                            lambda audio, tr=tracker:
-                            f"說話者{tr.assign(extractor(audio)) + 1}")
+                        sessions[tag].speaker_fn = make_fn(diar.SpeakerTracker(threshold=thr))
             except Exception as e:
                 print(f"live diarize unavailable: {e}", file=sys.stderr)
 
