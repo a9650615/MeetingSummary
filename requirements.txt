@@ -1,0 +1,8 @@
+# Dev + light runtime (cross-platform, safe in CI)
+pytest
+fastapi
+uvicorn[standard]
+
+# Heavy runtime — Apple Silicon only, install manually on the M3:
+#   pip install mlx-whisper mlx-lm
+# Not pinned here so CI / non-Mac dev stays installable.

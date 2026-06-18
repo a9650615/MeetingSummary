@@ -1,0 +1,9 @@
+[project]
+name = "meeting-summary"
+version = "0.1.0"
+description = "Local, privacy-first meeting recorder + transcriber + summarizer (Apple M-series)"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
