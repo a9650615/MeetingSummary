@@ -73,3 +73,26 @@ def record_stream(stream, seg_dir, sample_rate, channels, start_ts):
             writer.write(track, payload)
     finally:
         writer.close()
+
+
+def main():  # pragma: no cover - spawns the Swift helper, needs a real machine
+    import argparse
+    import subprocess
+    import time
+
+    p = argparse.ArgumentParser(description="Record one segment from the capture helper")
+    p.add_argument("seg_dir")
+    p.add_argument("--helper", default="capture/.build/release/capture")
+    p.add_argument("--rate", type=int, default=16000)
+    args = p.parse_args()
+
+    proc = subprocess.Popen([args.helper], stdout=subprocess.PIPE)
+    try:
+        record_stream(proc.stdout, args.seg_dir, sample_rate=args.rate,
+                      channels=1, start_ts=time.time())
+    finally:
+        proc.terminate()
+
+
+if __name__ == "__main__":
+    main()
