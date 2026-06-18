@@ -83,7 +83,8 @@ startBtn.onclick = async () => {
     if(m.type==='meeting'){ mid=m.id; S.textContent=' 會議 #'+mid+' 錄製中…'; }
     else if(m.type==='segment'){
       C.textContent = m.text;  // big live caption
-      T.innerHTML += `<p>[${(m.start_ms/1000).toFixed(1)}s] ${m.text}</p>`; }
+      T.insertAdjacentHTML('afterbegin',  // newest on top (倒敘)
+        `<p>[${(m.start_ms/1000).toFixed(1)}s] ${m.text}</p>`); }
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
   };
   ws.onopen = () => {
