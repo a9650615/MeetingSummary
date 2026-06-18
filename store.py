@@ -86,6 +86,11 @@ class Store:
             (meeting_id,),
         ).fetchall()
 
+    def update_speaker(self, transcript_id, speaker):
+        self.db.execute("UPDATE transcripts SET speaker=? WHERE id=?",
+                        (speaker, transcript_id))
+        self.db.commit()
+
     def add_summary(self, meeting_id, kind, lang, text, model, created_at):
         return self._insert(
             "INSERT INTO summaries(meeting_id, kind, lang, text, model, "

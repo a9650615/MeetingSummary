@@ -166,15 +166,16 @@ startBtn.onclick = async () => {
     if(m.type==='meeting'){ mid=m.id; S.textContent=' 會議 #'+mid+' 錄製中…'; }
     else if(m.type==='interim'){
       const sp=m.speaker||'';
-      C.textContent = (sp?sp+': ':'')+m.text; C.style.color=colored(sp);
+      C.textContent = m.text;  // caption: words only, no speaker label (UX)
       if(!tentative[sp]){ const p=document.createElement('p');
         p.style.color='#aaa'; T.insertAdjacentElement('afterbegin',p); tentative[sp]=p; }
       tentative[sp].textContent = '… '+(sp?sp+': ':'')+m.text;
     }
     else if(m.type==='final'){
       const sp=m.speaker||'';
-      C.textContent = (sp?sp+': ':'')+m.text; C.style.color=colored(sp);
-      const line = `[${(m.start_ms/1000).toFixed(1)}s] ${sp?sp+': ':''}${m.text}`;
+      C.textContent = m.text;  // caption: words only
+      const tstr = m.ts ? new Date(m.ts*1000).toLocaleTimeString() : (m.start_ms/1000).toFixed(1)+'s';
+      const line = `[${tstr}] ${sp?sp+': ':''}${m.text}`;
       const p = tentative[sp] || document.createElement('p');
       if(!tentative[sp]) T.insertAdjacentElement('afterbegin', p);
       p.style.color = colored(sp); p.textContent = line; tentative[sp]=null;
@@ -213,6 +214,12 @@ class ModelIn(BaseModel):
     live: str
 
 
+class DiarizeIn(BaseModel):
+    track: str = "system"      # diarize the 對方/system track by default
+    num_speakers: int = -1     # -1 = auto-detect
+    prefix: str = "說話者"
+
+
 def _rows(rows):
     return [dict(r) for r in rows]
 
@@ -233,7 +240,8 @@ def _transcript_text(rows):
 
 def _detail_page(mid, meeting, transcripts, summaries):
     rows = "".join(
-        f"<tr><td>{r['track']}</td><td>{html.escape(r['text'])}</td></tr>"
+        f"<tr><td>{html.escape(str(r['speaker']))}</td>"
+        f"<td>{html.escape(r['text'])}</td></tr>"
         for r in transcripts)
     sums = "".join(
         f"<h3>{html.escape(s['kind'])}</h3>"
@@ -249,11 +257,13 @@ def _detail_page(mid, meeting, transcripts, summaries):
         "<select id=kind><option value=minutes>會議記錄</option>"
         "<option value=bullets>條列</option></select> "
         "<button id=go>產生摘要</button> "
+        "<button id=dia>多人分群(對方)</button> "
         "<button id=fin>完成會議</button> <span id=finmsg></span>"
-        "<p style='color:#888'>※ 摘要只在你按下按鈕時才產生。停止錄音不會自動完成 —"
-        " 校正/再跑都做完後再按「完成會議」。</p>"
+        "<p style='color:#888'>※ 摘要只在你按下按鈕時才產生。停止錄音不會自動完成。"
+        " 「多人分群」用聲紋把對方那軌拆成說話者1/2/3(會後處理,需先有錄音)。</p>"
         "<div id=out>" + sums + "</div>"
-        "<h2>逐字稿</h2><table border=1 cellpadding=4>" + rows + "</table>"
+        "<h2>逐字稿</h2><table border=1 cellpadding=4>"
+        "<tr><th>說話者</th><th>內容</th></tr>" + rows + "</table>"
         "<script>"
         "document.getElementById('go').onclick=async()=>{"
         "const k=document.getElementById('kind').value;"
@@ -266,6 +276,12 @@ def _detail_page(mid, meeting, transcripts, summaries):
         "document.getElementById('fin').onclick=async()=>{"
         "await fetch('/meetings/" + str(mid) + "/finalize',{method:'POST'});"
         "document.getElementById('finmsg').textContent=' 已完成。';};"
+        "document.getElementById('dia').onclick=async()=>{"
+        "const fm=document.getElementById('finmsg');fm.textContent=' 分群中…(會後聲紋,需稍候)';"
+        "const r=await fetch('/meetings/" + str(mid) + "/diarize',{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'system'})});"
+        "if(r.ok){const j=await r.json();fm.textContent=' 分出 '+j.speakers+' 位說話者';"
+        "location.reload();}else{fm.textContent=' 分群失敗: '+(await r.text());}};"
         "</script>"
     )
 
@@ -342,10 +358,21 @@ def create_app(store, *, summary_backend, asr_backend=None,
             track=lbl[0]) for tag, lbl in tracks.items()}
         buffers = {tag: bytearray() for tag in tracks}
 
+        # Save raw audio per track (all of it, even live-dropped) for the
+        # post-meeting diarization pass. Append-only, crash-safe.
+        audio_dir = f"data/{mid}"
+        os.makedirs(audio_dir, exist_ok=True)
+        store.add_segment(mid, idx=0, dir_path=audio_dir, started_at=t0,
+                          duration_s=0, origin="recorded")
+        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
+                       for tag, lbl in tracks.items()}
+
         async def _emit(ev, label):
             track, speaker = label
             if ev["kind"] == "final":
-                ev["start_ms"] = int((time.time() - t0) * 1000)  # wall-clock, monotonic
+                now = time.time()
+                ev["start_ms"] = int((now - t0) * 1000)  # monotonic offset (storage)
+                ev["ts"] = now                            # epoch -> clock time (display)
                 store.add_transcript(mid, "live", track, ev["start_ms"],
                                      ev["start_ms"], speaker, ev["text"])
                 await ws.send_json({"type": "final", "speaker": speaker, **ev})
@@ -369,6 +396,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     buf = buffers.get(tag)
                     if buf is None:
                         continue
+                    audio_files[tag].write(pcm)  # full audio for diarization
                     buf.extend(pcm)
                     if len(buf) > max_lag_bytes:
                         del buf[:len(buf) - max_lag_bytes]
@@ -410,6 +438,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                         ts = int((time.time() - t0) * 1000)
                         store.add_transcript(mid, "live", tracks[tag][0], ts, ts,
                                              tracks[tag][1], ev["text"])
+            for f in audio_files.values():
+                f.close()
             # Stop != finalize — explicit only.
 
     @app.post("/meetings")
@@ -487,6 +517,30 @@ def create_app(store, *, summary_backend, asr_backend=None,
             raise HTTPException(404, "meeting not found")
         store.finalize_meeting(mid)  # explicit only — stopping live does not
         return {"status": "finalized"}
+
+    @app.post("/meetings/{mid}/diarize")
+    def diarize_meeting(mid: int, body: DiarizeIn):
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        import diarize as diar
+
+        segs = store.list_segments(mid)
+        if not segs:
+            raise HTTPException(404, "no saved audio for this meeting")
+        pcm = os.path.join(segs[0]["dir_path"], f"{body.track}.pcm")
+        if not os.path.exists(pcm):
+            raise HTTPException(404, f"no audio for track {body.track}")
+        try:
+            segments = diar.diarize_pcm(pcm, num_speakers=body.num_speakers)
+        except Exception as e:
+            raise HTTPException(503, f"diarization unavailable: {e}")
+        rows = [dict(r) for r in store.list_transcripts(mid)
+                if r["track"] == body.track]
+        for r in diar.assign_speakers(rows, segments, prefix=body.prefix):
+            store.update_speaker(r["id"], r["speaker"])
+        speakers = sorted({s["speaker"] for s in segments})
+        return {"track": body.track, "speakers": len(speakers),
+                "segments": len(segments)}
 
     return app
 

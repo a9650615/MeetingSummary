@@ -14,3 +14,9 @@ python-multipart   # /ingest file upload form
 #
 # Optional accurate/batch ASR (best zh; offline transformers, slow on Mac, ~1.2GB):
 #   pip install qwen-asr   # then ASR_MODEL=Qwen/Qwen3-ASR-0.6B
+#
+# Optional multi-speaker diarization (聲紋分群, offline ONNX, no CUDA):
+#   pip install sherpa-onnx
+#   # download into models/ (seg ~6MB + zh embedding ~37MB):
+#   #   .../speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2
+#   #   .../speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx (-> models/emb_zh.onnx)
