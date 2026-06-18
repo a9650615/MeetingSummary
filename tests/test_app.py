@@ -84,6 +84,14 @@ def test_index_page_served(tmp_path):
     assert "MeetingSummary" in r.text
 
 
+def test_src_labels_maps_source_to_track_and_speaker():
+    from app import _src_labels
+    assert _src_labels("mic") == ("mic", "我")
+    assert _src_labels("system") == ("system", "對方")
+    assert _src_labels("both") == ("mixed", "混合")
+    assert _src_labels("garbage") == ("mic", "我")  # default
+
+
 def test_meeting_page_renders_without_auto_summary(tmp_path):
     c, store = make_client(tmp_path)
     mid = store.create_meeting("m", 1.0, "zh-TW")

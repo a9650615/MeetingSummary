@@ -59,24 +59,49 @@ def _result_page(title, summary, transcripts):
 _LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
 <p><a href="/">&larr; 回首頁</a></p>
 <h1>🔴 Live 逐字稿</h1>
+<label>來源:
+  <select id=source>
+    <option value="mic">麥克風(我)</option>
+    <option value="system">系統音(對方)</option>
+    <option value="both">兩者(混合)</option>
+  </select>
+</label>
 <button id=start>開始</button> <button id=stop disabled>停止</button>
 <span id=status></span>
+<p style="color:#888">系統音/兩者:會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>。兩者建議戴耳機(否則麥克風會收到喇叭回音)。</p>
 <div id=caption style="margin:0.6em 0;padding:0.5em;min-height:1.6em;
   font-size:2em;font-weight:bold;background:#111;color:#fff;border-radius:6px"></div>
 <div id=transcript style="margin-top:1em;font-size:1em;color:#444"></div>
 <script>
-let ws, ctx, node, gain, src, stream, mid;
+let ws, ctx, node, gain, streams=[], mid;
 const T=document.getElementById('transcript'), S=document.getElementById('status');
 const C=document.getElementById('caption');
 const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
+
+async function getStreams(source){
+  if(source==='mic') return [await navigator.mediaDevices.getUserMedia({audio:true})];
+  if(source==='system'){
+    const s = await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
+    s.getVideoTracks().forEach(t=>t.stop());
+    if(!s.getAudioTracks().length) throw new Error('未取得系統音(分享時要勾選「分享音訊」)');
+    return [s];
+  }
+  const mic = await navigator.mediaDevices.getUserMedia({audio:true});
+  const sys = await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
+  sys.getVideoTracks().forEach(t=>t.stop());
+  return [mic, sys];
+}
+
 startBtn.onclick = async () => {
-  stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  const source = document.getElementById('source').value;
+  try { streams = await getStreams(source); }
+  catch(e){ S.textContent=' 取得音源失敗: '+e.message; return; }
   ctx = new AudioContext();
-  src = ctx.createMediaStreamSource(stream);
   node = ctx.createScriptProcessor(4096,1,1);
   gain = ctx.createGain(); gain.gain.value = 0;  // mute: no self-echo
+  streams.forEach(st => ctx.createMediaStreamSource(st).connect(node));  // sum/mix
   const ratio = ctx.sampleRate/16000;
-  ws = new WebSocket(`ws://${location.host}/ws/live`);
+  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}`);
   ws.binaryType='arraybuffer';
   let tentative = null;  // current in-progress (interim) line, replaced on final
   ws.onmessage = e => {
@@ -114,13 +139,13 @@ startBtn.onclick = async () => {
       }
       ws.send(pcm.buffer);
     };
-    src.connect(node); node.connect(gain); gain.connect(ctx.destination);
+    node.connect(gain); gain.connect(ctx.destination);
   };
   startBtn.disabled=true; stopBtn.disabled=false;
 };
 stopBtn.onclick = () => {
   if(node) node.disconnect();
-  if(stream) stream.getTracks().forEach(t=>t.stop());
+  streams.forEach(st => st.getTracks().forEach(t=>t.stop()));
   if(ws) ws.close();
   if(ctx) ctx.close();
   S.textContent += mid ? ` 已停止。可到首頁對 #${mid} 產生摘要。` : ' 已停止。';
@@ -140,6 +165,16 @@ class SummaryIn(BaseModel):
 
 def _rows(rows):
     return [dict(r) for r in rows]
+
+
+def _src_labels(src):
+    """Map the live audio source to (track, speaker). mic = you, system = the
+    other side, both = a client-mixed single stream."""
+    return {
+        "mic": ("mic", "我"),
+        "system": ("system", "對方"),
+        "both": ("mixed", "混合"),
+    }.get(src, ("mic", "我"))
 
 
 def _transcript_text(rows):
@@ -209,18 +244,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
             await ws.send_json({"type": "error", "msg": "no live backend"})
             await ws.close()
             return
+        track, speaker = _src_labels(ws.query_params.get("src", "mic"))
         mid = store.create_meeting("Live", time.time(), "zh-TW")
         sess = TwoPassSession(
             backend=live_backend, interim_backend=live_interim_backend,
             sample_rate=16000, silence_ms=live_silence_ms,
             min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
-            max_utt_s=live_max_utt_s, rms_threshold=live_rms_threshold, track="mic")
+            max_utt_s=live_max_utt_s, rms_threshold=live_rms_threshold, track=track)
         await ws.send_json({"type": "meeting", "id": mid})
 
         async def _emit(ev):
             if ev["kind"] == "final":
-                store.add_transcript(mid, "live", "mic", ev["start_ms"],
-                                     ev["start_ms"], "我", ev["text"])
+                store.add_transcript(mid, "live", track, ev["start_ms"],
+                                     ev["start_ms"], speaker, ev["text"])
                 await ws.send_json({"type": "final", **ev})
             else:
                 await ws.send_json({"type": "interim", **ev})
@@ -234,8 +270,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
         finally:
             for ev in await run_in_threadpool(sess.flush):
                 if ev["kind"] == "final":
-                    store.add_transcript(mid, "live", "mic", ev["start_ms"],
-                                         ev["start_ms"], "我", ev["text"])
+                    store.add_transcript(mid, "live", track, ev["start_ms"],
+                                         ev["start_ms"], speaker, ev["text"])
             store.finalize_meeting(mid)
 
     @app.post("/meetings")
