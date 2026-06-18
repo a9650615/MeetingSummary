@@ -140,15 +140,17 @@ def test_twopass_adaptive_detects_quiet_speech():
 
 
 def test_adaptive_downgrades_when_slow_then_stays():
-    # clock returns 2 values per call (t0, t1). dur(1s window)=1.0 -> rtf=elapsed.
-    ticks = iter([0, 2, 0, 2, 0, 0.1])  # slow, slow, fast
+    # call 1 = warmup (cold-load, ignored); calls 2 & 3 slow -> downgrade.
+    ticks = iter([0, 2, 0, 2, 0, 2, 0, 0.1])
     slow = lambda b: [{"start": 0, "end": 1, "text": "x"}]
     fast = lambda b: [{"start": 0, "end": 1, "text": "y"}]
     ab = AdaptiveBackend([slow, fast], ["turbo", "small"], sample_rate=16000,
                          rtf_budget=0.8, patience=2, clock=lambda: next(ticks))
     win = b"\x00" * 32000  # 1.0 s
     ab(win)
-    assert ab.current_model == "turbo"        # 1 overrun, not yet
+    assert ab.current_model == "turbo"        # warmup ignored
+    ab(win)
+    assert ab.current_model == "turbo"        # 1 overrun
     ab(win)
     assert ab.current_model == "small"        # 2nd overrun -> downgrade
     assert "切換" in ab.pop_notice() and ab.pop_notice() is None
@@ -156,13 +158,13 @@ def test_adaptive_downgrades_when_slow_then_stays():
 
 
 def test_adaptive_on_change_fires_with_new_model():
-    ticks = iter([0, 2, 0, 2])
+    ticks = iter([0, 2, 0, 2, 0, 2])  # warmup + 2 slow -> downgrade
     seen = []
     ab = AdaptiveBackend([lambda b: [], lambda b: []], ["turbo", "small"],
                          rtf_budget=0.8, patience=2, clock=lambda: next(ticks),
                          on_change=seen.append)
     win = b"\x00" * 32000
-    ab(win); ab(win)
+    ab(win); ab(win); ab(win)
     assert seen == ["small"]
 
 

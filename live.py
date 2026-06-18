@@ -306,6 +306,7 @@ class AdaptiveBackend:
         self.on_change = on_change  # called with the new model on downgrade
         self.idx = 0
         self._over = 0
+        self._warmup = True  # first call per tier loads weights -> don't judge its RTF
         self._notice = None
         if clock is None:
             import time as _t
@@ -326,11 +327,14 @@ class AdaptiveBackend:
         dur = len(window_bytes) / (self.sr * 2)
         if dur > 0:
             rtf = (self.clock() - t0) / dur
-            if rtf > self.rtf_budget and self.idx < len(self.backends) - 1:
+            if self._warmup:
+                self._warmup = False  # cold-load call — ignore its inflated RTF
+            elif rtf > self.rtf_budget and self.idx < len(self.backends) - 1:
                 self._over += 1
                 if self._over >= self.patience:
                     self.idx += 1
                     self._over = 0
+                    self._warmup = True  # new tier warms up before being judged
                     self._notice = f"模型跑不動,已切換較快模型:{self.models[self.idx]}"
                     if self.on_change:
                         self.on_change(self.models[self.idx])  # remember for next run

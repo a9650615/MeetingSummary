@@ -303,6 +303,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             while True:
                 await got.wait()
                 got.clear()
+                if closed:
+                    break  # disconnected — never send on a closed socket
                 if buf:
                     chunk = bytes(buf)
                     buf.clear()
@@ -317,8 +319,6 @@ def create_app(store, *, summary_backend, asr_backend=None,
                         raise
                     except Exception as e:  # transient ASR/encode error -> keep going
                         print(f"live consumer error (continuing): {e}", file=sys.stderr)
-                if closed and not buf:
-                    break
         finally:
             rtask.cancel()
             for ev in await run_in_threadpool(sess.flush):
@@ -453,17 +453,18 @@ if __name__ == "__main__":  # pragma: no cover
     final_models = [live_model] + [m for m in live_fallback.split(",")
                                    if m and m != live_model]
 
-    # Startup probe (邊跑邊測試): load+run each candidate on a 1 s clip, pick the
-    # first that WORKS and is fast enough. Skips models that error (e.g. belle on
-    # mlx-whisper 0.4.3) so a broken pick never silently kills finals. Measures
-    # real Metal throughput (RTF) for the starting choice.
+    # Startup probe: VALIDATE each candidate loads+runs on a 1 s clip; pick the
+    # first that WORKS (skips belle-type incompatibilities so a broken pick can't
+    # silently kill finals). Validate-only — RTF here would include one-time model
+    # load and wrongly favor the smallest; the runtime AdaptiveBackend measures
+    # real steady-state throughput and downgrades if the chosen model can't keep up.
     import numpy as _np
     import time as _time
     _clip = _np.zeros(16000, dtype=_np.int16).tobytes()
     live_model = mp.probe_models(
         final_models, audio_seconds=1.0,
         run=lambda m: mlx_whisper_live_backend(m)(_clip),
-        clock=_time.monotonic, target_rtf=1.5)
+        clock=_time.monotonic, target_rtf=float("inf"))
     final_models = [live_model] + [m for m in final_models if m != live_model]
     print(f"[profile] probed live model -> {live_model}", flush=True)
 
