@@ -16,10 +16,11 @@ def test_assign_speakers_by_time():
     assert out[0]["text"] == "a"           # other fields preserved
 
 
-def test_assign_speakers_custom_prefix():
+def test_assign_speakers_remaps_ids_to_1_based():
+    # sherpa cluster ids need not start at 0; remap distinct ids -> 1..N.
     out = assign_speakers([{"start_ms": 100, "speaker": "x"}],
                           [{"start": 0, "end": 1, "speaker": 2}], prefix="對方")
-    assert out[0]["speaker"] == "對方3"
+    assert out[0]["speaker"] == "對方1"  # the only cluster -> 1, not 3
 
 
 def test_assign_speakers_empty_segments_noop():

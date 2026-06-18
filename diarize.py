@@ -11,7 +11,10 @@ import os
 
 def assign_speakers(transcripts, segments, *, prefix="說話者"):
     """Relabel each transcript with the diarization speaker covering its time.
-    Transcripts keep their original speaker if no segment overlaps."""
+    Cluster ids are remapped to a contiguous 1..N (sherpa ids aren't 0-based), so
+    labels are 說話者1/2/3. Transcripts with no overlapping segment keep theirs."""
+    order = {raw: i + 1 for i, raw in
+             enumerate(sorted({s["speaker"] for s in segments}))}
     out = []
     for t in transcripts:
         ts = t.get("start_ms", 0) / 1000.0
@@ -19,7 +22,7 @@ def assign_speakers(transcripts, segments, *, prefix="說話者"):
                     if s["start"] <= ts < s["end"]), None)
         nt = dict(t)
         if spk is not None:
-            nt["speaker"] = f"{prefix}{spk + 1}"
+            nt["speaker"] = f"{prefix}{order[spk]}"
         out.append(nt)
     return out
 
