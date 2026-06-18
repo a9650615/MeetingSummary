@@ -77,6 +77,7 @@ _LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
   </select>
 </label>
 <button id=start>開始</button> <button id=stop disabled>停止</button>
+<button id=newsess>新 session</button>
 <span id=status></span>
 <p>
   即時模型:
@@ -92,11 +93,12 @@ _LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
 <p style="color:#888">系統音/兩者:會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>。兩者建議戴耳機(否則麥克風會收到喇叭回音)。模型可即時切換,免重啟。</p>
 <div id=caption style="margin:0.6em 0;padding:0.5em;min-height:1.6em;
   font-size:2em;font-weight:bold;background:#111;color:#fff;border-radius:6px"></div>
-<div id=transcript style="margin-top:1em;font-size:1em;color:#444"></div>
+<div id=live style="color:#aaa;font-size:1.1em;min-height:1.5em;margin:.4em 0"></div>
+<div id=transcript style="font-size:1em;color:#444"></div>
 <script>
-let ws, ctx, gain, streams=[], nodes=[], mid;
+let ws, ctx, gain, streams=[], nodes=[], mid, session=null;
 const T=document.getElementById('transcript'), S=document.getElementById('status');
-const C=document.getElementById('caption');
+const C=document.getElementById('caption'), L=document.getElementById('live');
 const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
 const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
 const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
@@ -170,28 +172,28 @@ startBtn.onclick = async () => {
   // bigger unit = longer pause + bigger ceiling -> more context per accurate pass
   const unit = document.getElementById('unit').value==='paragraph'
     ? '&silence_ms=1000&max_utt_s=30' : '';
-  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}`);
+  const sess = session ? '&session='+session : '';
+  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}`);
   ws.binaryType='arraybuffer';
-  const tentative = {};  // per-speaker in-progress line
   function colored(speaker){ return COLORS[speaker]||'#444'; }
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
-    if(m.type==='meeting'){ mid=m.id; S.textContent=' 會議 #'+mid+' 錄製中…'; }
+    if(m.type==='meeting'){ mid=m.id; session=m.id;  // bind session to this meeting
+      S.textContent=' session #'+mid+' 錄製中…'; }
     else if(m.type==='interim'){
       const sp=m.speaker||'';
-      C.textContent = m.text;  // caption: words only, no speaker label (UX)
-      if(!tentative[sp]){ const p=document.createElement('p');
-        p.style.color='#aaa'; T.insertAdjacentElement('afterbegin',p); tentative[sp]=p; }
-      tentative[sp].textContent = '… '+(sp?sp+': ':'')+m.text;
+      C.textContent = m.text;                       // caption: words only
+      L.textContent = '… '+(sp?sp+': ':'')+m.text;  // grey in-progress, above history
     }
     else if(m.type==='final'){
       const sp=m.speaker||'';
-      C.textContent = m.text;  // caption: words only
+      C.textContent = m.text;
       const tstr = m.ts ? new Date(m.ts*1000).toLocaleTimeString() : (m.start_ms/1000).toFixed(1)+'s';
-      const line = `[${tstr}] ${sp?sp+': ':''}${m.text}`;
-      const p = tentative[sp] || document.createElement('p');
-      if(!tentative[sp]) T.insertAdjacentElement('afterbegin', p);
-      p.style.color = colored(sp); p.textContent = line; tentative[sp]=null;
+      const p=document.createElement('p');
+      p.style.color = colored(sp);
+      p.textContent = `[${tstr}] ${sp?sp+': ':''}${m.text}`;
+      T.insertAdjacentElement('afterbegin', p);     // newest history on top, below #live
+      L.textContent='';                             // utterance committed
     }
     else if(m.type==='notice'){ S.textContent=' ⚡ '+m.msg;
       fetch('/models').then(r=>r.json()).then(showModels); }
@@ -202,6 +204,11 @@ startBtn.onclick = async () => {
     else { streams.forEach(st=>attach(st,null,ratio)); }  // mic/system/both(mixed)
   };
   startBtn.disabled=true; stopBtn.disabled=false;
+};
+document.getElementById('newsess').onclick = () => {
+  session=null; mid=null;       // next 開始 starts a fresh session
+  T.innerHTML=''; L.textContent=''; C.textContent='';
+  S.textContent=' 已開新 session';
 };
 stopBtn.onclick = () => {
   nodes.forEach(n=>n.disconnect()); nodes=[];
@@ -354,7 +361,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
         src = ws.query_params.get("src", "mic")
         dual = src == "dual"
         t0 = time.time()
-        mid = store.create_meeting("Live", t0, "zh-TW")
+        # Session: a recording binds to an existing meeting (token = meeting id) so
+        # stop/resume stays in one session; a missing/unknown token starts a new one.
+        session = ws.query_params.get("session")
+        if session and session.isdigit() and store.get_meeting(int(session)) is not None:
+            mid = int(session)
+        else:
+            mid = store.create_meeting("Live", t0, "zh-TW")
         await ws.send_json({"type": "meeting", "id": mid})
 
         # Per-track. Dual = separate tagged streams (0=mic/我, 1=system/對方);
@@ -381,9 +394,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # post-meeting diarization pass. Append-only, crash-safe.
         audio_dir = f"data/{mid}"
         os.makedirs(audio_dir, exist_ok=True)
-        store.add_segment(mid, idx=0, dir_path=audio_dir, started_at=t0,
-                          duration_s=0, origin="recorded")
-        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
+        store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
+                          started_at=t0, duration_s=0, origin="recorded")
+        # Append so a session's multiple recordings accumulate into one track file.
+        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "ab")
                        for tag, lbl in tracks.items()}
 
         # Live multi-speaker (?diarize=1): per-track online voiceprint clustering
