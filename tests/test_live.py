@@ -155,6 +155,17 @@ def test_adaptive_downgrades_when_slow_then_stays():
     assert ab(win)[0]["text"] == "y"          # now using the fast tier
 
 
+def test_adaptive_on_change_fires_with_new_model():
+    ticks = iter([0, 2, 0, 2])
+    seen = []
+    ab = AdaptiveBackend([lambda b: [], lambda b: []], ["turbo", "small"],
+                         rtf_budget=0.8, patience=2, clock=lambda: next(ticks),
+                         on_change=seen.append)
+    win = b"\x00" * 32000
+    ab(win); ab(win)
+    assert seen == ["small"]
+
+
 def test_adaptive_stays_on_fast_backend():
     ticks = iter([0, 0.1, 0, 0.1])
     fast = lambda b: [{"start": 0, "end": 1, "text": "ok"}]

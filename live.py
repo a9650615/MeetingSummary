@@ -297,12 +297,13 @@ class AdaptiveBackend:
     cost no RAM until reached."""
 
     def __init__(self, backends, models, *, sample_rate=16000, rtf_budget=0.8,
-                 patience=2, clock=None):
+                 patience=2, clock=None, on_change=None):
         self.backends = backends
         self.models = models
         self.sr = sample_rate
         self.rtf_budget = rtf_budget
         self.patience = patience
+        self.on_change = on_change  # called with the new model on downgrade
         self.idx = 0
         self._over = 0
         self._notice = None
@@ -331,6 +332,8 @@ class AdaptiveBackend:
                     self.idx += 1
                     self._over = 0
                     self._notice = f"模型跑不動,已切換較快模型:{self.models[self.idx]}"
+                    if self.on_change:
+                        self.on_change(self.models[self.idx])  # remember for next run
             else:
                 self._over = 0
         return out

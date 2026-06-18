@@ -413,25 +413,26 @@ if __name__ == "__main__":  # pragma: no cover
 
     from store import Store
     from summarize import mlx_lm_backend
+    import modelprofile as mp
 
-    asr_model = os.environ.get("ASR_MODEL", "mlx-community/whisper-large-v3-turbo")
-    llm_model = os.environ.get("LLM_MODEL", "mlx-community/Qwen2.5-3B-Instruct-4bit")
-    # Live two-pass: fast interim model while speaking, accurate final model per
-    # finished utterance (Teams-style retro-correction). No ASR runs on silence.
-    # Tune: LIVE_MODEL (final/accurate), LIVE_INTERIM_MODEL (fast; "" disables
-    # interim), LIVE_SILENCE_MS (pause = sentence end), LIVE_MIN_SPEECH_MS (drop
-    # blips), LIVE_INTERIM_S (interim cadence), LIVE_RMS (mic level).
-    live_model = os.environ.get("LIVE_MODEL", "mlx-community/whisper-large-v3-turbo")
-    live_interim_model = os.environ.get("LIVE_INTERIM_MODEL",
-                                        "mlx-community/whisper-small-mlx")
+    # Background profile: auto-pick models from hardware + language. Zero config.
+    # The runtime AdaptiveBackend then measures real GPU throughput (RTF) and the
+    # learned tier is remembered across runs (data/model_profile.json).
+    hw = mp.detect_hardware()
+    rec = mp.recommend(hw, lang=os.environ.get("LANG_PREF", "zh-TW"))
+    profile_path = "data/model_profile.json"
+    remembered = mp.load_chosen(profile_path)
+    print(f"[profile] {hw} -> {rec} (remembered live={remembered})", flush=True)
+
+    asr_model = os.environ.get("ASR_MODEL", rec["accurate"])
+    llm_model = os.environ.get("LLM_MODEL", rec["summary"])
+    live_model = os.environ.get("LIVE_MODEL", remembered or rec["live"])
+    live_interim_model = os.environ.get("LIVE_INTERIM_MODEL", rec["interim"])
     live_silence = int(os.environ.get("LIVE_SILENCE_MS", "400"))
     live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "250"))
     live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "0.6"))
     live_rms = int(os.environ.get("LIVE_RMS", "500"))
-    # Auto-fallback chain for the final model: if it can't keep up (RTF over
-    # budget) it drops to the next faster model. LIVE_FALLBACK = comma list.
-    live_fallback = os.environ.get(
-        "LIVE_FALLBACK", "mlx-community/whisper-small-mlx,mlx-community/whisper-base-mlx")
+    live_fallback = os.environ.get("LIVE_FALLBACK", ",".join(rec["fallback"]))
     live_rtf_budget = float(os.environ.get("LIVE_RTF_BUDGET", "0.8"))
     live_max_lag = float(os.environ.get("LIVE_MAX_LAG_S", "4.0"))  # drop audio beyond this lag
 
@@ -453,7 +454,8 @@ if __name__ == "__main__":  # pragma: no cover
                                    if m and m != live_model]
     live_final = AdaptiveBackend(
         [mlx_whisper_live_backend(m) for m in final_models],
-        final_models, rtf_budget=live_rtf_budget)
+        final_models, rtf_budget=live_rtf_budget,
+        on_change=lambda m: mp.save_chosen(profile_path, m))  # remember downgrade
 
     app = create_app(
         Store("data/meetings.db"),
