@@ -1,6 +1,7 @@
 """ASR engine: wraps a pluggable backend (mlx-whisper / SenseVoice).
 Backend = callable(audio_path) -> [{start, end, text}] in seconds.
 transcribe() normalizes to ms and tags track + profile (spec component 3)."""
+import zhtw
 
 
 def transcribe(audio_path, *, profile, track, backend):
@@ -12,7 +13,7 @@ def transcribe(audio_path, *, profile, track, backend):
         out.append({
             "start_ms": round(seg["start"] * 1000),
             "end_ms": round(seg["end"] * 1000),
-            "text": text,
+            "text": zhtw.to_tw(text),  # normalize 簡->繁(台灣)
             "track": track,
             "profile": profile,
         })

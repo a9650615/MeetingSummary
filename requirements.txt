@@ -1,6 +1,7 @@
 # Dev + light runtime (cross-platform, safe in CI)
 pytest
 numpy          # live.py VAD energy chunker
+opencc         # 簡->繁(台灣) transcript normalization
 httpx          # FastAPI TestClient
 httpx2         # silences starlette TestClient deprecation warning
 fastapi

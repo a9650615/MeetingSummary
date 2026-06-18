@@ -254,7 +254,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             await ws.close()
             return
         track, speaker = _src_labels(ws.query_params.get("src", "mic"))
-        mid = store.create_meeting("Live", time.time(), "zh-TW")
+        t0 = time.time()
+        mid = store.create_meeting("Live", t0, "zh-TW")
         sess = TwoPassSession(
             backend=live_backend, interim_backend=live_interim_backend,
             sample_rate=16000, silence_ms=live_silence_ms,
@@ -264,6 +265,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
         async def _emit(ev):
             if ev["kind"] == "final":
+                # Wall-clock time the utterance landed — monotonic, unlike the
+                # session's committed-bytes offset (skewed by silence-gating/drops).
+                ev["start_ms"] = int((time.time() - t0) * 1000)
                 store.add_transcript(mid, "live", track, ev["start_ms"],
                                      ev["start_ms"], speaker, ev["text"])
                 await ws.send_json({"type": "final", **ev})
@@ -319,8 +323,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
             rtask.cancel()
             for ev in await run_in_threadpool(sess.flush):
                 if ev["kind"] == "final":
-                    store.add_transcript(mid, "live", track, ev["start_ms"],
-                                         ev["start_ms"], speaker, ev["text"])
+                    ts = int((time.time() - t0) * 1000)
+                    store.add_transcript(mid, "live", track, ts, ts,
+                                         speaker, ev["text"])
             # Stop != finalize: leave the meeting unfinalized so it can be
             # resumed / re-run. Finalize only on explicit user action.
 
@@ -429,6 +434,9 @@ if __name__ == "__main__":  # pragma: no cover
         "LIVE_FALLBACK", "mlx-community/whisper-small-mlx,mlx-community/whisper-base-mlx")
     live_rtf_budget = float(os.environ.get("LIVE_RTF_BUDGET", "0.8"))
     live_max_lag = float(os.environ.get("LIVE_MAX_LAG_S", "4.0"))  # drop audio beyond this lag
+
+    import zhtw
+    zhtw.configure(os.environ.get("CONVERT_ZHTW", "1") != "0")  # 簡->繁(台灣)
 
     # Lazy-load the LLM on first request so the server starts instantly;
     # mlx-whisper already loads per-call. First /ingest downloads both models.

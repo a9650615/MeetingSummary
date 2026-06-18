@@ -10,6 +10,8 @@ Each chunk is transcribed independently (no cross-chunk context) — live is a
 preview; the accurate re-pass is the trusted transcript (spec M1)."""
 import numpy as np
 
+import zhtw
+
 
 def _rms(frame_bytes):
     if not frame_bytes:
@@ -234,7 +236,7 @@ class TwoPassSession:
         text = " ".join(p for p in parts if p).strip()
         if not text or _is_repetition(text) or _is_filler(text):
             return ""
-        return text
+        return zhtw.to_tw(text)  # normalize 簡->繁(台灣)
 
     def _enough_speech(self):
         return self._speech_frames >= self.min_speech_frames
