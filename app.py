@@ -256,7 +256,7 @@ if __name__ == "__main__":  # pragma: no cover
     # Live subtitles: small model + VAD chunking (cut at pauses, not mid-word).
     # Tune: LIVE_MODEL (base/tiny for speed), LIVE_SILENCE_MS (lower = snappier,
     # more fragments), LIVE_MAX_WINDOW_S (latency ceiling), LIVE_RMS (mic level).
-    live_model = os.environ.get("LIVE_MODEL", "mlx-community/whisper-small-mlx")
+    live_model = os.environ.get("LIVE_MODEL", "mlx-community/whisper-large-v3-turbo")
     live_silence = int(os.environ.get("LIVE_SILENCE_MS", "400"))
     live_max_window = float(os.environ.get("LIVE_MAX_WINDOW_S", "8.0"))
     live_rms = int(os.environ.get("LIVE_RMS", "500"))

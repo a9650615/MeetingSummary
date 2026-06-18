@@ -1,6 +1,6 @@
 import numpy as np
 
-from live import LiveSession, VadChunker
+from live import FixedWindowChunker, LiveSession, VadChunker
 
 
 def tone(ms, sr=16000, amp=8000):
@@ -37,6 +37,22 @@ def test_vad_flush_emits_speech_tail():
     ch = VadChunker(frame_ms=30, silence_ms=90, max_window_s=100)
     ch.feed(tone(200))           # speech, no trailing silence yet
     assert len(ch.flush()) == 1  # tail flushed
+
+
+def test_live_drops_repetition_hallucination():
+    backend = lambda w: [{"start": 0, "end": 1,
+                          "text": "segment segment segment segment segment"}]
+    s = LiveSession(backend=backend, chunker=FixedWindowChunker(32000))
+    assert s.feed(b"\x00" * 32000) == []
+
+
+def test_vad_drops_nonspeech_force_cut_window():
+    # Buffer fills to the ceiling with sub-threshold noise -> never "speech" ->
+    # window is dropped, not transcribed (no hallucination feed).
+    ch = VadChunker(frame_ms=30, silence_ms=100000, max_window_s=0.3,
+                    rms_threshold=500)
+    quiet = (np.ones(int(0.5 * 16000), dtype=np.int16) * 100).tobytes()  # rms 100 < 500
+    assert ch.feed(quiet) == []
 
 
 def test_live_session_uses_injected_vad_chunker():

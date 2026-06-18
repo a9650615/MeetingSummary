@@ -18,6 +18,16 @@ def _rms(frame_bytes):
     return float(np.sqrt(np.mean(a * a))) if a.size else 0.0
 
 
+def _is_repetition(text):
+    """Whisper loops on silence/noise, repeating one token (e.g. 'segment
+    segment segment...'). Drop those degenerate outputs."""
+    parts = text.split()
+    if len(parts) >= 4 and len(set(parts)) <= 2:
+        return True
+    stripped = text.replace(" ", "")
+    return len(stripped) >= 8 and len(set(stripped)) <= 3
+
+
 class FixedWindowChunker:
     def __init__(self, window_bytes):
         self.window_bytes = window_bytes
@@ -85,9 +95,12 @@ class VadChunker:
             cut = self._find_cut()
             if cut is None:
                 break
-            out.append(bytes(self._buf[:cut]))
+            had_speech = self._has_speech
+            window = bytes(self._buf[:cut])
             del self._buf[:cut]
             self._reset()
+            if had_speech:           # drop non-speech windows (force-cut noise)
+                out.append(window)
         return out
 
     def flush(self):
@@ -128,7 +141,7 @@ class LiveSession:
         out = []
         for s in self.backend(window):
             text = s["text"].strip()
-            if not text:
+            if not text or _is_repetition(text):
                 continue
             out.append({
                 "start_ms": round(s["start"] * 1000) + offset_ms,
@@ -147,6 +160,15 @@ def mlx_whisper_live_backend(model="mlx-community/whisper-small-mlx"):
 
     def _run(window_bytes):
         audio = np.frombuffer(window_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        return mlx_whisper.transcribe(audio, path_or_hf_repo=model)["segments"]
+        segs = mlx_whisper.transcribe(
+            audio, path_or_hf_repo=model,
+            condition_on_previous_text=False,  # don't propagate a loop forward
+        )["segments"]
+        # Whisper's standard hallucination guards: drop non-speech / repetitive /
+        # low-confidence segments before they reach the subtitle.
+        return [s for s in segs
+                if s.get("no_speech_prob", 0) < 0.6
+                and s.get("compression_ratio", 0) < 2.4
+                and s.get("avg_logprob", 0) > -1.0]
 
     return _run
