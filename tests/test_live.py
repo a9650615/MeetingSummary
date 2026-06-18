@@ -1,4 +1,50 @@
-from live import LiveSession
+import numpy as np
+
+from live import LiveSession, VadChunker
+
+
+def tone(ms, sr=16000, amp=8000):
+    n = int(sr * ms / 1000)
+    return (np.ones(n, dtype=np.int16) * amp).tobytes()
+
+
+def silence(ms, sr=16000):
+    n = int(sr * ms / 1000)
+    return np.zeros(n, dtype=np.int16).tobytes()
+
+
+def test_vad_cuts_at_silence_after_speech():
+    ch = VadChunker(frame_ms=30, silence_ms=90, max_window_s=100)
+    out = ch.feed(tone(300) + silence(150))  # speech then a 150 ms pause
+    assert len(out) == 1
+    # leftover (the empty post-cut frames) is silence-only -> flush emits nothing
+    assert ch.flush() == []
+
+
+def test_vad_force_cut_at_max_window():
+    ch = VadChunker(frame_ms=30, silence_ms=100000, max_window_s=0.3)
+    out = ch.feed(tone(500))  # 500 ms continuous speech, ceiling 300 ms
+    assert len(out) >= 1
+    assert len(out[0]) == int(0.3 * 16000) * 2  # cut exactly at the ceiling
+
+
+def test_vad_no_cut_on_pure_silence():
+    ch = VadChunker(frame_ms=30, silence_ms=90, max_window_s=100)
+    assert ch.feed(silence(500)) == []   # never spoke -> nothing to emit
+
+
+def test_vad_flush_emits_speech_tail():
+    ch = VadChunker(frame_ms=30, silence_ms=90, max_window_s=100)
+    ch.feed(tone(200))           # speech, no trailing silence yet
+    assert len(ch.flush()) == 1  # tail flushed
+
+
+def test_live_session_uses_injected_vad_chunker():
+    seen = []
+    backend = lambda w: seen.append(len(w)) or [{"start": 0, "end": 1, "text": "ok"}]
+    s = LiveSession(backend=backend, chunker=VadChunker(frame_ms=30, silence_ms=90))
+    out = s.feed(tone(300) + silence(150))
+    assert len(out) == 1 and out[0]["profile"] == "live"
 
 
 def test_emits_one_segment_per_full_window_with_offset():

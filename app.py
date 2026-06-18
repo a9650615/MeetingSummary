@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 import asr
-from live import LiveSession
+from live import LiveSession, VadChunker
 from summarize import summarize
 
 _INDEX = """<!doctype html><meta charset=utf-8><title>MeetingSummary</title>
@@ -131,7 +131,8 @@ def _transcript_text(rows):
 
 
 def create_app(store, *, summary_backend, asr_backend=None,
-               live_backend=None, summary_model="mlx-lm", live_window_s=4.0):
+               live_backend=None, summary_model="mlx-lm",
+               live_silence_ms=400, live_max_window_s=8.0, live_rms_threshold=500):
     app = FastAPI()
 
     @app.get("/", response_class=HTMLResponse)
@@ -150,8 +151,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
             await ws.close()
             return
         mid = store.create_meeting("Live", time.time(), "zh-TW")
-        sess = LiveSession(backend=live_backend, track="mic",
-                           window_s=live_window_s)
+        chunker = VadChunker(sample_rate=16000, silence_ms=live_silence_ms,
+                             max_window_s=live_max_window_s,
+                             rms_threshold=live_rms_threshold)
+        sess = LiveSession(backend=live_backend, chunker=chunker, track="mic")
         await ws.send_json({"type": "meeting", "id": mid})
 
         def _store(seg):
@@ -250,10 +253,13 @@ if __name__ == "__main__":  # pragma: no cover
 
     asr_model = os.environ.get("ASR_MODEL", "mlx-community/whisper-large-v3-turbo")
     llm_model = os.environ.get("LLM_MODEL", "mlx-community/Qwen2.5-3B-Instruct-4bit")
-    # Live subtitles: small model + short window for low latency. Override
-    # LIVE_MODEL=...whisper-base/tiny-mlx + LIVE_WINDOW_S=1.0 for snappier (worse zh).
+    # Live subtitles: small model + VAD chunking (cut at pauses, not mid-word).
+    # Tune: LIVE_MODEL (base/tiny for speed), LIVE_SILENCE_MS (lower = snappier,
+    # more fragments), LIVE_MAX_WINDOW_S (latency ceiling), LIVE_RMS (mic level).
     live_model = os.environ.get("LIVE_MODEL", "mlx-community/whisper-small-mlx")
-    live_window = float(os.environ.get("LIVE_WINDOW_S", "1.5"))
+    live_silence = int(os.environ.get("LIVE_SILENCE_MS", "400"))
+    live_max_window = float(os.environ.get("LIVE_MAX_WINDOW_S", "8.0"))
+    live_rms = int(os.environ.get("LIVE_RMS", "500"))
 
     # Lazy-load the LLM on first request so the server starts instantly;
     # mlx-whisper already loads per-call. First /ingest downloads both models.
@@ -271,7 +277,9 @@ if __name__ == "__main__":  # pragma: no cover
         summary_backend=summary_backend,
         asr_backend=asr.mlx_whisper_backend(asr_model),
         live_backend=mlx_whisper_live_backend(live_model),
-        live_window_s=live_window,
+        live_silence_ms=live_silence,
+        live_max_window_s=live_max_window,
+        live_rms_threshold=live_rms,
         summary_model=llm_model,
     )
     uvicorn.run(app, host="127.0.0.1", port=8000)  # loopback only (G2)
