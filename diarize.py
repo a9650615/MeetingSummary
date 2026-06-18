@@ -27,6 +27,53 @@ def assign_speakers(transcripts, segments, *, prefix="說話者"):
     return out
 
 
+class SpeakerTracker:
+    """Online (live) speaker clustering. Feed an utterance embedding -> returns a
+    0-based speaker id: nearest centroid by cosine if similar enough, else a new
+    speaker. Less accurate than offline global clustering (no future context,
+    threshold-sensitive) — the post-meeting /diarize pass can re-cluster to fix."""
+
+    def __init__(self, threshold=0.55):
+        self.threshold = threshold
+        self.centroids = []
+        self.counts = []
+
+    def assign(self, emb):
+        import numpy as np  # noqa: PLC0415
+        emb = np.asarray(emb, dtype=np.float32)
+        emb = emb / (np.linalg.norm(emb) + 1e-9)
+        if self.centroids:
+            sims = [float(c @ emb) for c in self.centroids]
+            best = max(range(len(sims)), key=sims.__getitem__)
+            if sims[best] >= self.threshold:
+                n = self.counts[best]
+                c = (self.centroids[best] * n + emb) / (n + 1)
+                self.centroids[best] = c / (np.linalg.norm(c) + 1e-9)
+                self.counts[best] = n + 1
+                return best
+        self.centroids.append(emb)
+        self.counts.append(1)
+        return len(self.centroids) - 1
+
+
+def embedding_extractor(model=None):
+    """sherpa-onnx speaker embedding extractor: int16 PCM bytes -> vector. Lazy."""
+    import numpy as np  # noqa: PLC0415
+    import sherpa_onnx  # noqa: PLC0415
+
+    emb = model or os.environ.get("SHERPA_EMB_MODEL") or "models/emb_zh.onnx"
+    ext = sherpa_onnx.SpeakerEmbeddingExtractor(
+        sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb))
+
+    def _run(pcm_bytes, sample_rate=16000):
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        stream = ext.create_stream()
+        stream.accept_waveform(sample_rate, samples)
+        return np.asarray(ext.compute(stream), dtype=np.float32)
+
+    return _run
+
+
 def diarize_pcm(pcm_path, *, sample_rate=16000, num_speakers=-1,
                 seg_model=None, emb_model=None):
     """Cluster speakers in a 16-bit mono PCM file -> [{start,end,speaker}].

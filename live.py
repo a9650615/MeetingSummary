@@ -194,9 +194,10 @@ class TwoPassSession:
     def __init__(self, *, backend, interim_backend=None, sample_rate=16000,
                  frame_ms=30, silence_ms=400, max_utt_s=15.0, interim_s=0.6,
                  interim_tail_s=8.0, min_speech_ms=250, rms_threshold=80,
-                 speech_factor=2.0, track="mic"):
+                 speech_factor=2.0, track="mic", speaker_fn=None):
         self.final_backend = backend
         self.interim_backend = interim_backend
+        self.speaker_fn = speaker_fn  # optional audio_bytes -> live speaker label
         self.sr = sample_rate
         self.track = track
         self.frame_bytes = int(sample_rate * frame_ms / 1000) * 2
@@ -250,11 +251,20 @@ class TwoPassSession:
         text = self._text(self.final_backend, audio)
         offset_ms = round(self._committed_bytes / (self.sr * 2) * 1000)
         self._committed_bytes += len(audio)
+        spk = None
+        if text and self.speaker_fn:
+            try:
+                spk = self.speaker_fn(audio)  # online voiceprint speaker label
+            except Exception:
+                spk = None
         self._reset_utt()
         if not text:
             return None
-        return {"kind": "final", "text": text, "track": self.track,
-                "start_ms": offset_ms, "profile": "live"}
+        ev = {"kind": "final", "text": text, "track": self.track,
+              "start_ms": offset_ms, "profile": "live"}
+        if spk:
+            ev["speaker"] = spk
+        return ev
 
     def feed(self, pcm, want_interim=True):
         self._utt.extend(pcm)

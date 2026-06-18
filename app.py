@@ -69,6 +69,7 @@ _LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
     <option value="dual">分軌(我 + 對方,分開標示)</option>
   </select>
 </label>
+<label><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
 <button id=start>開始</button> <button id=stop disabled>停止</button>
 <span id=status></span>
 <p>
@@ -157,7 +158,8 @@ startBtn.onclick = async () => {
   gain = ctx.createGain(); gain.gain.value = 0;  // mute: no self-echo
   gain.connect(ctx.destination);
   const ratio = ctx.sampleRate/16000;
-  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}`);
+  const diar = document.getElementById('diarize').checked ? '&diarize=1' : '';
+  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}`);
   ws.binaryType='arraybuffer';
   const tentative = {};  // per-speaker in-progress line
   function colored(speaker){ return COLORS[speaker]||'#444'; }
@@ -367,17 +369,33 @@ def create_app(store, *, summary_backend, asr_backend=None,
         audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
                        for tag, lbl in tracks.items()}
 
+        # Live multi-speaker (?diarize=1): per-track online voiceprint clustering
+        # on each finalized utterance. Skip the 我/mic track (single person).
+        if ws.query_params.get("diarize") == "1":
+            try:
+                import diarize as diar
+                extractor = diar.embedding_extractor()
+                for tag, (trk, spk) in tracks.items():
+                    if spk != "我":
+                        tracker = diar.SpeakerTracker()
+                        sessions[tag].speaker_fn = (
+                            lambda audio, tr=tracker:
+                            f"說話者{tr.assign(extractor(audio)) + 1}")
+            except Exception as e:
+                print(f"live diarize unavailable: {e}", file=sys.stderr)
+
         async def _emit(ev, label):
             track, speaker = label
             if ev["kind"] == "final":
                 now = time.time()
                 ev["start_ms"] = int((now - t0) * 1000)  # monotonic offset (storage)
                 ev["ts"] = now                            # epoch -> clock time (display)
+                spk = ev.get("speaker") or speaker        # online diarize overrides
                 store.add_transcript(mid, "live", track, ev["start_ms"],
-                                     ev["start_ms"], speaker, ev["text"])
-                await ws.send_json({"type": "final", "speaker": speaker, **ev})
+                                     ev["start_ms"], spk, ev["text"])
+                await ws.send_json({"type": "final", **ev, "speaker": spk})
             else:
-                await ws.send_json({"type": "interim", "speaker": speaker, **ev})
+                await ws.send_json({"type": "interim", **ev, "speaker": speaker})
 
         # Producer/consumer per track: receiver buffers (cheap, drops oldest beyond
         # the lag ceiling); consumer batches each track's queued audio into one ASR

@@ -1,4 +1,17 @@
-from diarize import assign_speakers
+import numpy as np
+
+from diarize import SpeakerTracker, assign_speakers
+
+
+def test_speaker_tracker_online_clustering():
+    t = SpeakerTracker(threshold=0.5)
+    a = np.array([1.0, 0.0, 0.0])
+    b = np.array([0.0, 1.0, 0.0])
+    assert t.assign(a) == 0                       # first speaker
+    assert t.assign(a + np.array([0.1, 0, 0])) == 0  # similar -> same
+    assert t.assign(b) == 1                       # different -> new speaker
+    assert t.assign(b + np.array([0, 0.1, 0])) == 1  # similar to 2nd -> same
+    assert t.assign(a) == 0                       # back to speaker 0
 
 
 def test_assign_speakers_by_time():
