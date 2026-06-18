@@ -30,12 +30,12 @@ def make_live_backend(model):
 
 def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B"):
     """Per-utterance Qwen3-ASR for live finals (experimental). Slower than
-    whisper-MLX + ~63s cold load; best zh accuracy. Interim must stay whisper."""
+    whisper-MLX + ~63s cold load; best zh accuracy. Interim must stay whisper.
+    Lazy-loads on first call so hot-swap (set_model) doesn't block the request."""
     import sys  # noqa: PLC0415
     import numpy as np  # noqa: PLC0415
-    from qwen_asr import Qwen3ASRModel  # noqa: PLC0415
 
-    asr_model = Qwen3ASRModel.from_pretrained(model)
+    state = {}
 
     def _run(window_bytes):
         if len(window_bytes) < 2:
@@ -44,7 +44,10 @@ def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B"):
             window_bytes = window_bytes[:-1]
         audio = np.frombuffer(window_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         try:
-            out = asr_model.transcribe((audio, 16000), language=None)
+            if "m" not in state:
+                from qwen_asr import Qwen3ASRModel  # noqa: PLC0415
+                state["m"] = Qwen3ASRModel.from_pretrained(model)
+            out = state["m"].transcribe((audio, 16000), language=None)
         except Exception as e:
             print(f"qwen3 live error (skipped): {e}", file=sys.stderr)
             return []
@@ -67,12 +70,13 @@ def qwen3_batch_backend(model="Qwen/Qwen3-ASR-0.6B"):
     """Offline Qwen3-ASR via the qwen-asr transformers backend. Apple Silicon:
     torch on MPS/CPU (slow, not realtime) — for post-meeting accuracy only.
     Lazy import so the heavy torch/transformers stack isn't required otherwise."""
-    from qwen_asr import Qwen3ASRModel  # noqa: PLC0415
-
-    asr_model = Qwen3ASRModel.from_pretrained(model)
+    state = {}
 
     def _run(audio_path):
-        out = asr_model.transcribe(str(audio_path), language=None)  # auto lang
+        if "m" not in state:  # lazy: don't block startup / first request beyond load
+            from qwen_asr import Qwen3ASRModel  # noqa: PLC0415
+            state["m"] = Qwen3ASRModel.from_pretrained(model)
+        out = state["m"].transcribe(str(audio_path), language=None)  # auto lang
         text = " ".join(t.text for t in out).strip()
         return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
 
