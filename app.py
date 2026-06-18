@@ -139,7 +139,9 @@ function attach(stream, tag, ratio){
     const input = ev.inputBuffer.getChannelData(0);
     let sum=0; for(let i=0;i<input.length;i++) sum+=input[i]*input[i];
     const rms = Math.sqrt(sum/input.length);
-    if(rms > 0.01) hangover = 8; else if(hangover > 0) hangover--;
+    // keep sending ~1.5s after speech so the server sees the full pause even in
+    // paragraph mode (silence_ms up to 1000ms) — else finals never fire.
+    if(rms > 0.01) hangover = 18; else if(hangover > 0) hangover--;
     if(rms <= 0.01 && hangover <= 0) return;
     const outLen = Math.floor(input.length/ratio);
     const pcm = new Int16Array(outLen);
