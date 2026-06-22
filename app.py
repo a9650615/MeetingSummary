@@ -702,10 +702,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
         path = os.path.join("data/uploads", audio.filename)
         with open(path, "wb") as f:
             f.write(await audio.read())
-        result = run_pipeline(path, store=store, title=title, lang=lang,
-                              kind=kind, asr_backend=asr_backend,
-                              summary_backend=summary_backend,
-                              summary_model=summary_model)
+        # Heavy (minutes of transcribe+summary). Run off the event loop so /health
+        # stays responsive — otherwise the supervisor sees a hang and kills it.
+        result = await run_in_threadpool(
+            run_pipeline, path, store=store, title=title, lang=lang,
+            kind=kind, asr_backend=asr_backend,
+            summary_backend=summary_backend, summary_model=summary_model)
         mid = result["meeting_id"]
         return _result_page(title, result["summary"],
                             _rows(store.list_transcripts(mid)))
