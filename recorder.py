@@ -57,6 +57,21 @@ class SegmentWriter:
             f.close()
 
 
+def pcm_to_wav(pcm_bytes, sample_rate=16000, channels=1, bytes_per_sample=2):
+    """Wrap raw PCM in a WAV container so a browser can play it back. Headers
+    only — no resample/transcode."""
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(bytes_per_sample)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm_bytes)
+    return buf.getvalue()
+
+
 def pcm_duration_s(path, sample_rate, channels=1, bytes_per_sample=2):
     """Duration recomputed from raw byte count — never trusts a written field
     (spec M2). 16-bit mono by default."""

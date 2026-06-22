@@ -2,9 +2,12 @@ import io
 import json
 import struct
 
+import wave
+
 from recorder import (
     parse_frames,
     pcm_duration_s,
+    pcm_to_wav,
     record_stream,
     SegmentWriter,
     TRACK_SYSTEM,
@@ -69,3 +72,16 @@ def test_record_stream_writes_both_tracks(tmp_path):
     )
     assert (tmp_path / "system.pcm").read_bytes() == b"\x01\x02"
     assert (tmp_path / "mic.pcm").read_bytes() == b"\xaa\xbb"
+
+
+def test_pcm_to_wav_roundtrips(tmp_path):
+    pcm = b"\x00\x01" * 16000  # 1 s @ 16 kHz 16-bit mono
+    wav = pcm_to_wav(pcm, sample_rate=16000, channels=1)
+    assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE"
+    p = tmp_path / "out.wav"
+    p.write_bytes(wav)
+    with wave.open(str(p)) as w:
+        assert w.getframerate() == 16000
+        assert w.getnchannels() == 1
+        assert w.getsampwidth() == 2
+        assert w.readframes(w.getnframes()) == pcm

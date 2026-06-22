@@ -11,7 +11,7 @@ import time
 
 from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
                      WebSocketDisconnect)
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -71,6 +71,8 @@ table.tx{width:100%;border-collapse:collapse}
 table.tx th{text-align:left;font-size:12px;color:var(--muted);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line)}
 table.tx td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 table.tx td.who{white-space:nowrap;font-weight:600;width:96px}
+table.tx td.ts{white-space:nowrap;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;width:52px}
+table.tx tr[data-ts]:hover{background:#f7f8fb}
 pre.sum{white-space:pre-wrap;font:inherit;background:#fafbfc;border:1px solid var(--line);
  border-radius:10px;padding:14px;margin:8px 0;overflow-x:auto}
 .hint{color:var(--muted);font-size:13px;line-height:1.55}
@@ -362,19 +364,36 @@ def _transcript_text(rows):
     return "\n".join(f"{r['speaker']}: {r['text']}" for r in rows)
 
 
-def _detail_page(mid, meeting, transcripts, summaries):
+_TRACK_LABEL = {"system": "對方", "mic": "我", "mixed": "混合"}
+
+
+def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
+    def ts_str(ms):
+        s = (ms or 0) // 1000
+        return f"{s // 60:d}:{s % 60:02d}"
     rows = "".join(
-        f"<tr><td class=who>{html.escape(str(r['speaker']))}</td>"
+        f"<tr data-track='{html.escape(str(r['track']))}' data-ts='{(r['start_ms'] or 0)/1000:.2f}'>"
+        f"<td class=ts>{ts_str(r['start_ms'])}</td>"
+        f"<td class=who>{html.escape(str(r['speaker']))}</td>"
         f"<td>{html.escape(r['text'])}</td></tr>"
-        for r in transcripts) or "<tr><td colspan=2 class=muted>尚無逐字稿</td></tr>"
+        for r in transcripts) or "<tr><td colspan=3 class=muted>尚無逐字稿</td></tr>"
     sums = "".join(
         f"<h3>{html.escape(s['kind'])}</h3>"
         f"<pre class=sum>{html.escape(s['text'])}</pre>"
         for s in summaries)
+    players = "".join(
+        f"<div style='margin:6px 0'><span class='badge'>{_TRACK_LABEL.get(t, t)}</span> "
+        f"<audio id='aud-{t}' controls preload=none style='vertical-align:middle;height:34px'"
+        f" src='/meetings/{mid}/audio/{t}.wav'></audio></div>"
+        for t in audio_tracks)
+    audio_card = (f"<div class=card><h2 style='margin-top:0'>回放</h2>{players}"
+                  "<p class=hint style='margin:.5em 0 0'>點逐字稿任一行可跳到該段落播放。</p>"
+                  "</div>") if audio_tracks else ""
     badge = "done" if meeting["status"] == "finalized" else "live"
     body = (
         f"<h1>{html.escape(meeting['title'])} "
         f"<span class='badge {badge}'>{html.escape(meeting['status'])}</span></h1>"
+        + audio_card +
         "<div class=card><h2 style='margin-top:0'>摘要</h2>"
         "<div class=row>"
         "<select id=kind><option value=minutes>會議記錄</option>"
@@ -387,7 +406,8 @@ def _detail_page(mid, meeting, transcripts, summaries):
         "「多人分群」用聲紋把對方那軌拆成說話者1/2/3(會後處理,需先有錄音)。</p>"
         f"<div id=out>{sums}</div></div>"
         "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
-        f"<table class=tx><tr><th>說話者</th><th>內容</th></tr>{rows}</table></div>")
+        "<table class=tx><tr><th>時間</th><th>說話者</th><th>內容</th></tr>"
+        f"{rows}</table></div>")
     script = (
         "document.getElementById('go').onclick=async()=>{"
         "const k=document.getElementById('kind').value;"
@@ -404,7 +424,10 @@ def _detail_page(mid, meeting, transcripts, summaries):
         f"const r=await fetch('/meetings/{mid}/diarize',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'system'})});"
         "if(r.ok){const j=await r.json();fm.textContent=' 分出 '+j.speakers+' 位說話者';"
-        "location.reload();}else{fm.textContent=' 分群失敗: '+(await r.text());}};")
+        "location.reload();}else{fm.textContent=' 分群失敗: '+(await r.text());}};"
+        "document.querySelectorAll('tr[data-ts]').forEach(tr=>{tr.style.cursor='pointer';"
+        "tr.onclick=()=>{const a=document.getElementById('aud-'+tr.dataset.track);"
+        "if(a){a.currentTime=parseFloat(tr.dataset.ts);a.play();}};});")
     return _shell(html.escape(meeting["title"]), body, script=script, back=True)
 
 
@@ -433,8 +456,23 @@ def create_app(store, *, summary_backend, asr_backend=None,
         meeting = store.get_meeting(mid)
         if meeting is None:
             raise HTTPException(404, "meeting not found")
+        # Tracks with retained audio (non-empty pcm) -> playback players.
+        audio_tracks = [t for t in ("system", "mic", "mixed")
+                        if os.path.exists(p := f"data/{mid}/{t}.pcm")
+                        and os.path.getsize(p) > 0]
         return _detail_page(mid, dict(meeting), _rows(store.list_transcripts(mid)),
-                            _rows(store.list_summaries(mid)))
+                            _rows(store.list_summaries(mid)), audio_tracks)
+
+    @app.get("/meetings/{mid}/audio/{track}.wav")
+    def meeting_audio(mid: int, track: str):
+        import recorder
+        pcm = f"data/{mid}/{track}.pcm"
+        if track not in ("system", "mic", "mixed") or not os.path.exists(pcm) \
+                or os.path.getsize(pcm) == 0:
+            raise HTTPException(404, "no audio")
+        with open(pcm, "rb") as f:
+            wav = recorder.pcm_to_wav(f.read(), sample_rate=16000, channels=1)
+        return Response(wav, media_type="audio/wav")
 
     @app.get("/models")
     def get_models():
