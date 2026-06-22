@@ -1,14 +1,13 @@
 import modelprofile as mp
 
 
-def test_16gb_uses_vanilla_turbo_large():
-    # belle dropped from auto-pick (incompatible with mlx-whisper 0.4.3).
+def test_16gb_uses_q4_for_efficiency():
+    # q4 (half-RAM) live/interim/fallback to avoid OOM with many resident models.
     rec = mp.recommend({"ram_gb": 16, "arch": "arm64"}, lang="zh-TW")
-    assert rec["live"] == "mlx-community/whisper-large-v3-turbo"
-    assert rec["accurate"] == "mlx-community/whisper-large-v3-mlx"
+    assert rec["live"] == "mlx-community/whisper-large-v3-turbo-q4"
+    assert "q4" in rec["interim"] and all("q4" in m for m in rec["fallback"])
     assert "belle" not in rec["live"] and "belle" not in rec["accurate"]
-    assert isinstance(rec["fallback"], list) and rec["fallback"]
-    assert rec["interim"] and rec["summary"]
+    assert "7B" not in rec["summary"]  # 7B was a big OOM driver
 
 
 def test_smaller_ram_picks_smaller_models():
@@ -17,8 +16,8 @@ def test_smaller_ram_picks_smaller_models():
     small = mp.recommend({"ram_gb": 4}, lang="zh-TW")
     # live model shrinks as RAM drops
     assert big["live"] != mid["live"] != small["live"]
-    assert mid["live"] == "mlx-community/whisper-small-mlx"
-    assert small["live"] == "mlx-community/whisper-base-mlx"
+    assert mid["live"] == "mlx-community/whisper-small-mlx-q4"
+    assert small["live"] == "mlx-community/whisper-base-mlx-q4"
 
 
 def test_detect_hardware_shape():

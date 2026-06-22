@@ -14,6 +14,11 @@ _LARGE = "mlx-community/whisper-large-v3-mlx"
 _SMALL = "mlx-community/whisper-small-mlx"
 _BASE = "mlx-community/whisper-base-mlx"
 _TINY = "mlx-community/whisper-tiny-mlx"
+# 4-bit quantized = ~half the RAM, ~same model. Lighter live/interim/fallback.
+_TURBO_Q4 = "mlx-community/whisper-large-v3-turbo-q4"
+_SMALL_Q4 = "mlx-community/whisper-small-mlx-q4"
+_BASE_Q4 = "mlx-community/whisper-base-mlx-q4"
+_TINY_Q4 = "mlx-community/whisper-tiny-mlx-q4"
 # BELLE Chinese-finetuned whisper: better Mandarin CER, BUT the mlx-community
 # 8-bit ports are incompatible with mlx-whisper 0.4.3 (ModelDimensions rejects
 # 'activation_dropout'). NOT auto-selected — opt in via LIVE_MODEL/ASR_MODEL once
@@ -88,25 +93,27 @@ def recommend(hw, lang="zh-TW"):
     covers English/code-switch if BELLE struggles."""
     ram = hw.get("ram_gb", 16)
     if ram >= 16:
+        # q4 live/interim + 3B summary: several whisper tiers + the LLM can be
+        # resident at once, so favor the lighter quantized variants to avoid OOM.
         return {
-            "live": _TURBO,
-            "interim": _SMALL,
-            "accurate": _LARGE,
-            "summary": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-            "fallback": [_SMALL, _BASE],
+            "live": _TURBO_Q4,
+            "interim": _SMALL_Q4,
+            "accurate": _TURBO_Q4,
+            "summary": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+            "fallback": [_SMALL_Q4, _BASE_Q4],
         }
     if ram >= 8:
         return {
-            "live": _SMALL,
-            "interim": _BASE,
-            "accurate": _TURBO,
-            "summary": "mlx-community/Qwen2.5-3B-Instruct-4bit",
-            "fallback": [_BASE, _TINY],
+            "live": _SMALL_Q4,
+            "interim": _BASE_Q4,
+            "accurate": _TURBO_Q4,
+            "summary": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+            "fallback": [_BASE_Q4, _TINY_Q4],
         }
     return {
-        "live": _BASE,
-        "interim": _TINY,
-        "accurate": _SMALL,
+        "live": _BASE_Q4,
+        "interim": _TINY_Q4,
+        "accurate": _SMALL_Q4,
         "summary": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
-        "fallback": [_TINY],
+        "fallback": [_TINY_Q4],
     }
