@@ -1,6 +1,7 @@
 import os
 
-from app import _assemble_track, _meeting_tracks, iter_transcribe
+from app import (_assemble_track, _meeting_tracks, _run_transcribe_job,
+                 iter_transcribe)
 from store import Store, group_by_proximity
 
 
@@ -23,6 +24,21 @@ def test_iter_transcribe_streams_progress(tmp_path):
     rows = s.list_transcripts(mid)
     assert len(rows) == 2 and rows[1]["start_ms"] >= 1000
     assert not os.path.exists(os.path.join(d, "_win.pcm"))  # temp cleaned
+
+
+def test_run_transcribe_job_records_progress(tmp_path):
+    s = Store(tmp_path / "m.db")
+    mid = s.create_meeting("M", 1000.0, "zh-TW")
+    d = str(tmp_path / "seg")
+    os.makedirs(d)
+    with open(os.path.join(d, "mic.pcm"), "wb") as f:
+        f.write(b"\x00\x01" * 32000)  # 2 s
+    s.add_segment(mid, 0, d, started_at=1000.0, duration_s=2, origin="recorded")
+    jobs = {}
+    _run_transcribe_job(s, mid, lambda p: [{"start": 0, "end": 1, "text": "x"}], jobs)
+    assert jobs[mid]["state"] == "done"
+    assert jobs[mid]["done"] >= 1
+    assert len(s.list_transcripts(mid)) >= 1
 
 
 def test_group_by_proximity():

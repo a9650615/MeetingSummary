@@ -5,15 +5,13 @@ Phase 1 = batch loop: create meeting -> transcribe saved PCM -> summarize -> vie
 Live websocket + recording start/stop (Swift helper) land in Phase 2."""
 import asyncio
 import html
-import json
 import os
 import sys
 import time
 
 from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
                      WebSocketDisconnect)
-from fastapi.responses import (FileResponse, HTMLResponse, Response,
-                                StreamingResponse)
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -488,6 +486,24 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
     yield {"type": "done", "transcripts": n}
 
 
+def _run_transcribe_job(store, mid, backend, jobs):
+    """Run iter_transcribe to completion, recording progress in jobs[mid] so a
+    page can poll it (survives client refresh). Transcripts are stored as they
+    land, so even a server restart keeps partial work."""
+    jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": ""}
+    try:
+        for ev in iter_transcribe(store, mid, backend):
+            if ev["type"] == "start":
+                jobs[mid]["total"] = ev["total"]
+            elif ev["type"] == "progress":
+                jobs[mid].update(done=ev["done"], total=ev["total"], text=ev["text"])
+            elif ev["type"] == "done":
+                jobs[mid] = {"state": "done", "done": ev["transcripts"],
+                             "total": jobs[mid].get("total", 0)}
+    except Exception as e:
+        jobs[mid] = {"state": "error", "msg": str(e)}
+
+
 def _save_upload_pcm(src_path, mid, store):
     """Decode an uploaded file to data/<mid>/mic.pcm (16 kHz mono s16le) via ffmpeg
     so the meeting plays back like a live one. Best-effort: skip if ffmpeg missing
@@ -581,17 +597,26 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         f"const r=await fetch('/meetings/{mid}',{{method:'DELETE'}});"
         "if(r.ok)location.href='/';"
         "else document.getElementById('finmsg').textContent=' 刪除失敗';};"
-        "document.getElementById('retr').onclick=()=>{"
-        "const mdl=document.getElementById('remodel').value;"
-        "const rm=document.getElementById('remsg');rm.textContent=' 啟動中…';"
-        "document.getElementById('retr').disabled=true;"
-        f"const es=new EventSource('/meetings/{mid}/transcribe/stream?model='+encodeURIComponent(mdl));"
-        "es.onmessage=e=>{const m=JSON.parse(e.data);"
-        "if(m.type==='start')rm.textContent=' 開始,共 '+m.total+' 段…';"
-        "else if(m.type==='progress')rm.textContent=` 處理中 ${m.done}/${m.total} — ${m.text||''}`;"
-        "else if(m.type==='done'){es.close();rm.textContent=' 完成 '+m.transcripts+' 段';location.reload();}"
-        "else if(m.type==='error'){es.close();rm.textContent=' 失敗: '+m.msg;}};"
-        "es.onerror=()=>{es.close();rm.textContent=' 連線中斷';};};"
+        # Background job + polling: progress is server-side, so a page refresh
+        # reconnects to the running job instead of losing it. poll() self-manages
+        # the interval — only ticks while a job is active.
+        "const rm=document.getElementById('remsg'),retr=document.getElementById('retr');"
+        "let poller=null;"
+        "function poll(){"
+        f"fetch('/meetings/{mid}/transcribe/progress').then(r=>r.json()).then(p=>{{"
+        "if(p.state==='running'){retr.disabled=true;"
+        "rm.textContent=` 處理中 ${p.done||0}/${p.total||'?'} — ${p.text||''}`;"
+        "if(!poller)poller=setInterval(poll,1000);return;}"
+        "if(poller){clearInterval(poller);poller=null;}"
+        "if(p.state==='done'){rm.textContent=' 完成 '+p.done+' 段';setTimeout(()=>location.reload(),500);}"
+        "else if(p.state==='error'){retr.disabled=false;rm.textContent=' 失敗: '+p.msg;}"
+        "else retr.disabled=false;});}"
+        "retr.onclick=()=>{const mdl=document.getElementById('remodel').value;"
+        "rm.textContent=' 啟動中…';retr.disabled=true;"
+        f"fetch('/meetings/{mid}/transcribe/start',{{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({model:mdl})})"
+        ".then(()=>poll());};"
+        "poll();"  # resume on load if a job is already running
         "document.getElementById('dia').onclick=async()=>{"
         "const fm=document.getElementById('finmsg');fm.textContent=' 分群中…(會後聲紋,需稍候)';"
         f"const r=await fetch('/meetings/{mid}/diarize',{{method:'POST',"
@@ -625,6 +650,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                live_interim_s=0.6, live_max_utt_s=15.0, live_rms_threshold=500,
                live_max_lag_s=4.0):
     app = FastAPI()
+    transcribe_jobs = {}  # mid -> progress dict; survives page refresh (in-memory)
 
     @app.get("/health")
     def health():
@@ -896,29 +922,30 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     n += 1
         return {"transcripts": n}
 
-    @app.get("/meetings/{mid}/transcribe/stream")
-    def transcribe_stream(mid: int, model: str | None = None):
-        # SSE: stream re-transcribe progress window-by-window. Sync generator ->
-        # Starlette iterates it in a threadpool, so /health stays responsive.
+    @app.post("/meetings/{mid}/transcribe/start")
+    def transcribe_start(mid: int, body: TranscribeIn = TranscribeIn()):
+        # Background job + server-side progress -> survives a page refresh.
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
-        if model:
+        if transcribe_jobs.get(mid, {}).get("state") == "running":
+            return {"state": "running"}  # already in progress
+        if body.model:
             import backends
-            backend = backends.make_batch_backend(model)
+            backend = backends.make_batch_backend(body.model)
         elif asr_backend is not None:
             backend = asr_backend
         else:
             raise HTTPException(503, "no ASR backend configured")
         store.clear_transcripts(mid, profile="accurate")
+        import threading
+        threading.Thread(target=_run_transcribe_job,
+                         args=(store, mid, backend, transcribe_jobs),
+                         daemon=True).start()
+        return {"state": "started"}
 
-        def gen():
-            try:
-                for ev in iter_transcribe(store, mid, backend):
-                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-            except Exception as e:  # surface failures to the client, don't hang
-                yield f"data: {json.dumps({'type': 'error', 'msg': str(e)})}\n\n"
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
+    @app.get("/meetings/{mid}/transcribe/progress")
+    def transcribe_progress(mid: int):
+        return transcribe_jobs.get(mid, {"state": "idle"})
 
     @app.post("/ingest", response_class=HTMLResponse)
     async def ingest(audio: UploadFile = File(...), title: str = Form("實測"),
