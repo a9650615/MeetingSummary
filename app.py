@@ -706,6 +706,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
         for seg in store.list_segments(mid):
             for track_label, name in (("system", "system.pcm"), ("mic", "mic.pcm")):
                 pcm = f"{seg['dir_path']}/{name}"
+                if not os.path.exists(pcm) or os.path.getsize(pcm) == 0:
+                    continue  # track not present for this segment
                 for t in asr.transcribe(pcm, profile="accurate",
                                         track=track_label, backend=asr_backend):
                     store.add_transcript(mid, t["profile"], t["track"],
