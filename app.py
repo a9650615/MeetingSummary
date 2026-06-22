@@ -73,6 +73,8 @@ table.tx td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:
 table.tx td.who{white-space:nowrap;font-weight:600;width:96px}
 table.tx td.ts{white-space:nowrap;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;width:52px}
 table.tx tr[data-ts]:hover{background:#f7f8fb}
+table.tx tr.active{background:#eef0ff!important;box-shadow:inset 3px 0 0 var(--accent)}
+table.tx tr.active td{color:var(--ink)}
 pre.sum{white-space:pre-wrap;font:inherit;background:#fafbfc;border:1px solid var(--line);
  border-radius:10px;padding:14px;margin:8px 0;overflow-x:auto}
 .hint{color:var(--muted);font-size:13px;line-height:1.55}
@@ -427,7 +429,21 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "location.reload();}else{fm.textContent=' 分群失敗: '+(await r.text());}};"
         "document.querySelectorAll('tr[data-ts]').forEach(tr=>{tr.style.cursor='pointer';"
         "tr.onclick=()=>{const a=document.getElementById('aud-'+tr.dataset.track);"
-        "if(a){a.currentTime=parseFloat(tr.dataset.ts);a.play();}};});")
+        "if(a){a.currentTime=parseFloat(tr.dataset.ts);a.play();}};});"
+        # Follow-along: as a track's audio plays, highlight + scroll to the line
+        # whose start time is the latest <= currentTime (end_ms==start_ms for live,
+        # so use the next line's start as the implicit boundary).
+        "document.querySelectorAll('audio[id^=aud-]').forEach(a=>{"
+        "const trk=a.id.slice(4);"
+        "const rows=[...document.querySelectorAll(`tr[data-track=\"${trk}\"]`)]"
+        ".map(tr=>({tr,ts:parseFloat(tr.dataset.ts)})).sort((x,y)=>x.ts-y.ts);"
+        "let last=null;"
+        "a.ontimeupdate=()=>{const t=a.currentTime;let cur=null;"
+        "for(const r of rows){if(r.ts<=t+0.05)cur=r;else break;}"
+        "if(cur===last)return;"
+        "rows.forEach(r=>r.tr.classList.toggle('active',r===cur));"
+        "if(cur)cur.tr.scrollIntoView({block:'nearest',behavior:'smooth'});last=cur;};"
+        "});")
     return _shell(html.escape(meeting["title"]), body, script=script, back=True)
 
 
