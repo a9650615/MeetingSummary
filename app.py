@@ -445,7 +445,7 @@ def _save_upload_pcm(src_path, mid, store):
     import subprocess
     if not shutil.which("ffmpeg"):
         return
-    out_dir = f"data/{mid}"
+    out_dir = f"data/{mid}-{int(time.time())}"  # unique: reused ids can't collide
     os.makedirs(out_dir, exist_ok=True)
     pcm = f"{out_dir}/mic.pcm"
     try:
@@ -636,14 +636,16 @@ def create_app(store, *, summary_backend, asr_backend=None,
             track=lbl[0]) for tag, lbl in tracks.items()}
         buffers = {tag: bytearray() for tag in tracks}
 
-        # Save raw audio per track (all of it, even live-dropped) for the
-        # post-meeting diarization pass. Append-only, crash-safe.
-        audio_dir = f"data/{mid}"
+        # Save raw audio per track for the post-meeting diarization/playback pass.
+        # Unique dir per connection (id + start ts): SQLite recycles deleted ids
+        # after merges, so a plain data/<mid> could collide with a leftover dir and
+        # append onto stale audio. _assemble_track stitches segments by time offset,
+        # so a resumed session's new dir is just another ordered segment.
+        audio_dir = f"data/{mid}-{int(t0)}"
         os.makedirs(audio_dir, exist_ok=True)
         store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
                           started_at=t0, duration_s=0, origin="recorded")
-        # Append so a session's multiple recordings accumulate into one track file.
-        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "ab")
+        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
                        for tag, lbl in tracks.items()}
 
         # Live multi-speaker (?diarize=1): per-track online voiceprint clustering
