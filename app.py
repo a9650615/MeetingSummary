@@ -793,13 +793,15 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
         import shutil
-        orphans = store.delete_meeting(mid)
-        for d in orphans:  # remove audio dirs no longer referenced by any meeting
-            if d.startswith("data/") and os.path.isdir(d):
+        orphans = store.delete_meeting(mid)  # only dirs no meeting references anymore
+        for d in orphans:  # store-reported segment dirs (trusted, app-created)
+            if d and d not in ("/", ".") and os.path.isdir(d):
                 shutil.rmtree(d, ignore_errors=True)
-        cache = f"data/{mid}"  # stale wav cache dir, if any
-        if os.path.isdir(cache):
-            shutil.rmtree(cache, ignore_errors=True)
+        # Remove only this meeting's cache wav FILES (never a shared segment dir).
+        for t in _TRACKS:
+            cache = f"data/{mid}/_play_{t}.wav"
+            if os.path.exists(cache):
+                os.remove(cache)
         return {"deleted": mid}
 
     @app.get("/meetings/{mid}")

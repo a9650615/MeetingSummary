@@ -95,6 +95,22 @@ def test_delete_meeting_route(tmp_path):
     assert c.delete(f"/meetings/{mid}").status_code == 404
 
 
+def test_delete_preserves_dir_shared_with_another_meeting(tmp_path):
+    import os
+    c, store = make_client(tmp_path)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "mic.pcm").write_bytes(b"\x00" * 100)
+    a = store.create_meeting("A", 1.0, "zh")
+    b = store.create_meeting("B", 2.0, "zh")
+    store.add_segment(a, 0, str(shared), 1.0, 0, "recorded")
+    store.add_segment(b, 0, str(shared), 2.0, 0, "recorded")
+    c.delete(f"/meetings/{a}")
+    assert (shared / "mic.pcm").exists()       # still referenced by B -> kept
+    c.delete(f"/meetings/{b}")
+    assert not (shared / "mic.pcm").exists()    # last ref gone -> removed
+
+
 def test_list_meetings_has_audio_flag(tmp_path):
     import os
     c, store = make_client(tmp_path)
