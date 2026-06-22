@@ -601,18 +601,19 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         # reconnects to the running job instead of losing it. poll() self-manages
         # the interval — only ticks while a job is active.
         "const rm=document.getElementById('remsg'),retr=document.getElementById('retr');"
-        "let poller=null;"
+        "let poller=null,sawRunning=false;"  # only reload after we watched it finish
         "function poll(){"
         f"fetch('/meetings/{mid}/transcribe/progress').then(r=>r.json()).then(p=>{{"
-        "if(p.state==='running'){retr.disabled=true;"
+        "if(p.state==='running'){sawRunning=true;retr.disabled=true;"
         "rm.textContent=` 處理中 ${p.done||0}/${p.total||'?'} — ${p.text||''}`;"
         "if(!poller)poller=setInterval(poll,1000);return;}"
         "if(poller){clearInterval(poller);poller=null;}"
-        "if(p.state==='done'){rm.textContent=' 完成 '+p.done+' 段';setTimeout(()=>location.reload(),500);}"
+        "if(p.state==='done'){rm.textContent=' 完成 '+p.done+' 段';"
+        "if(sawRunning){sawRunning=false;setTimeout(()=>location.reload(),500);}}"  # reload once
         "else if(p.state==='error'){retr.disabled=false;rm.textContent=' 失敗: '+p.msg;}"
         "else retr.disabled=false;});}"
         "retr.onclick=()=>{const mdl=document.getElementById('remodel').value;"
-        "rm.textContent=' 啟動中…';retr.disabled=true;"
+        "rm.textContent=' 啟動中…';retr.disabled=true;sawRunning=true;"
         f"fetch('/meetings/{mid}/transcribe/start',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({model:mdl})})"
         ".then(()=>poll());};"
