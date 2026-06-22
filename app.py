@@ -19,27 +19,106 @@ import asr
 from live import TwoPassSession
 from summarize import summarize
 
-_INDEX = """<!doctype html><meta charset=utf-8><title>MeetingSummary</title>
-<h1>MeetingSummary</h1>
-<form action="/ingest" method="post" enctype="multipart/form-data">
-  <p>音檔 (wav/m4a/mp3): <input type="file" name="audio" required></p>
-  <p>標題: <input name="title" value="實測"></p>
-  <p>摘要型式:
-    <select name="kind">
-      <option value="minutes">會議記錄 minutes</option>
-      <option value="bullets">條列 bullets</option>
-    </select></p>
-  <button type="submit">上傳並產生摘要</button>
-</form>
-<p>上傳後會跑 transcribe + summary，第一次會下載模型，請稍候。</p>
-<p><a href="/live"><b>🔴 Live mode（即時逐字稿）</b></a></p>
-<h2>會議</h2>
-<button id=mergebtn>整合相近的 live 會議</button> <span id=mergemsg style=color:#888></span>
-<ul id=meetings></ul>
-<script>
+# Shared design system — calm zh-TW productivity aesthetic. Served pages (not a
+# claude.ai Artifact), so a full self-styled doc is fine.
+_STYLE = """
+*{box-sizing:border-box}
+:root{--bg:#f4f5f8;--surface:#fff;--ink:#16181d;--muted:#697086;--line:#e7e9ef;
+ --accent:#4f46e5;--accent2:#6366f1;--me:#1565c0;--other:#2e7d32;--danger:#dc2626;
+ --radius:12px;--shadow:0 1px 2px rgba(16,24,40,.04),0 6px 20px rgba(16,24,40,.06)}
+body{margin:0;background:var(--bg);color:var(--ink);
+ font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Segoe UI",Roboto,sans-serif}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:880px;margin:0 auto;padding:22px 20px 72px}
+header.top{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+.brand{font-weight:750;font-size:17px;letter-spacing:-.01em}
+.brand .dot{color:var(--accent)}
+.spacer{flex:1}
+h1{font-size:24px;font-weight:750;letter-spacing:-.02em;margin:.1em 0 .7em}
+h2{font-size:15px;font-weight:700;margin:26px 0 12px;color:var(--ink)}
+h3{font-size:14px;font-weight:700;margin:14px 0 6px;color:var(--muted)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+ box-shadow:var(--shadow);padding:18px 20px;margin:14px 0}
+.muted{color:var(--muted)}.small{font-size:13px}
+.row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+label.fld{display:inline-flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600}
+label.chk{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink)}
+input[type=text],input[type=file],input:not([type]),select{font:inherit;padding:.5em .65em;
+ border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink)}
+select{cursor:pointer}
+.btn{font:inherit;font-weight:600;padding:.55em 1em;border-radius:8px;border:1px solid var(--line);
+ background:var(--surface);color:var(--ink);cursor:pointer;transition:.12s;display:inline-block}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line);color:var(--ink)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:var(--accent2);color:#fff}
+.btn.danger{color:var(--danger);border-color:#f0cccc}
+.btn.danger:hover{background:var(--danger);color:#fff;border-color:var(--danger)}
+.badge{display:inline-block;font-size:11px;font-weight:700;padding:.18em .6em;border-radius:999px;
+ background:#eceef3;color:var(--muted)}
+.badge.live{background:#fde7e7;color:#c0392b}.badge.done{background:#e6f5ec;color:#1e7d3a}
+ul.meetings{list-style:none;margin:0;padding:0}
+ul.meetings li{display:flex;align-items:center;gap:10px;padding:11px 2px;border-bottom:1px solid var(--line)}
+ul.meetings li:last-child{border:0}ul.meetings a{font-weight:600;flex:1}
+.caption{font-size:clamp(22px,4.2vw,34px);font-weight:750;line-height:1.32;background:#0f1115;
+ color:#fff;border-radius:14px;padding:18px 22px;min-height:1.4em;margin:16px 0 8px}
+.liveline{color:var(--muted);font-size:17px;min-height:1.5em;margin:6px 2px 14px}
+.tline{padding:8px 2px;border-bottom:1px solid var(--line);display:flex;gap:12px}
+.tline:last-child{border:0}
+.tline .ts{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap;padding-top:3px}
+.tline .who{font-weight:700}
+table.tx{width:100%;border-collapse:collapse}
+table.tx th{text-align:left;font-size:12px;color:var(--muted);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line)}
+table.tx td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+table.tx td.who{white-space:nowrap;font-weight:600;width:96px}
+pre.sum{white-space:pre-wrap;font:inherit;background:#fafbfc;border:1px solid var(--line);
+ border-radius:10px;padding:14px;margin:8px 0;overflow-x:auto}
+.hint{color:var(--muted);font-size:13px;line-height:1.55}
+"""
+
+
+def _shell(title, body, script="", back=False):
+    nav = '<a href="/">&larr; 回首頁</a>' if back else ''
+    return (
+        "<!doctype html><html lang=zh-Hant><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        f"<title>{title}</title><style>{_STYLE}</style></head><body><div class=wrap>"
+        "<header class=top><span class=brand>📝 Meeting<span class=dot>·</span>Summary</span>"
+        f"<span class=spacer></span>{nav}</header>{body}</div>"
+        + (f"<script>{script}</script>" if script else "")
+        + "</body></html>"
+    )
+
+
+_INDEX = _shell("MeetingSummary", """
+<h1>本地會議轉錄 · 摘要</h1>
+<a class="btn primary" href="/live" style="font-size:16px;padding:.7em 1.2em">🔴 開始 Live 即時逐字稿</a>
+<h2>上傳音檔</h2>
+<div class=card>
+  <form action="/ingest" method="post" enctype="multipart/form-data" class=row>
+    <label class=fld>音檔 (wav/m4a/mp3)<input type=file name=audio required></label>
+    <label class=fld>標題<input name=title value="實測"></label>
+    <label class=fld>摘要型式<select name=kind>
+      <option value=minutes>會議記錄 minutes</option>
+      <option value=bullets>條列 bullets</option></select></label>
+    <button class="btn primary" type=submit>上傳並產生摘要</button>
+  </form>
+  <p class=hint style="margin:.8em 0 0">上傳後會跑 transcribe + summary，第一次會下載模型，請稍候。</p>
+</div>
+<h2>會議紀錄</h2>
+<div class=card>
+  <div class=row style="margin-bottom:6px">
+    <button class=btn id=mergebtn>整合相近的 live 會議</button>
+    <span class="muted small" id=mergemsg></span>
+  </div>
+  <ul class=meetings id=meetings></ul>
+</div>
+""", script="""
 fetch('/meetings').then(r=>r.json()).then(ms=>{
-  document.getElementById('meetings').innerHTML =
-    ms.map(m=>`<li><a href="/m/${m.id}">${m.title}</a> (${m.status})</li>`).join('');
+  document.getElementById('meetings').innerHTML = ms.length
+    ? ms.map(m=>`<li><a href="/m/${m.id}">${m.title}</a>
+        <span class="badge ${m.status==='finalized'?'done':'live'}">${m.status}</span></li>`).join('')
+    : '<li class="muted small">尚無會議</li>';
 });
 document.getElementById('mergebtn').onclick = async () => {
   const mm=document.getElementById('mergemsg'); mm.textContent='整合中…';
@@ -48,62 +127,69 @@ document.getElementById('mergebtn').onclick = async () => {
   mm.textContent=' 已整合 '+j.merged_groups+' 組';
   setTimeout(()=>location.reload(),600);
 };
-</script>"""
+""")
 
 
 def _result_page(title, summary, transcripts):
     lines = "".join(
-        f"<tr><td>{r['track']}</td><td>{html.escape(r['text'])}</td></tr>"
-        for r in transcripts
-    )
-    return f"""<!doctype html><meta charset=utf-8><title>{html.escape(title)}</title>
-<p><a href="/">&larr; 回首頁</a></p>
-<h1>{html.escape(title)}</h1>
-<h2>摘要</h2><pre style="white-space:pre-wrap">{html.escape(summary)}</pre>
-<h2>逐字稿</h2><table border=1 cellpadding=4>{lines}</table>"""
+        f"<tr><td class=who>{html.escape(str(r['track']))}</td>"
+        f"<td>{html.escape(r['text'])}</td></tr>"
+        for r in transcripts)
+    body = (
+        f"<h1>{html.escape(title)}</h1>"
+        f"<div class=card><h2 style='margin-top:0'>摘要</h2>"
+        f"<pre class=sum>{html.escape(summary)}</pre></div>"
+        f"<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
+        f"<table class=tx><tr><th>軌</th><th>內容</th></tr>{lines}</table></div>")
+    return _shell(html.escape(title), body, back=True)
 
 
 # Live page: browser mic -> 16 kHz Int16 PCM over websocket -> server ASR.
 # ScriptProcessorNode is deprecated but needs no separate worklet file.
 # ponytail: swap to AudioWorklet if latency/jank shows up.
-_LIVE = """<!doctype html><meta charset=utf-8><title>Live</title>
-<p><a href="/">&larr; 回首頁</a></p>
-<h1>🔴 Live 逐字稿</h1>
-<label>來源:
-  <select id=source>
-    <option value="mic">麥克風(我)</option>
-    <option value="system">系統音(對方)</option>
-    <option value="both">兩者(混合)</option>
-    <option value="dual">分軌(我 + 對方,分開標示)</option>
-  </select>
-</label>
-<label><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
-<label>辨識單元:
-  <select id=unit>
-    <option value="sentence">句子(快)</option>
-    <option value="paragraph">段落(較準,等較久)</option>
-  </select>
-</label>
-<button id=start>開始</button> <button id=stop disabled>停止</button>
-<button id=newsess>新 session</button>
-<span id=status></span>
-<p>
-  即時模型:
-  <select id=model>
-    <option value="mlx-community/whisper-large-v3-turbo">turbo(較準)</option>
-    <option value="mlx-community/whisper-small-mlx">small(快)</option>
-    <option value="mlx-community/whisper-base-mlx">base(最快)</option>
-    <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR(最準·較慢·首次載入久)</option>
-  </select>
-  <span id=curmodel style="color:#888"></span>
-  <span style="color:#888"> · 精校: <b id=accmodel>-</b></span>
-</p>
-<p style="color:#888">系統音/兩者:會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>。兩者建議戴耳機(否則麥克風會收到喇叭回音)。模型可即時切換,免重啟。</p>
-<div id=caption style="margin:0.6em 0;padding:0.5em;min-height:1.6em;
-  font-size:2em;font-weight:bold;background:#111;color:#fff;border-radius:6px"></div>
-<div id=live style="color:#aaa;font-size:1.1em;min-height:1.5em;margin:.4em 0"></div>
-<div id=transcript style="font-size:1em;color:#444"></div>
-<script>
+_LIVE_BODY = """
+<h1>🔴 Live 即時逐字稿</h1>
+<div class=card>
+  <div class=row>
+    <label class=fld>來源
+      <select id=source>
+        <option value="mic">麥克風(我)</option>
+        <option value="system">系統音(對方)</option>
+        <option value="both">兩者(混合)</option>
+        <option value="dual">分軌(我 + 對方,分開標示)</option>
+      </select></label>
+    <label class=fld>辨識單元
+      <select id=unit>
+        <option value="sentence">句子(快)</option>
+        <option value="paragraph">段落(較準,等較久)</option>
+      </select></label>
+    <label class=fld>即時模型
+      <select id=model>
+        <option value="mlx-community/whisper-large-v3-turbo">turbo(較準)</option>
+        <option value="mlx-community/whisper-small-mlx">small(快)</option>
+        <option value="mlx-community/whisper-base-mlx">base(最快)</option>
+        <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR(最準·較慢)</option>
+      </select></label>
+    <label class=chk style="align-self:end"><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
+  </div>
+  <div class=row style="margin-top:14px">
+    <button class="btn primary" id=start>開始</button>
+    <button class=btn id=stop disabled>停止</button>
+    <button class=btn id=newsess>新 session</button>
+    <span class="muted small" id=status></span>
+  </div>
+  <p class=hint style="margin:.7em 0 0">
+    <span id=curmodel></span> · 精校:<b id=accmodel>-</b><br>
+    系統音/兩者會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>;兩者建議戴耳機。模型可即時切換,免重啟。</p>
+</div>
+<div class=caption id=caption></div>
+<div class=liveline id=live></div>
+<div class=tlist id=transcript></div>
+"""
+
+# Live page: browser mic -> 16 kHz Int16 PCM over websocket -> server ASR.
+# ScriptProcessorNode is deprecated but needs no separate worklet file.
+_LIVE_JS = """
 let ws, ctx, gain, streams=[], nodes=[], mid, session=null;
 const T=document.getElementById('transcript'), S=document.getElementById('status');
 const C=document.getElementById('caption'), L=document.getElementById('live');
@@ -197,10 +283,14 @@ startBtn.onclick = async () => {
       const sp=m.speaker||'';
       C.textContent = m.text;
       const tstr = m.ts ? new Date(m.ts*1000).toLocaleTimeString() : (m.start_ms/1000).toFixed(1)+'s';
-      const p=document.createElement('p');
-      p.style.color = colored(sp);
-      p.textContent = `[${tstr}] ${sp?sp+': ':''}${m.text}`;
-      T.insertAdjacentElement('afterbegin', p);     // newest history on top, below #live
+      const line=document.createElement('div'); line.className='tline';
+      const ts=document.createElement('span'); ts.className='ts'; ts.textContent=tstr;
+      const bd=document.createElement('span');
+      if(sp){const w=document.createElement('b'); w.className='who';
+        w.style.color=colored(sp); w.textContent=sp+'：'; bd.appendChild(w);}
+      bd.appendChild(document.createTextNode(m.text));
+      line.appendChild(ts); line.appendChild(bd);
+      T.insertAdjacentElement('afterbegin', line);  // newest on top, below #live
       L.textContent='';                             // utterance committed
     }
     else if(m.type==='notice'){ S.textContent=' ⚡ '+m.msg;
@@ -226,7 +316,9 @@ stopBtn.onclick = () => {
   S.textContent += mid ? ` 已停止。可到首頁對 #${mid} 產生摘要。` : ' 已停止。';
   startBtn.disabled=false; stopBtn.disabled=true;
 };
-</script>"""
+"""
+
+_LIVE = _shell("Live · MeetingSummary", _LIVE_BODY, script=_LIVE_JS, back=True)
 
 
 class MeetingIn(BaseModel):
@@ -272,50 +364,48 @@ def _transcript_text(rows):
 
 def _detail_page(mid, meeting, transcripts, summaries):
     rows = "".join(
-        f"<tr><td>{html.escape(str(r['speaker']))}</td>"
+        f"<tr><td class=who>{html.escape(str(r['speaker']))}</td>"
         f"<td>{html.escape(r['text'])}</td></tr>"
-        for r in transcripts)
+        for r in transcripts) or "<tr><td colspan=2 class=muted>尚無逐字稿</td></tr>"
     sums = "".join(
         f"<h3>{html.escape(s['kind'])}</h3>"
-        f"<pre style='white-space:pre-wrap'>{html.escape(s['text'])}</pre>"
+        f"<pre class=sum>{html.escape(s['text'])}</pre>"
         for s in summaries)
-    return (
-        "<!doctype html><meta charset=utf-8><title>"
-        + html.escape(meeting["title"]) + "</title>"
-        "<p><a href='/'>&larr; 回首頁</a></p>"
-        "<h1>" + html.escape(meeting["title"])
-        + " <small>(" + html.escape(meeting["status"]) + ")</small></h1>"
-        "<h2>摘要</h2>"
+    badge = "done" if meeting["status"] == "finalized" else "live"
+    body = (
+        f"<h1>{html.escape(meeting['title'])} "
+        f"<span class='badge {badge}'>{html.escape(meeting['status'])}</span></h1>"
+        "<div class=card><h2 style='margin-top:0'>摘要</h2>"
+        "<div class=row>"
         "<select id=kind><option value=minutes>會議記錄</option>"
-        "<option value=bullets>條列</option></select> "
-        "<button id=go>產生摘要</button> "
-        "<button id=dia>多人分群(對方)</button> "
-        "<button id=fin>完成會議</button> <span id=finmsg></span>"
-        "<p style='color:#888'>※ 摘要只在你按下按鈕時才產生。停止錄音不會自動完成。"
-        " 「多人分群」用聲紋把對方那軌拆成說話者1/2/3(會後處理,需先有錄音)。</p>"
-        "<div id=out>" + sums + "</div>"
-        "<h2>逐字稿</h2><table border=1 cellpadding=4>"
-        "<tr><th>說話者</th><th>內容</th></tr>" + rows + "</table>"
-        "<script>"
+        "<option value=bullets>條列</option></select>"
+        "<button class='btn primary' id=go>產生摘要</button>"
+        "<button class=btn id=dia>多人分群(對方)</button>"
+        "<button class=btn id=fin>完成會議</button>"
+        "<span class='muted small' id=finmsg></span></div>"
+        "<p class=hint style='margin:.6em 0 0'>※ 摘要只在按下按鈕時才產生。停止錄音不會自動完成。"
+        "「多人分群」用聲紋把對方那軌拆成說話者1/2/3(會後處理,需先有錄音)。</p>"
+        f"<div id=out>{sums}</div></div>"
+        "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
+        f"<table class=tx><tr><th>說話者</th><th>內容</th></tr>{rows}</table></div>")
+    script = (
         "document.getElementById('go').onclick=async()=>{"
         "const k=document.getElementById('kind').value;"
         "const o=document.getElementById('out');o.textContent='產生中…';"
-        "const r=await fetch('/meetings/" + str(mid) + "/summary',{method:'POST',"
+        f"const r=await fetch('/meetings/{mid}/summary',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k})});"
         "const j=await r.json();const p=document.createElement('pre');"
-        "p.style.whiteSpace='pre-wrap';p.textContent=j.text;"
-        "o.innerHTML='';o.appendChild(p);};"
+        "p.className='sum';p.textContent=j.text;o.innerHTML='';o.appendChild(p);};"
         "document.getElementById('fin').onclick=async()=>{"
-        "await fetch('/meetings/" + str(mid) + "/finalize',{method:'POST'});"
+        f"await fetch('/meetings/{mid}/finalize',{{method:'POST'}});"
         "document.getElementById('finmsg').textContent=' 已完成。';};"
         "document.getElementById('dia').onclick=async()=>{"
         "const fm=document.getElementById('finmsg');fm.textContent=' 分群中…(會後聲紋,需稍候)';"
-        "const r=await fetch('/meetings/" + str(mid) + "/diarize',{method:'POST',"
+        f"const r=await fetch('/meetings/{mid}/diarize',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'system'})});"
         "if(r.ok){const j=await r.json();fm.textContent=' 分出 '+j.speakers+' 位說話者';"
-        "location.reload();}else{fm.textContent=' 分群失敗: '+(await r.text());}};"
-        "</script>"
-    )
+        "location.reload();}else{fm.textContent=' 分群失敗: '+(await r.text());}};")
+    return _shell(html.escape(meeting["title"]), body, script=script, back=True)
 
 
 def create_app(store, *, summary_backend, asr_backend=None,
