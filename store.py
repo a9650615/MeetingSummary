@@ -3,6 +3,23 @@ Schema per docs spec §4. Audio bytes live on disk under data/."""
 import sqlite3
 from pathlib import Path
 
+
+def group_by_proximity(meetings, gap_s=600):
+    """Group meetings whose consecutive start times are within gap_s. Each input
+    is a dict/row with id + created_at. Returns groups of >=2 ids (sorted by
+    time); lone meetings are dropped — only mergeable clusters come back."""
+    ms = sorted(meetings, key=lambda m: m["created_at"])
+    groups, cur = [], []
+    for m in ms:
+        if cur and m["created_at"] - cur[-1]["created_at"] > gap_s:
+            if len(cur) >= 2:
+                groups.append([x["id"] for x in cur])
+            cur = []
+        cur.append(m)
+    if len(cur) >= 2:
+        groups.append([x["id"] for x in cur])
+    return groups
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meetings(
     id INTEGER PRIMARY KEY, title TEXT, created_at REAL, lang TEXT,
@@ -103,3 +120,40 @@ class Store:
             "SELECT * FROM summaries WHERE meeting_id=? ORDER BY created_at",
             (meeting_id,),
         ).fetchall()
+
+    def merge_meetings(self, target_id, source_ids):
+        """Fold sources into target: transcripts/segments reassigned, transcript
+        start_ms rebased by the created_at gap so the timeline stays ordered.
+        Sources (and their summaries) are deleted. Audio files stay in place —
+        segment dir_path still points at them."""
+        target = self.get_meeting(target_id)
+        if target is None:
+            raise ValueError("target meeting not found")
+        base = target["created_at"]
+        next_idx = len(self.list_segments(target_id))
+        for sid in source_ids:
+            if sid == target_id:
+                continue
+            src = self.get_meeting(sid)
+            if src is None:
+                continue
+            offset_ms = int((src["created_at"] - base) * 1000)
+            self.db.execute(
+                "UPDATE transcripts SET meeting_id=?, start_ms=start_ms+?, "
+                "end_ms=end_ms+? WHERE meeting_id=?",
+                (target_id, offset_ms, offset_ms, sid))
+            for seg in self.list_segments(sid):
+                self.db.execute("UPDATE segments SET meeting_id=?, idx=? WHERE id=?",
+                                (target_id, next_idx, seg["id"]))
+                next_idx += 1
+            self.db.execute("DELETE FROM summaries WHERE meeting_id=?", (sid,))
+            self.db.execute("DELETE FROM meetings WHERE id=?", (sid,))
+        self.db.commit()
+        return target_id
+
+    def merge_into_earliest(self, ids):
+        """Merge a set of meetings into whichever started first."""
+        rows = [self.get_meeting(i) for i in ids]
+        rows = [r for r in rows if r is not None]
+        target = min(rows, key=lambda r: r["created_at"])["id"]
+        return self.merge_meetings(target, [r["id"] for r in rows if r["id"] != target])

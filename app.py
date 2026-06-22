@@ -34,12 +34,20 @@ _INDEX = """<!doctype html><meta charset=utf-8><title>MeetingSummary</title>
 <p>上傳後會跑 transcribe + summary，第一次會下載模型，請稍候。</p>
 <p><a href="/live"><b>🔴 Live mode（即時逐字稿）</b></a></p>
 <h2>會議</h2>
+<button id=mergebtn>整合相近的 live 會議</button> <span id=mergemsg style=color:#888></span>
 <ul id=meetings></ul>
 <script>
 fetch('/meetings').then(r=>r.json()).then(ms=>{
   document.getElementById('meetings').innerHTML =
     ms.map(m=>`<li><a href="/m/${m.id}">${m.title}</a> (${m.status})</li>`).join('');
 });
+document.getElementById('mergebtn').onclick = async () => {
+  const mm=document.getElementById('mergemsg'); mm.textContent='整合中…';
+  const r=await fetch('/meetings/merge-nearby?gap_min=10',{method:'POST'});
+  const j=await r.json();
+  mm.textContent=' 已整合 '+j.merged_groups+' 組';
+  setTimeout(()=>location.reload(),600);
+};
 </script>"""
 
 
@@ -232,6 +240,10 @@ class SummaryIn(BaseModel):
 
 class ModelIn(BaseModel):
     live: str
+
+
+class MergeIn(BaseModel):
+    ids: list[int]
 
 
 class DiarizeIn(BaseModel):
@@ -572,6 +584,22 @@ def create_app(store, *, summary_backend, asr_backend=None,
             raise HTTPException(404, "meeting not found")
         store.finalize_meeting(mid)  # explicit only — stopping live does not
         return {"status": "finalized"}
+
+    @app.post("/meetings/merge")
+    def merge_meetings(body: MergeIn):
+        if len(body.ids) < 2:
+            raise HTTPException(400, "need >=2 meetings to merge")
+        return {"target": store.merge_into_earliest(body.ids)}
+
+    @app.post("/meetings/merge-nearby")
+    def merge_nearby(gap_min: float = 10.0):
+        from store import group_by_proximity
+        meetings = [dict(m) for m in store.list_meetings()]
+        groups = group_by_proximity(meetings, gap_s=gap_min * 60)
+        for g in groups:
+            store.merge_into_earliest(g)
+        return {"merged_groups": len(groups),
+                "merged_meetings": sum(len(g) for g in groups)}
 
     @app.post("/meetings/{mid}/diarize")
     def diarize_meeting(mid: int, body: DiarizeIn):

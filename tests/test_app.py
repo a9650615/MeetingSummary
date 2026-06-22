@@ -11,6 +11,16 @@ def make_client(tmp_path, summary_backend=None, asr_backend=None):
     return TestClient(app), store
 
 
+def test_merge_nearby_route(tmp_path):
+    c, store = make_client(tmp_path)
+    store.create_meeting("A", 1000.0, "zh-TW")
+    store.create_meeting("B", 1060.0, "zh-TW")   # 1 min later -> within 10 min
+    store.create_meeting("C", 9000.0, "zh-TW")   # far -> untouched
+    r = c.post("/meetings/merge-nearby?gap_min=10")
+    assert r.status_code == 200 and r.json()["merged_groups"] == 1
+    assert len(store.list_meetings()) == 2       # A+B merged, C kept
+
+
 def test_create_and_list_meeting(tmp_path):
     c, _ = make_client(tmp_path)
     r = c.post("/meetings", json={"title": "standup", "lang": "zh-TW"})
