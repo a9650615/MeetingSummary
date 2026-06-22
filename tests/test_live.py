@@ -94,6 +94,16 @@ def test_twopass_skips_interim_when_not_wanted():
     assert "interim" not in calls  # interim model never called
 
 
+def test_discarded_blip_still_advances_timeline():
+    # A too-short blip is dropped from ASR, but its audio is in the saved file,
+    # so the committed-byte clock (= timestamp basis) must still advance — else
+    # later timestamps drift ahead of the audio (paragraph-mode bug).
+    s = TwoPassSession(backend=lambda a: [], frame_ms=30, silence_ms=90,
+                       min_speech_ms=100000, interim_s=100)  # nothing ever "enough"
+    s.feed(tone(150) + silence(150))  # speech+silence, force-discarded as a blip
+    assert s._committed_bytes > 0     # bytes counted despite discard
+
+
 def test_twopass_no_work_on_silence():
     # Perf: pure silence must not call any backend.
     calls = []

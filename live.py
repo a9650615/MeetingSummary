@@ -244,7 +244,11 @@ class TwoPassSession:
 
     def _finalize(self):
         # Drop blips (cough/breath) BEFORE the ASR call — saves compute (perf).
+        # But STILL advance the committed-byte clock by their length: the audio
+        # file keeps those bytes, so skipping them would make every later
+        # timestamp drift ahead of the audio (worse with paragraph-size windows).
         if not self._enough_speech():
+            self._committed_bytes += len(self._utt)
             self._reset_utt()
             return None
         audio = bytes(self._utt)
