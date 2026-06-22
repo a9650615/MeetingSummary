@@ -366,6 +366,29 @@ def _transcript_text(rows):
     return "\n".join(f"{r['speaker']}: {r['text']}" for r in rows)
 
 
+def _save_upload_pcm(src_path, mid, store):
+    """Decode an uploaded file to data/<mid>/mic.pcm (16 kHz mono s16le) via ffmpeg
+    so the meeting plays back like a live one. Best-effort: skip if ffmpeg missing
+    or decode fails (playback simply won't appear)."""
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        return
+    out_dir = f"data/{mid}"
+    os.makedirs(out_dir, exist_ok=True)
+    pcm = f"{out_dir}/mic.pcm"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", src_path,
+             "-ar", "16000", "-ac", "1", "-f", "s16le", pcm],
+            check=True, timeout=300)
+    except Exception as e:
+        print(f"upload pcm decode failed: {e}", file=sys.stderr)
+        return
+    store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=out_dir,
+                      started_at=time.time(), duration_s=0, origin="recorded")
+
+
 _TRACK_LABEL = {"system": "對方", "mic": "我", "mixed": "混合"}
 
 
@@ -709,6 +732,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
             kind=kind, asr_backend=asr_backend,
             summary_backend=summary_backend, summary_model=summary_model)
         mid = result["meeting_id"]
+        # Decode the upload to data/<mid>/mic.pcm (16k mono) so playback uses the
+        # same path as live recordings (player + click-to-seek work). Best-effort.
+        await run_in_threadpool(_save_upload_pcm, path, mid, store)
         return _result_page(title, result["summary"],
                             _rows(store.list_transcripts(mid)))
 
