@@ -172,9 +172,9 @@ _LIVE_BODY = """
       </select></label>
     <label class=fld>即時模型
       <select id=model>
-        <option value="mlx-community/whisper-large-v3-turbo-q4">turbo-q4(準·省一半)</option>
+        <option value="mlx-community/whisper-small-mlx-q4">small-q4(預設·快·省)</option>
+        <option value="mlx-community/whisper-large-v3-turbo-q4">turbo-q4(較準·省一半)</option>
         <option value="mlx-community/whisper-large-v3-turbo">turbo(最準·較吃)</option>
-        <option value="mlx-community/whisper-small-mlx-q4">small-q4(快·省)</option>
         <option value="mlx-community/whisper-base-mlx-q4">base-q4(更快)</option>
         <option value="mlx-community/whisper-tiny-mlx-q4">tiny-q4(最省·最快)</option>
         <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR(最準·較慢)</option>
