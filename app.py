@@ -849,19 +849,11 @@ if __name__ == "__main__":  # pragma: no cover
 
     fallback = [m for m in live_fallback.split(",") if m and m != live_model]
 
-    # Startup probe: VALIDATE each candidate loads+runs on a 1 s clip; pick the
-    # first that WORKS (skips belle-type incompatibilities so a broken pick can't
-    # silently kill finals). Validate-only — RTF here would include one-time model
-    # load and wrongly favor the smallest; the runtime AdaptiveBackend measures
-    # real steady-state throughput and downgrades if the chosen model can't keep up.
-    import numpy as _np
-    import time as _time
-    _clip = _np.zeros(16000, dtype=_np.int16).tobytes()
-    live_model = mp.probe_models(
-        [live_model] + fallback, audio_seconds=1.0,
-        run=lambda m: mlx_whisper_live_backend(m)(_clip),
-        clock=_time.monotonic, target_rtf=float("inf"))
-    print(f"[profile] probed live model -> {live_model}", flush=True)
+    # No eager startup probe: loading/validating models here can download GBs and
+    # block boot past the supervisor's health-poll patience -> kill/restart loop.
+    # The AdaptiveBackend lazy-loads on first use (in a threadpool, /health stays
+    # responsive) and returns [] on a bad model, so a broken pick can't crash boot.
+    print(f"[profile] live={live_model} fallback={fallback}", flush=True)
 
     # Modular + hot-reloadable: manager rebuilds the live AdaptiveBackend on swap.
     live_manager = backends.LiveModelManager(
