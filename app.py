@@ -368,6 +368,52 @@ def _transcript_text(rows):
     return "\n".join(f"{r['speaker']}: {r['text']}" for r in rows)
 
 
+_TRACKS = ("system", "mic", "mixed")
+
+
+def _assemble_track(store, mid, track, sample_rate=16000):
+    """Build one continuous PCM for a track across ALL of a meeting's segments,
+    each placed at its time offset (started_at - meeting.created_at) so audio
+    lines up with the (merge-rebased) transcript timestamps. Segments sharing a
+    dir (session resume) are placed once. None if the track has no audio."""
+    meeting = store.get_meeting(mid)
+    if meeting is None:
+        return None
+    base = meeting["created_at"]
+    buf = bytearray()
+    seen = set()
+    found = False
+    for seg in store.list_segments(mid):  # idx order -> first dir occurrence = earliest
+        d = seg["dir_path"]
+        if d in seen:
+            continue
+        pcm_path = os.path.join(d, f"{track}.pcm")
+        if not os.path.exists(pcm_path) or os.path.getsize(pcm_path) == 0:
+            continue
+        seen.add(d)
+        found = True
+        off_bytes = max(0, int(round((seg["started_at"] - base) * sample_rate))) * 2
+        with open(pcm_path, "rb") as f:
+            data = f.read()
+        end = off_bytes + len(data)
+        if end > len(buf):
+            buf.extend(b"\x00" * (end - len(buf)))
+        buf[off_bytes:end] = data
+    return bytes(buf) if found else None
+
+
+def _meeting_tracks(store, mid):
+    """Tracks that have audio anywhere in the meeting's segments."""
+    out = []
+    for t in _TRACKS:
+        for seg in store.list_segments(mid):
+            p = os.path.join(seg["dir_path"], f"{t}.pcm")
+            if os.path.exists(p) and os.path.getsize(p) > 0:
+                out.append(t)
+                break
+    return out
+
+
 def _save_upload_pcm(src_path, mid, store):
     """Decode an uploaded file to data/<mid>/mic.pcm (16 kHz mono s16le) via ffmpeg
     so the meeting plays back like a live one. Best-effort: skip if ffmpeg missing
@@ -497,23 +543,21 @@ def create_app(store, *, summary_backend, asr_backend=None,
         meeting = store.get_meeting(mid)
         if meeting is None:
             raise HTTPException(404, "meeting not found")
-        # Tracks with retained audio (non-empty pcm) -> playback players.
-        audio_tracks = [t for t in ("system", "mic", "mixed")
-                        if os.path.exists(p := f"data/{mid}/{t}.pcm")
-                        and os.path.getsize(p) > 0]
+        # Tracks with retained audio (across all segments — handles merged meetings).
+        audio_tracks = _meeting_tracks(store, mid)
         return _detail_page(mid, dict(meeting), _rows(store.list_transcripts(mid)),
                             _rows(store.list_summaries(mid)), audio_tracks)
 
     @app.get("/meetings/{mid}/audio/{track}.wav")
     def meeting_audio(mid: int, track: str):
         import recorder
-        pcm = f"data/{mid}/{track}.pcm"
-        if track not in ("system", "mic", "mixed") or not os.path.exists(pcm) \
-                or os.path.getsize(pcm) == 0:
+        if track not in _TRACKS:
             raise HTTPException(404, "no audio")
-        with open(pcm, "rb") as f:
-            wav = recorder.pcm_to_wav(f.read(), sample_rate=16000, channels=1)
-        return Response(wav, media_type="audio/wav")
+        pcm = _assemble_track(store, mid, track)  # spans/aligns all segments
+        if pcm is None:
+            raise HTTPException(404, "no audio")
+        return Response(recorder.pcm_to_wav(pcm, sample_rate=16000, channels=1),
+                        media_type="audio/wav")
 
     @app.get("/models")
     def get_models():
