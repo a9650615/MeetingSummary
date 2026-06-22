@@ -471,10 +471,11 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
             with open(tmp, "wb") as w:
                 w.write(f.read(bl))
         texts = []
+        speaker = _TRACK_LABEL.get(track, track)  # mic->我, system->對方
         for t in asr.transcribe(tmp, profile="accurate", track=track, backend=backend):
             store.add_transcript(mid, "accurate", track,
                                  t["start_ms"] + win_off_ms,
-                                 t["end_ms"] + win_off_ms, track, t["text"])
+                                 t["end_ms"] + win_off_ms, speaker, t["text"])
             texts.append(t["text"])
             n += 1
         try:
@@ -906,7 +907,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             backend = asr_backend
         else:
             raise HTTPException(503, "no ASR backend configured")
-        store.clear_transcripts(mid, profile="accurate")  # replace, don't duplicate
+        store.clear_transcripts(mid)  # full replace (incl live) -> one coherent set
         base = store.get_meeting(mid)["created_at"]
         n = 0
         for seg in store.list_segments(mid):
@@ -915,11 +916,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 pcm = f"{seg['dir_path']}/{name}"
                 if not os.path.exists(pcm) or os.path.getsize(pcm) == 0:
                     continue  # track not present for this segment
+                speaker = _TRACK_LABEL.get(track_label, track_label)
                 for t in asr.transcribe(pcm, profile="accurate",
                                         track=track_label, backend=backend):
                     store.add_transcript(mid, t["profile"], t["track"],
                                          t["start_ms"] + off_ms, t["end_ms"] + off_ms,
-                                         t["track"], t["text"])
+                                         speaker, t["text"])
                     n += 1
         return {"transcripts": n}
 
@@ -937,7 +939,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             backend = asr_backend
         else:
             raise HTTPException(503, "no ASR backend configured")
-        store.clear_transcripts(mid, profile="accurate")
+        store.clear_transcripts(mid)  # full replace (incl live) -> one coherent set
         import threading
         threading.Thread(target=_run_transcribe_job,
                          args=(store, mid, backend, transcribe_jobs),
