@@ -670,12 +670,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
         async def _emit(ev, label):
             track, speaker = label
             if ev["kind"] == "final":
-                now = time.time()
-                ev["start_ms"] = int((now - t0) * 1000)  # monotonic offset (storage)
-                ev["ts"] = now                            # epoch -> clock time (display)
+                # start_ms = audio position (session's committed-bytes offset),
+                # which matches the saved (silence-gated) pcm exactly -> seek +
+                # follow-highlight line up. ts (wall-clock) is display only.
+                ev["ts"] = time.time()
                 spk = ev.get("speaker") or speaker        # online diarize overrides
                 store.add_transcript(mid, "live", track, ev["start_ms"],
-                                     ev["start_ms"], spk, ev["text"])
+                                     ev["end_ms"], spk, ev["text"])
                 await ws.send_json({"type": "final", **ev, "speaker": spk})
             else:
                 await ws.send_json({"type": "interim", **ev, "speaker": speaker})
@@ -735,10 +736,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
             rtask.cancel()
             for tag, s in sessions.items():
                 for ev in await run_in_threadpool(s.flush):
-                    if ev["kind"] == "final":
-                        ts = int((time.time() - t0) * 1000)
-                        store.add_transcript(mid, "live", tracks[tag][0], ts, ts,
-                                             tracks[tag][1], ev["text"])
+                    if ev["kind"] == "final":  # audio-position offset, not wall-clock
+                        spk = ev.get("speaker") or tracks[tag][1]
+                        store.add_transcript(mid, "live", tracks[tag][0],
+                                             ev["start_ms"], ev["end_ms"], spk,
+                                             ev["text"])
             for f in audio_files.values():
                 f.close()
             # Stop != finalize — explicit only.
