@@ -11,7 +11,7 @@ import time
 
 from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
                      WebSocketDisconnect)
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -402,6 +402,29 @@ def _assemble_track(store, mid, track, sample_rate=16000):
     return bytes(buf) if found else None
 
 
+def _track_wav_file(store, mid, track):
+    """Assemble the track and write a cached .wav file, returning its path (or
+    None if no audio). Served via FileResponse so the browser gets HTTP Range
+    support and can SEEK — a plain in-memory Response can't be sought. Rebuilds
+    only when a source pcm is newer than the cache."""
+    import recorder
+    cache = f"data/{mid}/_play_{track}.wav"
+    srcs = [os.path.join(seg["dir_path"], f"{track}.pcm")
+            for seg in store.list_segments(mid)]
+    srcs = [p for p in srcs if os.path.exists(p) and os.path.getsize(p) > 0]
+    if not srcs:
+        return None
+    newest = max(os.path.getmtime(p) for p in srcs)
+    if not os.path.exists(cache) or os.path.getmtime(cache) < newest:
+        pcm = _assemble_track(store, mid, track)
+        if pcm is None:
+            return None
+        os.makedirs(f"data/{mid}", exist_ok=True)
+        with open(cache, "wb") as f:
+            f.write(recorder.pcm_to_wav(pcm, sample_rate=16000, channels=1))
+    return cache
+
+
 def _meeting_tracks(store, mid):
     """Tracks that have audio anywhere in the meeting's segments."""
     out = []
@@ -550,14 +573,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.get("/meetings/{mid}/audio/{track}.wav")
     def meeting_audio(mid: int, track: str):
-        import recorder
         if track not in _TRACKS:
             raise HTTPException(404, "no audio")
-        pcm = _assemble_track(store, mid, track)  # spans/aligns all segments
-        if pcm is None:
+        wav = _track_wav_file(store, mid, track)  # cached file -> Range/seek support
+        if wav is None:
             raise HTTPException(404, "no audio")
-        return Response(recorder.pcm_to_wav(pcm, sample_rate=16000, channels=1),
-                        media_type="audio/wav")
+        return FileResponse(wav, media_type="audio/wav")
 
     @app.get("/models")
     def get_models():
