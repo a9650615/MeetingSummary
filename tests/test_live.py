@@ -70,6 +70,8 @@ def test_twopass_finalizes_on_silence():
     finals = [e for e in s.feed(tone(300) + silence(150)) if e["kind"] == "final"]
     assert len(finals) == 1
     assert finals[0]["text"] == "完整句" and finals[0]["start_ms"] == 0
+    # end_ms present (consumer stores it) and after start
+    assert finals[0]["end_ms"] > finals[0]["start_ms"]
 
 
 def test_twopass_emits_interim_while_speaking():

@@ -676,7 +676,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 ev["ts"] = time.time()
                 spk = ev.get("speaker") or speaker        # online diarize overrides
                 store.add_transcript(mid, "live", track, ev["start_ms"],
-                                     ev["end_ms"], spk, ev["text"])
+                                     ev.get("end_ms", ev["start_ms"]), spk, ev["text"])
                 await ws.send_json({"type": "final", **ev, "speaker": spk})
             else:
                 await ws.send_json({"type": "interim", **ev, "speaker": speaker})
@@ -739,7 +739,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     if ev["kind"] == "final":  # audio-position offset, not wall-clock
                         spk = ev.get("speaker") or tracks[tag][1]
                         store.add_transcript(mid, "live", tracks[tag][0],
-                                             ev["start_ms"], ev["end_ms"], spk,
+                                             ev["start_ms"],
+                                             ev.get("end_ms", ev["start_ms"]), spk,
                                              ev["text"])
             for f in audio_files.values():
                 f.close()

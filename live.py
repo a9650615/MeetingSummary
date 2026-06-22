@@ -250,6 +250,7 @@ class TwoPassSession:
         audio = bytes(self._utt)
         text = self._text(self.final_backend, audio)
         offset_ms = round(self._committed_bytes / (self.sr * 2) * 1000)
+        end_ms = round((self._committed_bytes + len(audio)) / (self.sr * 2) * 1000)
         self._committed_bytes += len(audio)
         spk = None
         if text and self.speaker_fn:
@@ -261,7 +262,7 @@ class TwoPassSession:
         if not text:
             return None
         ev = {"kind": "final", "text": text, "track": self.track,
-              "start_ms": offset_ms, "profile": "live"}
+              "start_ms": offset_ms, "end_ms": end_ms, "profile": "live"}
         if spk:
             ev["speaker"] = spk
         return ev
