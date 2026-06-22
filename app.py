@@ -352,9 +352,8 @@ class TranscribeIn(BaseModel):
 
 
 class DiarizeIn(BaseModel):
-    track: str = "system"      # diarize the 對方/system track by default
+    track: str = "all"         # "all" -> every track with audio; or mic/system/mixed
     num_speakers: int = -1     # -1 = auto-detect
-    prefix: str = "說話者"
 
 
 def _rows(rows):
@@ -563,12 +562,12 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "<select id=kind><option value=minutes>會議記錄</option>"
         "<option value=bullets>條列</option></select>"
         "<button class='btn primary' id=go>產生摘要</button>"
-        "<button class=btn id=dia>多人分群(對方)</button>"
+        "<button class=btn id=dia>多人分群</button>"
         "<button class=btn id=fin>完成會議</button>"
         "<button class='btn danger' id=del>刪除會議</button>"
         "<span class='muted small' id=finmsg></span></div>"
         "<p class=hint style='margin:.6em 0 0'>※ 摘要只在按下按鈕時才產生。停止錄音不會自動完成。"
-        "「多人分群」用聲紋把對方那軌拆成說話者1/2/3(會後處理,需先有錄音)。</p>"
+        "「多人分群」用聲紋把每條音軌(我/對方)各自拆成多位說話者(會後處理,需先有錄音)。</p>"
         f"<div id=out>{sums}</div></div>"
         "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
         "<div class=row style='margin-bottom:10px'>"
@@ -622,7 +621,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "document.getElementById('dia').onclick=async()=>{"
         "const fm=document.getElementById('finmsg');fm.textContent=' 分群中…(會後聲紋,需稍候)';"
         f"const r=await fetch('/meetings/{mid}/diarize',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'system'})});"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all'})});"
         "if(r.ok){const j=await r.json();fm.textContent=' 分出 '+j.speakers+' 位說話者';"
         "location.reload();}else{fm.textContent=' 分群失敗: '+(await r.text());}};"
         "document.querySelectorAll('tr[data-ts]').forEach(tr=>{tr.style.cursor='pointer';"
@@ -1015,23 +1014,33 @@ def create_app(store, *, summary_backend, asr_backend=None,
             raise HTTPException(404, "meeting not found")
         import diarize as diar
 
-        segs = store.list_segments(mid)
-        if not segs:
+        tracks = _meeting_tracks(store, mid) if body.track == "all" else [body.track]
+        tracks = [t for t in tracks if t in _meeting_tracks(store, mid)]
+        if not tracks:
             raise HTTPException(404, "no saved audio for this meeting")
-        pcm = os.path.join(segs[0]["dir_path"], f"{body.track}.pcm")
-        if not os.path.exists(pcm):
-            raise HTTPException(404, f"no audio for track {body.track}")
-        try:
-            segments = diar.diarize_pcm(pcm, num_speakers=body.num_speakers)
-        except Exception as e:
-            raise HTTPException(503, f"diarization unavailable: {e}")
-        rows = [dict(r) for r in store.list_transcripts(mid)
-                if r["track"] == body.track]
-        for r in diar.assign_speakers(rows, segments, prefix=body.prefix):
-            store.update_speaker(r["id"], r["speaker"])
-        speakers = sorted({s["speaker"] for s in segments})
-        return {"track": body.track, "speakers": len(speakers),
-                "segments": len(segments)}
+        total = 0
+        for track in tracks:
+            pcm_bytes = _assemble_track(store, mid, track)  # offset-aligned, all segments
+            if pcm_bytes is None:
+                continue
+            tmp = f"data/{mid}/_diar_{track}.pcm"
+            os.makedirs(f"data/{mid}", exist_ok=True)
+            with open(tmp, "wb") as f:
+                f.write(pcm_bytes)
+            try:
+                segments = diar.diarize_pcm(tmp, num_speakers=body.num_speakers)
+            except Exception as e:
+                raise HTTPException(503, f"diarization unavailable: {e}")
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            rows = [dict(r) for r in store.list_transcripts(mid) if r["track"] == track]
+            # prefix per track so 我-side and 對方-side speakers don't collide
+            for r in diar.assign_speakers(rows, segments,
+                                          prefix=_TRACK_LABEL.get(track, track)):
+                store.update_speaker(r["id"], r["speaker"])
+            total += len({s["speaker"] for s in segments})
+        return {"tracks": tracks, "speakers": total}
 
     return app
 
