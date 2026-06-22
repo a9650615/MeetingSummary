@@ -5,7 +5,7 @@ def test_16gb_uses_vanilla_turbo_large():
     # belle dropped from auto-pick (incompatible with mlx-whisper 0.4.3).
     rec = mp.recommend({"ram_gb": 16, "arch": "arm64"}, lang="zh-TW")
     assert rec["live"] == "mlx-community/whisper-large-v3-turbo"
-    assert rec["accurate"] == "mlx-community/whisper-large-v3"
+    assert rec["accurate"] == "mlx-community/whisper-large-v3-mlx"
     assert "belle" not in rec["live"] and "belle" not in rec["accurate"]
     assert isinstance(rec["fallback"], list) and rec["fallback"]
     assert rec["interim"] and rec["summary"]

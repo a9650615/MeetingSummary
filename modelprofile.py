@@ -10,7 +10,7 @@ import platform
 import subprocess
 
 _TURBO = "mlx-community/whisper-large-v3-turbo"
-_LARGE = "mlx-community/whisper-large-v3"
+_LARGE = "mlx-community/whisper-large-v3-mlx"
 _SMALL = "mlx-community/whisper-small-mlx"
 _BASE = "mlx-community/whisper-base-mlx"
 _TINY = "mlx-community/whisper-tiny-mlx"
