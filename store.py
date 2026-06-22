@@ -151,6 +151,28 @@ class Store:
         self.db.commit()
         return target_id
 
+    def delete_meeting(self, meeting_id):
+        """Delete a meeting + its transcripts/summaries/segments. Returns the set
+        of segment dir_paths that are no longer referenced by ANY meeting (caller
+        removes the audio files — a dir shared via merge stays if still in use)."""
+        dirs = {seg["dir_path"] for seg in self.list_segments(meeting_id)}
+        self.db.execute("DELETE FROM transcripts WHERE meeting_id=?", (meeting_id,))
+        self.db.execute("DELETE FROM summaries WHERE meeting_id=?", (meeting_id,))
+        self.db.execute("DELETE FROM segments WHERE meeting_id=?", (meeting_id,))
+        self.db.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
+        self.db.commit()
+        still = {r["dir_path"] for r in
+                 self.db.execute("SELECT DISTINCT dir_path FROM segments").fetchall()}
+        return dirs - still
+
+    def clear_transcripts(self, meeting_id, profile=None):
+        if profile is None:
+            self.db.execute("DELETE FROM transcripts WHERE meeting_id=?", (meeting_id,))
+        else:
+            self.db.execute("DELETE FROM transcripts WHERE meeting_id=? AND profile=?",
+                            (meeting_id, profile))
+        self.db.commit()
+
     def merge_into_earliest(self, ids):
         """Merge a set of meetings into whichever started first."""
         rows = [self.get_meeting(i) for i in ids]

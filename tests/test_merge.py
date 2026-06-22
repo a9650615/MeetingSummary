@@ -48,6 +48,36 @@ def test_merge_into_earliest(tmp_path):
     assert target == a and s.get_meeting(b) is None
 
 
+def test_delete_meeting_cascades_and_reports_orphan_dirs(tmp_path):
+    s = _store(tmp_path)
+    a = s.create_meeting("A", 1.0, "zh-TW")
+    s.add_transcript(a, "live", "mic", 0, 1, "我", "x")
+    s.add_summary(a, "minutes", "zh-TW", "...", "m", 2.0)
+    s.add_segment(a, 0, "data/a", 1.0, 0, "recorded")
+    orphans = s.delete_meeting(a)
+    assert s.get_meeting(a) is None
+    assert s.list_transcripts(a) == [] and s.list_summaries(a) == []
+    assert orphans == {"data/a"}  # dir no longer referenced -> caller removes files
+
+
+def test_delete_keeps_dir_shared_with_another_meeting(tmp_path):
+    s = _store(tmp_path)
+    a, b = s.create_meeting("A", 1.0, "zh"), s.create_meeting("B", 2.0, "zh")
+    s.add_segment(a, 0, "data/shared", 1.0, 0, "recorded")
+    s.add_segment(b, 0, "data/shared", 2.0, 0, "recorded")
+    assert s.delete_meeting(a) == set()  # still used by B -> not an orphan
+
+
+def test_clear_transcripts_by_profile(tmp_path):
+    s = _store(tmp_path)
+    m = s.create_meeting("M", 1.0, "zh")
+    s.add_transcript(m, "live", "mic", 0, 1, "我", "live")
+    s.add_transcript(m, "accurate", "mic", 0, 1, "我", "acc")
+    s.clear_transcripts(m, profile="accurate")
+    rows = s.list_transcripts(m)
+    assert len(rows) == 1 and rows[0]["profile"] == "live"
+
+
 def _pcm(d, track, val, n):
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, f"{track}.pcm"), "wb") as f:

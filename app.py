@@ -120,7 +120,8 @@ _INDEX = _shell("MeetingSummary", """
 """, script="""
 fetch('/meetings').then(r=>r.json()).then(ms=>{
   document.getElementById('meetings').innerHTML = ms.length
-    ? ms.map(m=>`<li><a href="/m/${m.id}">${m.title}</a>
+    ? ms.map(m=>`<li><span title="${m.has_audio?'有音檔':'無音檔'}">${m.has_audio?'🔊':'🔇'}</span>
+        <a href="/m/${m.id}">${m.title}</a>
         <span class="badge ${m.status==='finalized'?'done':'live'}">${m.status}</span></li>`).join('')
     : '<li class="muted small">尚無會議</li>';
 });
@@ -344,6 +345,10 @@ class MergeIn(BaseModel):
     ids: list[int]
 
 
+class TranscribeIn(BaseModel):
+    model: str | None = None   # None -> default accurate backend
+
+
 class DiarizeIn(BaseModel):
     track: str = "system"      # diarize the 對方/system track by default
     num_speakers: int = -1     # -1 = auto-detect
@@ -497,11 +502,21 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "<button class='btn primary' id=go>產生摘要</button>"
         "<button class=btn id=dia>多人分群(對方)</button>"
         "<button class=btn id=fin>完成會議</button>"
+        "<button class='btn danger' id=del>刪除會議</button>"
         "<span class='muted small' id=finmsg></span></div>"
         "<p class=hint style='margin:.6em 0 0'>※ 摘要只在按下按鈕時才產生。停止錄音不會自動完成。"
         "「多人分群」用聲紋把對方那軌拆成說話者1/2/3(會後處理,需先有錄音)。</p>"
         f"<div id=out>{sums}</div></div>"
         "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
+        "<div class=row style='margin-bottom:10px'>"
+        "<select id=remodel>"
+        "<option value='mlx-community/whisper-large-v3-turbo-q4'>turbo-q4(準·省)</option>"
+        "<option value='mlx-community/whisper-large-v3-mlx'>large-v3(最準·吃)</option>"
+        "<option value='mlx-community/whisper-small-mlx-q4'>small-q4(快)</option>"
+        "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR(最準中文·慢)</option>"
+        "</select>"
+        "<button class=btn id=retr>重新語音辨識</button>"
+        "<span class='muted small' id=remsg></span></div>"
         "<table class=tx><tr><th>時間</th><th>說話者</th><th>內容</th></tr>"
         f"{rows}</table></div>")
     script = (
@@ -515,6 +530,18 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "document.getElementById('fin').onclick=async()=>{"
         f"await fetch('/meetings/{mid}/finalize',{{method:'POST'}});"
         "document.getElementById('finmsg').textContent=' 已完成。';};"
+        "document.getElementById('del').onclick=async()=>{"
+        "if(!confirm('確定刪除這場會議?逐字稿與音檔都會移除,無法復原。'))return;"
+        f"const r=await fetch('/meetings/{mid}',{{method:'DELETE'}});"
+        "if(r.ok)location.href='/';"
+        "else document.getElementById('finmsg').textContent=' 刪除失敗';};"
+        "document.getElementById('retr').onclick=async()=>{"
+        "const mdl=document.getElementById('remodel').value;"
+        "const rm=document.getElementById('remsg');rm.textContent=' 辨識中…(會後重跑,長音檔需數分鐘)';"
+        f"const r=await fetch('/meetings/{mid}/transcribe',{{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({model:mdl})});"
+        "if(r.ok){const j=await r.json();rm.textContent=' 完成 '+j.transcripts+' 段';"
+        "location.reload();}else{rm.textContent=' 失敗: '+(await r.text());}};"
         "document.getElementById('dia').onclick=async()=>{"
         "const fm=document.getElementById('finmsg');fm.textContent=' 分群中…(會後聲紋,需稍候)';"
         f"const r=await fetch('/meetings/{mid}/diarize',{{method:'POST',"
@@ -754,7 +781,26 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.get("/meetings")
     def list_meetings():
-        return _rows(store.list_meetings())
+        out = []
+        for m in store.list_meetings():
+            d = dict(m)
+            d["has_audio"] = bool(_meeting_tracks(store, m["id"]))
+            out.append(d)
+        return out
+
+    @app.delete("/meetings/{mid}")
+    def delete_meeting(mid: int):
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        import shutil
+        orphans = store.delete_meeting(mid)
+        for d in orphans:  # remove audio dirs no longer referenced by any meeting
+            if d.startswith("data/") and os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+        cache = f"data/{mid}"  # stale wav cache dir, if any
+        if os.path.isdir(cache):
+            shutil.rmtree(cache, ignore_errors=True)
+        return {"deleted": mid}
 
     @app.get("/meetings/{mid}")
     def get_meeting(mid: int):
@@ -769,21 +815,31 @@ def create_app(store, *, summary_backend, asr_backend=None,
         }
 
     @app.post("/meetings/{mid}/transcribe")
-    def transcribe_meeting(mid: int):
+    def transcribe_meeting(mid: int, body: TranscribeIn = TranscribeIn()):
+        # Re-run accurate ASR over the saved audio, optionally with a chosen model.
+        # Sync route -> FastAPI runs it in a threadpool, so /health stays responsive.
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
-        if asr_backend is None:
+        if body.model:
+            import backends
+            backend = backends.make_batch_backend(body.model)
+        elif asr_backend is not None:
+            backend = asr_backend
+        else:
             raise HTTPException(503, "no ASR backend configured")
+        store.clear_transcripts(mid, profile="accurate")  # replace, don't duplicate
+        base = store.get_meeting(mid)["created_at"]
         n = 0
         for seg in store.list_segments(mid):
+            off_ms = max(0, int((seg["started_at"] - base) * 1000))  # align to timeline
             for track_label, name in (("system", "system.pcm"), ("mic", "mic.pcm")):
                 pcm = f"{seg['dir_path']}/{name}"
                 if not os.path.exists(pcm) or os.path.getsize(pcm) == 0:
                     continue  # track not present for this segment
                 for t in asr.transcribe(pcm, profile="accurate",
-                                        track=track_label, backend=asr_backend):
+                                        track=track_label, backend=backend):
                     store.add_transcript(mid, t["profile"], t["track"],
-                                         t["start_ms"], t["end_ms"],
+                                         t["start_ms"] + off_ms, t["end_ms"] + off_ms,
                                          t["track"], t["text"])
                     n += 1
         return {"transcripts": n}

@@ -87,6 +87,26 @@ def test_transcribe_without_backend_returns_503(tmp_path):
     assert c.post(f"/meetings/{mid}/transcribe").status_code == 503
 
 
+def test_delete_meeting_route(tmp_path):
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    assert c.delete(f"/meetings/{mid}").status_code == 200
+    assert store.get_meeting(mid) is None
+    assert c.delete(f"/meetings/{mid}").status_code == 404
+
+
+def test_list_meetings_has_audio_flag(tmp_path):
+    import os
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    seg_dir = tmp_path / "seg"
+    seg_dir.mkdir()
+    (seg_dir / "mic.pcm").write_bytes(b"\x00" * 100)
+    store.add_segment(mid, 0, str(seg_dir), 1.0, 0, "recorded")
+    row = next(m for m in c.get("/meetings").json() if m["id"] == mid)
+    assert row["has_audio"] is True
+
+
 def test_meeting_not_finalized_until_explicit(tmp_path):
     c, store = make_client(tmp_path)
     mid = store.create_meeting("m", 1.0, "zh-TW")
