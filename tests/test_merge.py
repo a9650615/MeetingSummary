@@ -1,7 +1,28 @@
 import os
 
-from app import _assemble_track, _meeting_tracks
+from app import _assemble_track, _meeting_tracks, iter_transcribe
 from store import Store, group_by_proximity
+
+
+def test_iter_transcribe_streams_progress(tmp_path):
+    s = Store(tmp_path / "m.db")
+    mid = s.create_meeting("M", 1000.0, "zh-TW")
+    d = str(tmp_path / "seg")
+    os.makedirs(d)
+    # 2 s of pcm @ 16k -> with window_s=1 -> 2 windows
+    with open(os.path.join(d, "mic.pcm"), "wb") as f:
+        f.write(b"\x00\x01" * 32000)
+    s.add_segment(mid, 0, d, started_at=1000.0, duration_s=2, origin="recorded")
+    backend = lambda p: [{"start": 0.0, "end": 1.0, "text": "視窗"}]
+    evs = list(iter_transcribe(s, mid, backend, window_s=1))
+    assert evs[0] == {"type": "start", "total": 2}
+    prog = [e for e in evs if e["type"] == "progress"]
+    assert [e["done"] for e in prog] == [1, 2] and prog[-1]["total"] == 2
+    assert evs[-1]["type"] == "done" and evs[-1]["transcripts"] == 2
+    # second window's transcript offset by ~1 s (window 2 starts at 1 s)
+    rows = s.list_transcripts(mid)
+    assert len(rows) == 2 and rows[1]["start_ms"] >= 1000
+    assert not os.path.exists(os.path.join(d, "_win.pcm"))  # temp cleaned
 
 
 def test_group_by_proximity():

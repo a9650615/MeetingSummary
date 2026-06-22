@@ -5,13 +5,15 @@ Phase 1 = batch loop: create meeting -> transcribe saved PCM -> summarize -> vie
 Live websocket + recording start/stop (Swift helper) land in Phase 2."""
 import asyncio
 import html
+import json
 import os
 import sys
 import time
 
 from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
                      WebSocketDisconnect)
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import (FileResponse, HTMLResponse, Response,
+                                StreamingResponse)
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -78,6 +80,8 @@ table.tx tr.active td{color:var(--ink)}
 pre.sum{white-space:pre-wrap;font:inherit;background:#fafbfc;border:1px solid var(--line);
  border-radius:10px;padding:14px;margin:8px 0;overflow-x:auto}
 .hint{color:var(--muted);font-size:13px;line-height:1.55}
+.card.sticky{position:sticky;top:8px;z-index:20;backdrop-filter:blur(6px);
+ background:rgba(255,255,255,.96)}
 """
 
 
@@ -442,6 +446,48 @@ def _meeting_tracks(store, mid):
     return out
 
 
+def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
+    """Generator: re-transcribe a meeting window-by-window, yielding progress
+    events ({type:start,total} / {type:progress,done,total,text} / {type:done,n})
+    and storing each result as it lands. Windowing gives granular progress even
+    for a single long file; each window's text streams to the client live."""
+    base = store.get_meeting(mid)["created_at"]
+    win_bytes = int(window_s * sample_rate) * 2
+    units = []  # (track, pcm_path, base_off_ms)
+    for seg in store.list_segments(mid):
+        seg_off = max(0, int((seg["started_at"] - base) * 1000))
+        for track in ("system", "mic", "mixed"):
+            p = os.path.join(seg["dir_path"], f"{track}.pcm")
+            if not os.path.exists(p) or os.path.getsize(p) == 0:
+                continue
+            size = os.path.getsize(p)
+            for bs in range(0, size, win_bytes):
+                units.append((track, p, seg_off, bs, min(win_bytes, size - bs)))
+    yield {"type": "start", "total": len(units)}
+    n = 0
+    for i, (track, p, seg_off, bs, bl) in enumerate(units):
+        win_off_ms = seg_off + int(bs / 2 / sample_rate * 1000)
+        tmp = f"{os.path.dirname(p)}/_win.pcm"
+        with open(p, "rb") as f:
+            f.seek(bs)
+            with open(tmp, "wb") as w:
+                w.write(f.read(bl))
+        texts = []
+        for t in asr.transcribe(tmp, profile="accurate", track=track, backend=backend):
+            store.add_transcript(mid, "accurate", track,
+                                 t["start_ms"] + win_off_ms,
+                                 t["end_ms"] + win_off_ms, track, t["text"])
+            texts.append(t["text"])
+            n += 1
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        yield {"type": "progress", "done": i + 1, "total": len(units),
+               "text": " ".join(texts)[:60]}
+    yield {"type": "done", "transcripts": n}
+
+
 def _save_upload_pcm(src_path, mid, store):
     """Decode an uploaded file to data/<mid>/mic.pcm (16 kHz mono s16le) via ffmpeg
     so the meeting plays back like a live one. Best-effort: skip if ffmpeg missing
@@ -487,9 +533,9 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         f"<audio id='aud-{t}' controls preload=none style='vertical-align:middle;height:34px'"
         f" src='/meetings/{mid}/audio/{t}.wav'></audio></div>"
         for t in audio_tracks)
-    audio_card = (f"<div class=card><h2 style='margin-top:0'>回放</h2>{players}"
-                  "<p class=hint style='margin:.5em 0 0'>點逐字稿任一行可跳到該段落播放。</p>"
-                  "</div>") if audio_tracks else ""
+    audio_card = (f"<div class='card sticky'><h2 style='margin-top:0'>回放</h2>{players}"
+                  "<p class=hint style='margin:.5em 0 0'>點逐字稿任一行可跳到該段落播放。"
+                  "捲動時播放器固定在頂部。</p></div>") if audio_tracks else ""
     badge = "done" if meeting["status"] == "finalized" else "live"
     body = (
         f"<h1>{html.escape(meeting['title'])} "
@@ -535,13 +581,17 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         f"const r=await fetch('/meetings/{mid}',{{method:'DELETE'}});"
         "if(r.ok)location.href='/';"
         "else document.getElementById('finmsg').textContent=' 刪除失敗';};"
-        "document.getElementById('retr').onclick=async()=>{"
+        "document.getElementById('retr').onclick=()=>{"
         "const mdl=document.getElementById('remodel').value;"
-        "const rm=document.getElementById('remsg');rm.textContent=' 辨識中…(會後重跑,長音檔需數分鐘)';"
-        f"const r=await fetch('/meetings/{mid}/transcribe',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({model:mdl})});"
-        "if(r.ok){const j=await r.json();rm.textContent=' 完成 '+j.transcripts+' 段';"
-        "location.reload();}else{rm.textContent=' 失敗: '+(await r.text());}};"
+        "const rm=document.getElementById('remsg');rm.textContent=' 啟動中…';"
+        "document.getElementById('retr').disabled=true;"
+        f"const es=new EventSource('/meetings/{mid}/transcribe/stream?model='+encodeURIComponent(mdl));"
+        "es.onmessage=e=>{const m=JSON.parse(e.data);"
+        "if(m.type==='start')rm.textContent=' 開始,共 '+m.total+' 段…';"
+        "else if(m.type==='progress')rm.textContent=` 處理中 ${m.done}/${m.total} — ${m.text||''}`;"
+        "else if(m.type==='done'){es.close();rm.textContent=' 完成 '+m.transcripts+' 段';location.reload();}"
+        "else if(m.type==='error'){es.close();rm.textContent=' 失敗: '+m.msg;}};"
+        "es.onerror=()=>{es.close();rm.textContent=' 連線中斷';};};"
         "document.getElementById('dia').onclick=async()=>{"
         "const fm=document.getElementById('finmsg');fm.textContent=' 分群中…(會後聲紋,需稍候)';"
         f"const r=await fetch('/meetings/{mid}/diarize',{{method:'POST',"
@@ -845,6 +895,30 @@ def create_app(store, *, summary_backend, asr_backend=None,
                                          t["track"], t["text"])
                     n += 1
         return {"transcripts": n}
+
+    @app.get("/meetings/{mid}/transcribe/stream")
+    def transcribe_stream(mid: int, model: str | None = None):
+        # SSE: stream re-transcribe progress window-by-window. Sync generator ->
+        # Starlette iterates it in a threadpool, so /health stays responsive.
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        if model:
+            import backends
+            backend = backends.make_batch_backend(model)
+        elif asr_backend is not None:
+            backend = asr_backend
+        else:
+            raise HTTPException(503, "no ASR backend configured")
+        store.clear_transcripts(mid, profile="accurate")
+
+        def gen():
+            try:
+                for ev in iter_transcribe(store, mid, backend):
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            except Exception as e:  # surface failures to the client, don't hang
+                yield f"data: {json.dumps({'type': 'error', 'msg': str(e)})}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
 
     @app.post("/ingest", response_class=HTMLResponse)
     async def ingest(audio: UploadFile = File(...), title: str = Form("實測"),
