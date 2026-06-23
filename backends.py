@@ -30,14 +30,81 @@ def qwen3_words_to_segments(words, text):
 
 
 def make_live_backend(model):
-    """Live backend, callable(pcm_bytes) -> segments. whisper-MLX (fast, default)
-    or Qwen3-ASR per-utterance (NOT native streaming — that needs vLLM/CUDA — but
-    our two-pass already finalizes per utterance, so offline transcribe works on
-    Mac at higher latency). AdaptiveBackend downgrades to a whisper fallback if it
-    can't keep up."""
-    if route(model) == "qwen3":
+    """Live backend, callable(pcm_bytes) -> segments. whisper-MLX (default),
+    Qwen3-ASR .cpp via a persistent daemon (Metal, model loaded once -> usable for
+    live finals), or transformers Qwen3-ASR (slow). AdaptiveBackend's warmup grace
+    absorbs the daemon's first-call load so it isn't spuriously downgraded."""
+    r = route(model)
+    if r == "qwen3cpp":
+        return qwen3_cpp_live_backend()
+    if r == "qwen3":
         return qwen3_live_backend(model)
     return mlx_whisper_live_backend(model)
+
+
+class _Qwen3CppDaemon:
+    """Persistent subprocess (.venv-qwen314) holding the loaded GGUF model. One
+    request at a time (lock); respawns if it dies. PCM bytes -> temp wav -> path
+    line -> JSON line. Lets live use Qwen3-ASR .cpp without per-utterance reload."""
+
+    def __init__(self):
+        import threading
+        self._proc = None
+        self._lock = threading.Lock()
+
+    def _ensure(self):
+        import os
+        import subprocess
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        here = os.path.dirname(os.path.abspath(__file__))
+        py = os.path.join(here, ".venv-qwen314/bin/python")
+        daemon = os.path.join(here, "qwen3_cpp_daemon.py")
+        self._proc = subprocess.Popen(
+            [py, daemon], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        for line in self._proc.stdout:  # block until model loaded
+            if line.strip() == "QWEN3READY":
+                break
+
+    def transcribe(self, pcm_bytes):
+        import json
+        import os
+        import recorder  # noqa: PLC0415
+        if len(pcm_bytes) < 3200:  # <0.1s -> nothing useful
+            return []
+        with self._lock:
+            self._ensure()
+            tmp = f"/tmp/_qwen3live_{os.getpid()}.wav"
+            with open(tmp, "wb") as f:
+                f.write(recorder.pcm_to_wav(pcm_bytes, sample_rate=16000, channels=1))
+            try:
+                self._proc.stdin.write(tmp + "\n")
+                self._proc.stdin.flush()
+                text = ""
+                for line in self._proc.stdout:
+                    if line.startswith("QWEN3JSON:"):
+                        text = json.loads(line[len("QWEN3JSON:"):]).get("text", "")
+                        break
+            except Exception:
+                self._proc = None  # force respawn next time
+                return []
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+        text = text.strip()
+        return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
+
+
+_qwen3_daemon = None
+
+
+def qwen3_cpp_live_backend():
+    """Live-final backend over the persistent .cpp daemon (module singleton)."""
+    global _qwen3_daemon
+    if _qwen3_daemon is None:
+        _qwen3_daemon = _Qwen3CppDaemon()
+    return _qwen3_daemon.transcribe
 
 
 def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B"):

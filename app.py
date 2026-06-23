@@ -177,7 +177,8 @@ _LIVE_BODY = """
         <option value="mlx-community/whisper-large-v3-turbo">turbo(最準·較吃)</option>
         <option value="mlx-community/whisper-base-mlx-q4">base-q4(更快)</option>
         <option value="mlx-community/whisper-tiny-mlx-q4">tiny-q4(最省·最快)</option>
-        <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR(最準·較慢)</option>
+        <option value="qwen3-asr-0.6b-q4-k-m">Qwen3-ASR .cpp(最準中文·Metal)</option>
+        <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR transformers(慢)</option>
       </select></label>
     <label class=chk style="align-self:end"><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
   </div>
