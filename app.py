@@ -140,40 +140,55 @@ document.getElementById('mergebtn').onclick = async () => {
 
 def _models_page():
     body = (
-        "<h1>⚙️ 模型管理</h1>"
-        "<div class=card><div class=row style='margin-bottom:6px'>"
-        "<input id=repo placeholder='HF repo id 預先下載 (e.g. mlx-community/whisper-base-mlx-q4)' "
-        "style='flex:1;min-width:280px'>"
-        "<button class='btn primary' id=dl>下載</button>"
-        "<span class='muted small' id=dlmsg></span></div>"
-        "<p class=hint style='margin:0'>chatllm/.cpp 模型在 Live/重新辨識 選用時自動下載；"
-        "此處下載 HF(whisper/mlx)模型。</p></div>"
-        "<div class=card><h2 style='margin-top:0'>已下載 <span class=muted id=total></span></h2>"
-        "<table class=tx id=tbl><tr><th>模型</th><th>大小</th><th></th></tr></table></div>")
-    script = """
+        "<h1>⚙️ 模型管理 <span class=muted id=total></span></h1>"
+        "<div class=card><h2 style='margin-top:0'>加速 runtime（.cpp · Metal）</h2>"
+        "<table class=tx id=rt><tr><th>Runtime</th><th>狀態</th><th></th></tr></table>"
+        "<p class=hint style='margin:.5em 0 0'>一鍵下載+編譯+安裝。femelo 需 python3.14，"
+        "chatllm 需 cmake（缺則先 brew install）。</p></div>"
+        "<div class=card><h2 style='margin-top:0'>支援的模型</h2>"
+        "<table class=tx id=sup><tr><th>模型</th><th>大小</th><th></th></tr></table></div>"
+        "<div class=card><h2 style='margin-top:0'>其他快取</h2>"
+        "<table class=tx id=oth><tr><th>名稱</th><th>大小</th><th></th></tr></table></div>")
+    script = r"""
     function human(mb){return mb>=1000?(mb/1000).toFixed(1)+' GB':mb+' MB';}
-    function load(){fetch('/models/cache').then(r=>r.json()).then(d=>{
+    function esc(s){return s.replace(/"/g,'&quot;');}
+    async function del(path,name){if(!confirm('刪除 '+name+' ？'))return false;
+      const r=await fetch('/models/cache/delete',{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});return r.ok;}
+    function load(){fetch('/models/status').then(r=>r.json()).then(d=>{
       document.getElementById('total').textContent='共 '+human(d.total_mb);
-      const rows=d.models.map(m=>`<tr><td title="${m.root}">${m.name}</td>`
-        +`<td>${human(m.size_mb)}</td>`
-        +`<td><button class='btn danger' data-p="${m.path.replace(/"/g,'&quot;')}">刪除</button></td></tr>`).join('');
-      document.getElementById('tbl').innerHTML='<tr><th>模型</th><th>大小</th><th></th></tr>'
-        +(rows||'<tr><td colspan=3 class=muted>尚無快取</td></tr>');
-      document.querySelectorAll('#tbl button[data-p]').forEach(b=>b.onclick=async()=>{
-        if(!confirm('刪除 '+b.closest('tr').firstChild.textContent+' ？')) return;
-        b.disabled=true;
-        const r=await fetch('/models/cache/delete',{method:'POST',
-          headers:{'Content-Type':'application/json'},body:JSON.stringify({path:b.dataset.p})});
-        if(r.ok) load(); else b.disabled=false;
-      });
+      // runtimes
+      document.getElementById('rt').innerHTML='<tr><th>Runtime</th><th>狀態</th><th></th></tr>'
+        +Object.entries(d.runtimes).map(([k,ok])=>`<tr><td>${k}</td>`
+          +`<td>${ok?'✅ 已安裝':'— 未安裝'}</td>`
+          +`<td><button class='btn' data-rt="${k}">${ok?'重新編譯':'編譯安裝'}</button></td></tr>`).join('');
+      document.querySelectorAll('#rt button[data-rt]').forEach(b=>b.onclick=async()=>{
+        b.disabled=true;b.textContent='編譯中…(背景,數分鐘)';
+        await fetch('/models/setup',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({runtime:b.dataset.rt})});
+        b.textContent='編譯中…完成後重整';});
+      // supported
+      document.getElementById('sup').innerHTML='<tr><th>模型</th><th>大小</th><th></th></tr>'
+        +d.supported.map(m=>{const act=m.cached
+          ?`<button class='btn danger' data-p="${esc(m.path)}" data-n="${esc(m.label)}">刪除</button>`
+          :`<button class='btn primary' data-id="${esc(m.id)}">下載</button>`;
+          return `<tr><td>${m.label}<div class=muted style='font-size:11px'>${m.id} · ${m.kind}</div></td>`
+            +`<td>${m.cached?human(m.size_mb):'—'}</td><td>${act}</td></tr>`;}).join('');
+      document.querySelectorAll('#sup button[data-id]').forEach(b=>b.onclick=async()=>{
+        b.disabled=true;b.textContent='下載中…';
+        const r=await fetch('/models/download',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({id:b.dataset.id})});
+        b.textContent=r.ok?'下載中…(背景)':'失敗:'+(await r.text());});
+      document.querySelectorAll('#sup button[data-p]').forEach(b=>b.onclick=async()=>{
+        if(await del(b.dataset.p,b.dataset.n))load();});
+      // other cache
+      document.getElementById('oth').innerHTML='<tr><th>名稱</th><th>大小</th><th></th></tr>'
+        +(d.other.map(m=>`<tr><td title="${m.root}">${m.name}</td><td>${human(m.size_mb)}</td>`
+          +`<td><button class='btn danger' data-p="${esc(m.path)}" data-n="${esc(m.name)}">刪除</button></td></tr>`).join('')
+          ||'<tr><td colspan=3 class=muted>無</td></tr>');
+      document.querySelectorAll('#oth button[data-p]').forEach(b=>b.onclick=async()=>{
+        if(await del(b.dataset.p,b.dataset.n))load();});
     });}
-    document.getElementById('dl').onclick=async()=>{
-      const repo=document.getElementById('repo').value.trim(); if(!repo)return;
-      const m=document.getElementById('dlmsg'); m.textContent=' 下載中…(背景)';
-      await fetch('/models/download',{method:'POST',
-        headers:{'Content-Type':'application/json'},body:JSON.stringify({repo})});
-      m.textContent=' 已開始背景下載 '+repo+'，完成後重整可見';
-    };
     load();
     """
     return _shell("模型管理", body, script=script, back=True)
@@ -403,7 +418,11 @@ class PathIn(BaseModel):
 
 
 class DownloadIn(BaseModel):
-    repo: str   # HF repo id to prefetch (mlx/transformers models)
+    id: str   # must be one of the supported model ids
+
+
+class SetupIn(BaseModel):
+    runtime: str   # "femelo" | "chatllm"
 
 
 class MergeIn(BaseModel):
@@ -556,6 +575,58 @@ def _safe_model_path(path, roots=None):
         if rp != rr and os.path.commonpath([rp, rr]) == rr:
             return True
     return False
+
+
+# Curated: the models the app actually uses. Download is constrained to these
+# (kind decides the runtime). kind: hf (mlx/transformers), femelo (.cpp 0.6b),
+# chatllm (.cpp 1.7b).
+_SUPPORTED = [
+    {"id": "mlx-community/whisper-small-mlx-q4", "label": "whisper small-q4（live 預設）", "kind": "hf"},
+    {"id": "mlx-community/whisper-large-v3-turbo-q4", "label": "whisper turbo-q4（精校）", "kind": "hf"},
+    {"id": "mlx-community/whisper-large-v3-turbo", "label": "whisper turbo", "kind": "hf"},
+    {"id": "mlx-community/whisper-base-mlx-q4", "label": "whisper base-q4", "kind": "hf"},
+    {"id": "mlx-community/whisper-tiny-mlx-q4", "label": "whisper tiny-q4", "kind": "hf"},
+    {"id": "mlx-community/whisper-large-v3-mlx", "label": "whisper large-v3", "kind": "hf"},
+    {"id": "mlx-community/Qwen2.5-3B-Instruct-4bit", "label": "Qwen2.5-3B（摘要）", "kind": "hf"},
+    {"id": "Qwen/Qwen3-ASR-0.6B", "label": "Qwen3-ASR 0.6B（transformers）", "kind": "hf"},
+    {"id": "qwen3-asr-0.6b-q4-k-m", "label": "Qwen3-ASR .cpp 0.6B（femelo·Metal）", "kind": "femelo"},
+    {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR .cpp 1.7B（chatllm·Metal）", "kind": "chatllm"},
+]
+_FEMELO_DIR = os.path.expanduser("~/Library/Application Support/py_qwen3_asr_cpp/models")
+_CHATLLM_DIR = os.path.abspath("chatllm.cpp/quantized")
+
+
+def _hf_dir(model_id):
+    return os.path.join(os.path.expanduser("~/.cache/huggingface/hub"),
+                        "models--" + model_id.replace("/", "--"))
+
+
+def _flatkey(s):
+    return s.lower().replace("-", "").replace("_", "").replace(".", "")
+
+
+def _model_cached(m):
+    """(cached, size_mb, path) for a supported model, per its runtime's cache."""
+    kind = m["kind"]
+    if kind == "hf":
+        p = _hf_dir(m["id"])
+        return (os.path.isdir(p), round(_dir_size(p) / 1e6, 1) if os.path.isdir(p) else 0, p)
+    if kind == "femelo":
+        if os.path.isdir(_FEMELO_DIR):
+            for f in os.listdir(_FEMELO_DIR):
+                if _flatkey(m["id"]) in _flatkey(f):  # q4-k-m id vs q4_k_m.gguf file
+                    p = os.path.join(_FEMELO_DIR, f)
+                    return (True, round(os.path.getsize(p) / 1e6, 1), p)
+        return (False, 0, _FEMELO_DIR)
+    p = os.path.join(_CHATLLM_DIR, m["id"] + ".bin")  # chatllm
+    return (os.path.isfile(p), round(os.path.getsize(p) / 1e6, 1) if os.path.isfile(p) else 0, p)
+
+
+def _runtime_status():
+    return {
+        "femelo": os.path.isfile(os.path.abspath(".venv-qwen314/bin/python")),
+        "chatllm": os.path.isfile(os.path.abspath("chatllm.cpp/bindings/libchatllm.dylib")),
+    }
 
 
 def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
@@ -821,10 +892,18 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def models_manage():
         return _models_page()
 
-    @app.get("/models/cache")
-    def models_cache():
-        return {"models": _scan_model_cache(),
-                "total_mb": round(sum(m["size_mb"] for m in _scan_model_cache()), 1)}
+    @app.get("/models/status")
+    def models_status():
+        scan = _scan_model_cache()
+        supported = []
+        for m in _SUPPORTED:
+            cached, size_mb, path = _model_cached(m)
+            supported.append({**m, "cached": cached, "size_mb": size_mb, "path": path})
+        sup_paths = {os.path.realpath(s["path"]) for s in supported if s["cached"]}
+        other = [e for e in scan if os.path.realpath(e["path"]) not in sup_paths]
+        return {"runtimes": _runtime_status(), "supported": supported,
+                "other": other,
+                "total_mb": round(sum(e["size_mb"] for e in scan), 1)}
 
     @app.post("/models/cache/delete")
     def models_cache_delete(body: PathIn):
@@ -841,17 +920,48 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.post("/models/download")
     def models_download(body: DownloadIn):
-        # Prefetch an HF repo (mlx/transformers). chatllm/.cpp models download on
-        # first use of their dropdown option, so this covers the HF ones.
+        m = next((x for x in _SUPPORTED if x["id"] == body.id), None)
+        if m is None:
+            raise HTTPException(400, "not a supported model")
+        rt = _runtime_status()
+        if m["kind"] in ("femelo", "chatllm") and not rt[m["kind"]]:
+            raise HTTPException(409, f"{m['kind']} runtime not installed — 先按編譯安裝")
+
         def _dl():
+            import subprocess
             try:
-                from huggingface_hub import snapshot_download
-                snapshot_download(body.repo)
+                if m["kind"] == "hf":
+                    from huggingface_hub import snapshot_download
+                    snapshot_download(m["id"])
+                elif m["kind"] == "femelo":
+                    subprocess.run([".venv-qwen314/bin/python", "-c",
+                                    "from py_qwen3_asr_cpp.model import Qwen3ASRModel as M;"
+                                    f"M(asr_model='{m['id']}')"], check=True, timeout=3600)
+                else:  # chatllm: model_downloader resolves :id and fetches
+                    subprocess.run([".venv/bin/python",
+                                    "chatllm.cpp/scripts/model_downloader.py",
+                                    f":qwen3-asr:1.7b"], check=True, timeout=3600)
             except Exception as e:
-                print(f"prefetch failed {body.repo}: {e}", file=sys.stderr)
+                print(f"download failed {m['id']}: {e}", file=sys.stderr)
         import threading
         threading.Thread(target=_dl, daemon=True).start()
-        return {"downloading": body.repo}
+        return {"downloading": m["id"]}
+
+    @app.post("/models/setup")
+    def models_setup(body: SetupIn):
+        if body.runtime not in ("femelo", "chatllm"):
+            raise HTTPException(400, "unknown runtime")
+
+        def _build():
+            import subprocess
+            try:
+                subprocess.run(["bash", "setup_runtime.sh", body.runtime],
+                               check=True, timeout=3600)
+            except Exception as e:
+                print(f"setup {body.runtime} failed: {e}", file=sys.stderr)
+        import threading
+        threading.Thread(target=_build, daemon=True).start()
+        return {"building": body.runtime}
 
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket):
