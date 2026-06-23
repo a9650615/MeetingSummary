@@ -488,6 +488,8 @@ class TranscribeIn(BaseModel):
 class DiarizeIn(BaseModel):
     track: str = "all"         # "all" -> every track with audio; or mic/system/mixed
     num_speakers: int = -1     # -1 = auto-detect
+    seg_model: str | None = None  # override segmentation onnx (e.g. community-1)
+    emb_model: str | None = None  # override speaker-embedding onnx
 
 
 def _rows(rows):
@@ -693,6 +695,8 @@ _SUPPORTED = [
     {"id": "Qwen/Qwen3-ASR-1.7B", "label": "Qwen3-ASR 1.7B（transformers·最準·慢）", "kind": "hf"},
     {"id": "qwen3-asr-0.6b-q4-k-m", "label": "Qwen3-ASR .cpp 0.6B（femelo·Metal·快）", "kind": "femelo"},
     {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR .cpp 1.7B（chatllm·Metal·最準）", "kind": "chatllm"},
+    {"id": "altunenes/speaker-diarization-community-1-onnx",
+     "label": "說話者分離 community-1（分群可選·onnx）", "kind": "hf"},
 ]
 _FEMELO_DIR = os.path.expanduser("~/Library/Application Support/py_qwen3_asr_cpp/models")
 _CHATLLM_DIR = os.path.abspath("chatllm.cpp/quantized")
@@ -1505,7 +1509,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
             with open(tmp, "wb") as f:
                 f.write(pcm_bytes)
             try:
-                segments = diar.diarize_pcm(tmp, num_speakers=body.num_speakers)
+                segments = diar.diarize_pcm(tmp, num_speakers=body.num_speakers,
+                                            seg_model=body.seg_model,
+                                            emb_model=body.emb_model)
             except Exception as e:
                 raise HTTPException(503, f"diarization unavailable: {e}")
             finally:

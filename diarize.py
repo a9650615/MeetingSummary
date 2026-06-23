@@ -10,19 +10,27 @@ import os
 
 
 def assign_speakers(transcripts, segments, *, prefix="說話者"):
-    """Relabel each transcript with the diarization speaker covering its time.
-    Cluster ids are remapped to a contiguous 1..N (sherpa ids aren't 0-based), so
-    labels are 說話者1/2/3. Transcripts with no overlapping segment keep theirs."""
+    """Relabel each transcript with the diarization speaker that has the MOST time
+    overlap with the line's [start,end] window — so a short interjection at a line's
+    start can't mislabel the whole line (dominant speaker wins). Falls back to the
+    segment at the start point, then keeps the original. Cluster ids -> 1..N."""
     order = {raw: i + 1 for i, raw in
              enumerate(sorted({s["speaker"] for s in segments}))}
     out = []
     for t in transcripts:
-        ts = t.get("start_ms", 0) / 1000.0
-        spk = next((s["speaker"] for s in segments
-                    if s["start"] <= ts < s["end"]), None)
+        s0 = t.get("start_ms", 0) / 1000.0
+        s1 = max(s0 + 0.01, t.get("end_ms", t.get("start_ms", 0)) / 1000.0)
+        best, best_ov = None, 0.0
+        for seg in segments:
+            ov = min(s1, seg["end"]) - max(s0, seg["start"])
+            if ov > best_ov:
+                best, best_ov = seg["speaker"], ov
+        if best is None:  # zero overlap (point line) -> segment covering the start
+            best = next((seg["speaker"] for seg in segments
+                         if seg["start"] <= s0 < seg["end"]), None)
         nt = dict(t)
-        if spk is not None:
-            nt["speaker"] = f"{prefix}{order[spk]}"
+        if best is not None:
+            nt["speaker"] = f"{prefix}{order[best]}"
         out.append(nt)
     return out
 

@@ -29,6 +29,16 @@ def test_assign_speakers_by_time():
     assert out[0]["text"] == "a"           # other fields preserved
 
 
+def test_assign_speakers_dominant_over_interjection():
+    # a line spans [0,5]s; a 0.5s interjection by speaker B at the start, rest is
+    # speaker A -> the line should be labeled A (max overlap), not B.
+    line = [{"start_ms": 0, "end_ms": 5000, "speaker": "我", "text": "x"}]
+    segs = [{"start": 0.0, "end": 0.5, "speaker": 1},   # B interjects briefly
+            {"start": 0.5, "end": 5.0, "speaker": 0}]   # A dominates
+    out = assign_speakers(line, segs)
+    assert out[0]["speaker"] == "說話者1"  # speaker 0 -> id 1 (the dominant one)
+
+
 def test_assign_speakers_remaps_ids_to_1_based():
     # sherpa cluster ids need not start at 0; remap distinct ids -> 1..N.
     out = assign_speakers([{"start_ms": 100, "speaker": "x"}],
