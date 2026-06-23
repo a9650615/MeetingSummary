@@ -1011,7 +1011,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.get("/health")
     def health():
-        return {"status": "ok"}  # fast — supervisor probes this for liveness
+        # recording flag lets the meeting-watcher suppress notifications while live.
+        return {"status": "ok", "recording": idle["live"] > 0}
 
     @app.get("/", response_class=HTMLResponse)
     def index():
