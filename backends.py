@@ -114,7 +114,12 @@ def qwen3_cpp_batch_backend(model="qwen3-asr-0.6b-q4-k-m"):
                 print(f"qwen3cpp no output: {p.stderr[-300:]}", file=sys.stderr)
                 return []
             d = json.loads(line[len("QWEN3JSON:"):])
-            return qwen3_words_to_segments(d.get("words", []), d.get("text", ""))
+            # .cpp zh word-alignment is coarse/unreliable (often one tiny-span
+            # "word" for a whole sentence), so don't trust its times — return the
+            # full text as one segment; iter_transcribe's per-window offset supplies
+            # the timeline position. (qwen3_words_to_segments kept for future use.)
+            text = d.get("text", "").strip()
+            return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
         except Exception as e:
             print(f"qwen3cpp error: {e}", file=sys.stderr)
             return []
