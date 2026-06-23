@@ -137,6 +137,25 @@ def chatllm_batch_backend(model="qwen3-asr-1.7b"):
     return _run
 
 
+def release_all():
+    """Drop the heavy .cpp ASR runtimes (chatllm 1.7B in-process model, femelo
+    sidecar subprocess) so idle RAM goes back. They lazy-reload on next use."""
+    import gc
+    freed = []
+    if _chatllm_daemon is not None and _chatllm_daemon._m is not None:
+        _chatllm_daemon._m = None          # drop ref -> GC frees the ggml model
+        freed.append("chatllm-1.7b")
+    if _qwen3_daemon is not None and getattr(_qwen3_daemon, "_proc", None) is not None:
+        try:
+            _qwen3_daemon._proc.terminate()
+        except Exception:
+            pass
+        _qwen3_daemon._proc = None
+        freed.append("qwen3cpp-0.6b")
+    gc.collect()
+    return freed
+
+
 class _Qwen3CppDaemon:
     """Persistent subprocess (.venv-qwen314) holding the loaded GGUF model. One
     request at a time (lock); respawns if it dies. PCM bytes -> temp wav -> path

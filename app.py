@@ -738,6 +738,11 @@ def _free_models():
             freed.append("whisper")
     except Exception:
         pass
+    try:
+        import backends
+        freed += backends.release_all()  # chatllm 1.7b + femelo sidecar
+    except Exception:
+        pass
     gc.collect()
     try:
         import mlx.core as mx
@@ -973,6 +978,31 @@ def create_app(store, *, summary_backend, asr_backend=None,
     app = FastAPI()
     transcribe_jobs = {}  # mid -> progress dict; survives page refresh (in-memory)
 
+    # Idle auto-release: free loaded models after N seconds with no activity and no
+    # live connection. Loaded weights lazy-reload on next use.
+    idle = {"last": time.time(), "live": 0}
+    idle_release_s = int(os.environ.get("LIVE_IDLE_RELEASE_S", "600"))
+
+    def _touch():
+        idle["last"] = time.time()
+
+    def _idle_loop():
+        import time as _t
+        released = False
+        while True:
+            _t.sleep(60)
+            if idle["live"] == 0 and not released \
+                    and _t.time() - idle["last"] > idle_release_s:
+                freed = _free_models()
+                if freed:
+                    print(f"[idle] released after {idle_release_s}s: {freed}", file=sys.stderr)
+                released = True
+            elif idle["live"] > 0 or _t.time() - idle["last"] <= idle_release_s:
+                released = False  # re-arm once active again
+
+    import threading as _threading
+    _threading.Thread(target=_idle_loop, daemon=True).start()
+
     @app.get("/health")
     def health():
         return {"status": "ok"}  # fast — supervisor probes this for liveness
@@ -1107,6 +1137,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             await ws.send_json({"type": "error", "msg": "no live backend"})
             await ws.close()
             return
+        idle["live"] += 1  # block idle-release while recording
+        _touch()
         src = ws.query_params.get("src", "mic")
         dual = src == "dual"
         t0 = time.time()
@@ -1266,6 +1298,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                                              ev["text"])
             for f in audio_files.values():
                 f.close()
+            idle["live"] = max(0, idle["live"] - 1)
+            _touch()  # idle countdown starts when recording stops
             # Stop != finalize — explicit only.
 
     @app.post("/meetings")
@@ -1343,6 +1377,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.post("/meetings/{mid}/transcribe/start")
     def transcribe_start(mid: int, body: TranscribeIn = TranscribeIn()):
         # Background job + server-side progress -> survives a page refresh.
+        _touch()
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
         if transcribe_jobs.get(mid, {}).get("state") == "running":
@@ -1368,6 +1403,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.post("/ingest", response_class=HTMLResponse)
     async def ingest(audio: UploadFile = File(...), title: str = Form("實測"),
                      kind: str = Form("minutes"), lang: str = Form("zh-TW")):
+        _touch()
         if asr_backend is None:
             raise HTTPException(503, "no ASR backend configured")
         from pipeline import run_pipeline
@@ -1391,6 +1427,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.post("/meetings/{mid}/summary")
     def summarize_meeting(mid: int, body: SummaryIn):
+        _touch()
         meeting = store.get_meeting(mid)
         if meeting is None:
             raise HTTPException(404, "meeting not found")
