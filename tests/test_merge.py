@@ -150,6 +150,20 @@ def test_assemble_track_dedupes_shared_dir(tmp_path):
     assert _meeting_tracks(s, mid) == ["mic"]
 
 
+def test_dual_collapses_to_mixed_player(tmp_path):
+    import numpy as np
+    s = _store(tmp_path)
+    mid = s.create_meeting("M", 1000.0, "zh-TW")
+    d = str(tmp_path / "seg")
+    _pcm(d, "mic", 1, 16000)     # int16 value 1
+    _pcm(d, "system", 2, 16000)  # int16 value 2
+    s.add_segment(mid, 0, d, started_at=1000.0, duration_s=1, origin="recorded")
+    assert _meeting_tracks(s, mid) == ["mixed"]   # unified, not [system, mic]
+    mx = _assemble_track(s, mid, "mixed")
+    assert mx is not None and len(mx) == 16000 * 2
+    assert int(np.frombuffer(mx, dtype=np.int16)[0]) == 3  # 1 + 2 summed
+
+
 def test_assemble_track_none_when_absent(tmp_path):
     s = _store(tmp_path)
     mid = s.create_meeting("M", 1000.0, "zh-TW")

@@ -459,14 +459,53 @@ def _transcript_text(rows):
 _TRACKS = ("system", "mic", "mixed")
 
 
+def _track_source_pcms(store, mid, track):
+    """The pcm files that feed a track. For 'mixed' with no real mixed.pcm, that's
+    the mic+system files (dual is mixed on demand for one unified player)."""
+    segs = store.list_segments(mid)
+    real = [os.path.join(s["dir_path"], f"{track}.pcm") for s in segs]
+    real = [p for p in real if os.path.exists(p) and os.path.getsize(p) > 0]
+    if track == "mixed" and not real:
+        out = []
+        for s in segs:
+            for t in ("mic", "system"):
+                p = os.path.join(s["dir_path"], f"{t}.pcm")
+                if os.path.exists(p) and os.path.getsize(p) > 0:
+                    out.append(p)
+        return out
+    return real
+
+
+def _mix_pcm(parts):
+    """Sum int16 PCM byte-strings (pad short to long), clip. None-safe."""
+    import numpy as np
+    arrs = [np.frombuffer(p, dtype=np.int16).astype(np.int32) for p in parts if p]
+    if not arrs:
+        return None
+    n = max(len(a) for a in arrs)
+    out = np.zeros(n, dtype=np.int32)
+    for a in arrs:
+        out[:len(a)] += a
+    return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+
 def _assemble_track(store, mid, track, sample_rate=16000):
     """Build one continuous PCM for a track across ALL of a meeting's segments,
     each placed at its time offset (started_at - meeting.created_at) so audio
     lines up with the (merge-rebased) transcript timestamps. Segments sharing a
-    dir (session resume) are placed once. None if the track has no audio."""
+    dir (session resume) are placed once. None if the track has no audio.
+    'mixed' with no real mixed.pcm = mic+system summed (unified dual playback)."""
     meeting = store.get_meeting(mid)
     if meeting is None:
         return None
+    if track == "mixed":  # derive from mic+system when no real mixed.pcm exists
+        has_real = any(
+            os.path.exists(p := os.path.join(s["dir_path"], "mixed.pcm"))
+            and os.path.getsize(p) > 0 for s in store.list_segments(mid))
+        if not has_real:
+            mic = _assemble_track(store, mid, "mic", sample_rate)
+            sysd = _assemble_track(store, mid, "system", sample_rate)
+            return _mix_pcm([mic, sysd])
     base = meeting["created_at"]
     buf = bytearray()
     seen = set()
@@ -497,9 +536,7 @@ def _track_wav_file(store, mid, track):
     only when a source pcm is newer than the cache."""
     import recorder
     cache = f"data/{mid}/_play_{track}.wav"
-    srcs = [os.path.join(seg["dir_path"], f"{track}.pcm")
-            for seg in store.list_segments(mid)]
-    srcs = [p for p in srcs if os.path.exists(p) and os.path.getsize(p) > 0]
+    srcs = _track_source_pcms(store, mid, track)  # mixed -> mic+system if derived
     if not srcs:
         return None
     # Fingerprint the source set (paths + sizes + mtimes). Rebuild whenever it
@@ -522,15 +559,19 @@ def _track_wav_file(store, mid, track):
 
 
 def _meeting_tracks(store, mid):
-    """Tracks that have audio anywhere in the meeting's segments."""
-    out = []
+    """Playable tracks. Dual (mic+system, no real mixed) collapses to a single
+    'mixed' track so playback is ONE unified player (the two one-sided players
+    were the 'tracks don't line up' problem); transcripts still carry 我/對方."""
+    present = []
     for t in _TRACKS:
         for seg in store.list_segments(mid):
             p = os.path.join(seg["dir_path"], f"{t}.pcm")
             if os.path.exists(p) and os.path.getsize(p) > 0:
-                out.append(t)
+                present.append(t)
                 break
-    return out
+    if "mic" in present and "system" in present and "mixed" not in present:
+        return ["mixed"]
+    return present
 
 
 # Model cache roots across the runtimes we use (HF for mlx/transformers, femelo
@@ -819,8 +860,11 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all'})});"
         "if(r.ok){const j=await r.json();fm.textContent=' 分出 '+j.speakers+' 位說話者';"
         "location.reload();}else{fm.textContent=' 分群失敗: '+(await r.text());}};"
+        # Player for a row: its own track, else the single (unified mixed) player.
+        "const onlyAudio=document.querySelector('audio[id^=aud-]');"
+        "function rowAudio(trk){return document.getElementById('aud-'+trk)||onlyAudio;}"
         "document.querySelectorAll('tr[data-ts]').forEach(tr=>{tr.style.cursor='pointer';"
-        "tr.onclick=()=>{const a=document.getElementById('aud-'+tr.dataset.track);"
+        "tr.onclick=()=>{const a=rowAudio(tr.dataset.track);"
         "if(a){a.currentTime=parseFloat(tr.dataset.ts);a.play();}};});"
         # Follow-along: as a track's audio plays, highlight + scroll to the line
         # whose start time is the latest <= currentTime (end_ms==start_ms for live,
@@ -832,7 +876,10 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "()=>{pauseFollow=Date.now()+8000;},{passive:true}));"
         "document.querySelectorAll('audio[id^=aud-]').forEach(a=>{"
         "const trk=a.id.slice(4);"
-        "const rows=[...document.querySelectorAll(`tr[data-track=\"${trk}\"]`)]"
+        # mixed/unified player follows ALL rows (both 我/對方); per-track only its own.
+        "const sel=document.getElementById('aud-'+trk)&&document.querySelector(`tr[data-track=\"${trk}\"]`)"
+        "?`tr[data-track=\"${trk}\"]`:'tr[data-ts]';"
+        "const rows=[...document.querySelectorAll(sel)]"
         ".map(tr=>({tr,ts:parseFloat(tr.dataset.ts)})).sort((x,y)=>x.ts-y.ts);"
         "let last=null;"
         "a.ontimeupdate=()=>{const t=a.currentTime;let cur=null;"
