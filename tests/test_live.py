@@ -136,6 +136,23 @@ def test_twopass_drops_short_blip_without_calling_asr():
     assert finals == [] and calls == []
 
 
+def test_drops_youtube_outro_hallucination():
+    from live import _is_hallucination
+    assert _is_hallucination("Thank you for your attention guys.")
+    assert _is_hallucination("謝謝觀看")
+    assert _is_hallucination("Thanks for watching!")
+    # a real sentence merely containing "thank you" is kept (phrase doesn't dominate)
+    assert not _is_hallucination("thank you everyone, now let's review the Q3 budget numbers")
+    assert not _is_hallucination("我們下週一上線新版本")
+
+
+def test_twopass_final_drops_outro_hallucination():
+    s = TwoPassSession(
+        backend=lambda a: [{"start": 0, "end": 1, "text": "Thank you for watching."}],
+        frame_ms=30, silence_ms=90)
+    assert [e for e in s.feed(tone(300) + silence(150)) if e["kind"] == "final"] == []
+
+
 def test_twopass_drops_filler_word():
     s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "Yeah"}],
                        frame_ms=30, silence_ms=90)

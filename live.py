@@ -47,10 +47,34 @@ _FILLERS = {"you", "yeah", "now", "ok", "okay", "so", "bye", "thank you",
             "thanks", "thank you.", "you.", "嗯", "啊", "呃", "謝謝", "謝謝觀看",
             "謝謝大家", "請不吝點贊訂閱", "字幕由", "下次再見"}
 
+# Multi-word YouTube-outro hallucinations (Whisper trained on captioned video).
+# Matched by substring with a coverage test so a real sentence merely *containing*
+# "thank you" isn't dropped — only segments that ARE essentially the phrase.
+_HALLUCINATION = [
+    "thank you for watching", "thanks for watching", "thank you for your attention",
+    "thank you for your watching", "please subscribe", "like and subscribe",
+    "subscribe to my channel", "see you next time", "see you in the next video",
+    "謝謝觀看", "謝謝大家的觀看", "請不吝點贊", "請訂閱", "點贊訂閱", "下次再見",
+    "字幕由", "感謝您的觀看", "感謝觀看",
+]
+
+
+def _norm(text):
+    return text.strip().lower().strip(" .,!?。，、！？、")
+
 
 def _is_filler(text):
-    t = text.strip().lower().strip(" .,!?。，、！？")
-    return t in _FILLERS
+    return _norm(text) in _FILLERS
+
+
+def _is_hallucination(text):
+    t = _norm(text)
+    if not t:
+        return False
+    for p in _HALLUCINATION:
+        if p in t and len(p) >= 0.6 * len(t):  # phrase dominates the segment
+            return True
+    return False
 
 
 class FixedWindowChunker:
@@ -235,7 +259,7 @@ class TwoPassSession:
     def _text(self, backend, audio):
         parts = [s["text"].strip() for s in backend(audio)]
         text = " ".join(p for p in parts if p).strip()
-        if not text or _is_repetition(text) or _is_filler(text):
+        if not text or _is_repetition(text) or _is_filler(text) or _is_hallucination(text):
             return ""
         return zhtw.to_tw(text)  # normalize 簡->繁(台灣)
 
