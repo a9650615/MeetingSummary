@@ -817,6 +817,11 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         # Follow-along: as a track's audio plays, highlight + scroll to the line
         # whose start time is the latest <= currentTime (end_ms==start_ms for live,
         # so use the next line's start as the implicit boundary).
+        # Manual scroll pauses auto-follow for 8s (else it yanks you back). Highlight
+        # still tracks; only the scroll is suppressed while you're browsing.
+        "let pauseFollow=0;"
+        "['wheel','touchmove','keydown'].forEach(ev=>window.addEventListener(ev,"
+        "()=>{pauseFollow=Date.now()+8000;},{passive:true}));"
         "document.querySelectorAll('audio[id^=aud-]').forEach(a=>{"
         "const trk=a.id.slice(4);"
         "const rows=[...document.querySelectorAll(`tr[data-track=\"${trk}\"]`)]"
@@ -826,7 +831,8 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "for(const r of rows){if(r.ts<=t+0.05)cur=r;else break;}"
         "if(cur===last)return;"
         "rows.forEach(r=>r.tr.classList.toggle('active',r===cur));"
-        "if(cur)cur.tr.scrollIntoView({block:'nearest',behavior:'smooth'});last=cur;};"
+        "if(cur&&Date.now()>pauseFollow)cur.tr.scrollIntoView({block:'nearest',behavior:'smooth'});"
+        "last=cur;};"
         "});")
     return _shell(html.escape(meeting["title"]), body, script=script, back=True)
 
@@ -978,8 +984,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
         session = ws.query_params.get("session")
         if session and session.isdigit() and store.get_meeting(int(session)) is not None:
             mid = int(session)
-        else:
-            mid = store.create_meeting("Live", t0, "zh-TW")
+        else:  # default title = local date-time (distinct per session, sortable)
+            title = time.strftime("錄音 %Y-%m-%d %H:%M", time.localtime(t0))
+            mid = store.create_meeting(title, t0, "zh-TW")
         await ws.send_json({"type": "meeting", "id": mid})
 
         # Per-track. Dual = separate tagged streams (0=mic/我, 1=system/對方);
