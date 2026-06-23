@@ -279,13 +279,13 @@ _LIVE_BODY = """
       </select></label>
     <label class=fld>即時模型
       <select id=model>
-        <option value="mlx-community/whisper-small-mlx-q4">small-q4(預設·快·省)</option>
-        <option value="mlx-community/whisper-large-v3-turbo-q4">turbo-q4(較準·省一半)</option>
-        <option value="mlx-community/whisper-large-v3-turbo">turbo(最準·較吃)</option>
-        <option value="mlx-community/whisper-base-mlx-q4">base-q4(更快)</option>
-        <option value="mlx-community/whisper-tiny-mlx-q4">tiny-q4(最省·最快)</option>
-        <option value="qwen3-asr-0.6b-q4-k-m">Qwen3-ASR 0.6B(.cpp·Metal·快)</option>
+        <option value="qwen3-asr-0.6b-q4-k-m">Qwen3-ASR 0.6B(.cpp·Metal·預設)</option>
         <option value="qwen3-asr-1.7b">Qwen3-ASR 1.7B(chatllm·Metal·最準)</option>
+        <option value="mlx-community/whisper-small-mlx-q4">whisper small-q4(快·省)</option>
+        <option value="mlx-community/whisper-large-v3-turbo-q4">whisper turbo-q4(較準)</option>
+        <option value="mlx-community/whisper-large-v3-turbo">whisper turbo(最準·較吃)</option>
+        <option value="mlx-community/whisper-base-mlx-q4">whisper base-q4(更快)</option>
+        <option value="mlx-community/whisper-tiny-mlx-q4">whisper tiny-q4(最省)</option>
         <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR 0.6B(transformers·慢)</option>
       </select></label>
     <label class=chk style="align-self:end"><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
@@ -1157,6 +1157,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         else:  # default title = local date-time (distinct per session, sortable)
             title = time.strftime("錄音 %Y-%m-%d %H:%M", time.localtime(t0))
             mid = store.create_meeting(title, t0, "zh-TW")
+        # On resume, this connection's audio is placed at (t0 - meeting.created_at)
+        # in the assembled track; live start_ms is per-connection (0-based), so add
+        # the same offset or resumed transcripts collide with the first session at 0.
+        conn_offset_ms = max(0, int((t0 - store.get_meeting(mid)["created_at"]) * 1000))
         await ws.send_json({"type": "meeting", "id": mid})
 
         # Per-track. Dual = separate tagged streams (0=mic/我, 1=system/對方);
@@ -1231,8 +1235,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 # follow-highlight line up. ts (wall-clock) is display only.
                 ev["ts"] = time.time()
                 spk = ev.get("speaker") or speaker        # online diarize overrides
-                store.add_transcript(mid, "live", track, ev["start_ms"],
-                                     ev.get("end_ms", ev["start_ms"]), spk, ev["text"])
+                store.add_transcript(mid, "live", track,
+                                     ev["start_ms"] + conn_offset_ms,
+                                     ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
+                                     spk, ev["text"])
                 await ws.send_json({"type": "final", **ev, "speaker": spk})
             else:
                 await ws.send_json({"type": "interim", **ev, "speaker": speaker})
@@ -1311,9 +1317,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     if ev["kind"] == "final":  # audio-position offset, not wall-clock
                         spk = ev.get("speaker") or tracks[tag][1]
                         store.add_transcript(mid, "live", tracks[tag][0],
-                                             ev["start_ms"],
-                                             ev.get("end_ms", ev["start_ms"]), spk,
-                                             ev["text"])
+                                             ev["start_ms"] + conn_offset_ms,
+                                             ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
+                                             spk, ev["text"])
             for f in audio_files.values():
                 f.close()
             idle["live"] = max(0, idle["live"] - 1)

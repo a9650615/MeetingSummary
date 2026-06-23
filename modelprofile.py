@@ -96,11 +96,11 @@ def recommend(hw, lang="zh-TW"):
         # q4 live/interim + 3B summary: several whisper tiers + the LLM can be
         # resident at once, so favor the lighter quantized variants to avoid OOM.
         return {
-            "live": _SMALL_Q4,        # default: small-q4 (fast + light)
-            "interim": _SMALL_Q4,
+            "live": "qwen3-asr-0.6b-q4-k-m",  # default: Qwen3-ASR .cpp 0.6B (Metal, best zh)
+            "interim": _SMALL_Q4,             # whisper interim stays instant
             "accurate": _TURBO_Q4,
             "summary": "mlx-community/Qwen2.5-3B-Instruct-4bit",
-            "fallback": [_BASE_Q4, _TINY_Q4],
+            "fallback": [_SMALL_Q4, _BASE_Q4],  # -> whisper if the .cpp sidecar fails
         }
     if ram >= 8:
         return {

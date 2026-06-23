@@ -4,7 +4,7 @@ import modelprofile as mp
 def test_16gb_uses_q4_for_efficiency():
     # q4 (half-RAM) live/interim/fallback to avoid OOM with many resident models.
     rec = mp.recommend({"ram_gb": 16, "arch": "arm64"}, lang="zh-TW")
-    assert rec["live"] == "mlx-community/whisper-small-mlx-q4"
+    assert rec["live"] == "qwen3-asr-0.6b-q4-k-m"   # .cpp Metal default
     assert "q4" in rec["interim"] and all("q4" in m for m in rec["fallback"])
     assert "belle" not in rec["live"] and "belle" not in rec["accurate"]
     assert "7B" not in rec["summary"]  # 7B was a big OOM driver
@@ -14,8 +14,8 @@ def test_smaller_ram_picks_smaller_models():
     big = mp.recommend({"ram_gb": 16}, lang="zh-TW")
     mid = mp.recommend({"ram_gb": 8}, lang="zh-TW")
     small = mp.recommend({"ram_gb": 4}, lang="zh-TW")
-    # 16GB + 8GB both default to small-q4; 4GB drops to base-q4
-    assert big["live"] == "mlx-community/whisper-small-mlx-q4"
+    # 16GB defaults to the .cpp Qwen 0.6B; 8GB whisper small-q4; 4GB drops to base-q4
+    assert big["live"] == "qwen3-asr-0.6b-q4-k-m"
     assert mid["live"] == "mlx-community/whisper-small-mlx-q4"
     assert small["live"] == "mlx-community/whisper-base-mlx-q4"
 
