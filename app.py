@@ -502,14 +502,22 @@ def _track_wav_file(store, mid, track):
     srcs = [p for p in srcs if os.path.exists(p) and os.path.getsize(p) > 0]
     if not srcs:
         return None
-    newest = max(os.path.getmtime(p) for p in srcs)
-    if not os.path.exists(cache) or os.path.getmtime(cache) < newest:
+    # Fingerprint the source set (paths + sizes + mtimes). Rebuild whenever it
+    # changes — covers merge (segment set changes but pcm mtimes are old), delete,
+    # and live append. Without this, merged meetings played stale/partial audio.
+    key = repr(sorted((p, os.path.getsize(p), int(os.path.getmtime(p))) for p in srcs))
+    keyfile = cache + ".key"
+    fresh = (os.path.exists(cache) and os.path.exists(keyfile)
+             and open(keyfile).read() == key)
+    if not fresh:
         pcm = _assemble_track(store, mid, track)
         if pcm is None:
             return None
         os.makedirs(f"data/{mid}", exist_ok=True)
         with open(cache, "wb") as f:
             f.write(recorder.pcm_to_wav(pcm, sample_rate=16000, channels=1))
+        with open(keyfile, "w") as f:
+            f.write(key)
     return cache
 
 
