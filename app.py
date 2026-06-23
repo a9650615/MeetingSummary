@@ -29,12 +29,12 @@ _STYLE = """
  --radius:16px;--radius-sm:10px;
  --shadow:0 1px 2px rgba(16,24,40,.05),0 10px 30px -12px rgba(16,24,40,.18);
  --capbg:#0d1017;--capink:#f3f5fa}
-@media (prefers-color-scheme:dark){:root{
+:root[data-theme=dark]{
  --bg:#0c0e13;--surface:#15181f;--surface2:#1b1f28;--ink:#e9edf4;--muted:#8b93a4;
  --line:#262b36;--accent:#8b85ff;--accent2:#a39dff;--accentsoft:#23223a;
  --me:#6db3ff;--other:#74d99a;--danger:#ff6b6f;
  --shadow:0 1px 2px rgba(0,0,0,.4),0 14px 34px -14px rgba(0,0,0,.6);
- --capbg:#05070b;--capink:#f3f5fa}}
+ --capbg:#05070b;--capink:#f3f5fa}
 body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
  font:15px/1.62 -apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Segoe UI",Roboto,sans-serif}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
@@ -100,10 +100,21 @@ table.tx tr.active{background:var(--accentsoft)!important;box-shadow:inset 3px 0
 pre.sum{white-space:pre-wrap;font:inherit;background:var(--surface2);border:1px solid var(--line);
  border-radius:var(--radius-sm);padding:16px;margin:8px 0;overflow-x:auto}
 .hint{color:var(--muted);font-size:13px;line-height:1.55}
-audio{filter:saturate(.9)}@media (prefers-color-scheme:dark){audio{filter:invert(.92) hue-rotate(180deg)}}
+audio{filter:saturate(.9)}:root[data-theme=dark] audio{filter:invert(.92) hue-rotate(180deg)}
 .card.sticky{position:sticky;top:60px;z-index:20;backdrop-filter:blur(8px);
  background:color-mix(in srgb,var(--surface) 92%,transparent)}
 """
+
+
+_THEME_JS = (
+    "const _r=document.documentElement;"
+    "_r.dataset.theme=localStorage.theme||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');"
+    "function _toggleTheme(){const t=_r.dataset.theme==='dark'?'light':'dark';"
+    "_r.dataset.theme=t;localStorage.theme=t;"
+    "document.getElementById('themebtn').textContent=t==='dark'?'🌙':'☀️';}"
+    "addEventListener('DOMContentLoaded',()=>{const b=document.getElementById('themebtn');"
+    "if(b)b.textContent=_r.dataset.theme==='dark'?'🌙':'☀️';});"
+)
 
 
 def _shell(title, body, script="", back=False):
@@ -111,9 +122,13 @@ def _shell(title, body, script="", back=False):
     return (
         "<!doctype html><html lang=zh-Hant><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        f"<title>{title}</title><style>{_STYLE}</style></head><body><div class=wrap>"
+        f"<title>{title}</title><style>{_STYLE}</style>"
+        f"<script>{_THEME_JS}</script></head><body><div class=wrap>"
         "<header class=top><span class=brand>📝 Meeting<span class=dot>·</span>Summary</span>"
-        f"<span class=spacer></span>{nav}</header>{body}</div>"
+        "<span class=spacer></span>"
+        "<button class=btn id=themebtn onclick=_toggleTheme() title='切換深淺色' "
+        "style='padding:.4em .6em'>🌓</button>"
+        f"{nav}</header>{body}</div>"
         + (f"<script>{script}</script>" if script else "")
         + "</body></html>"
     )
