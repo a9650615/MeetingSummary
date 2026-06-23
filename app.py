@@ -272,6 +272,11 @@ _LIVE_BODY = """
         <option value="sentence">句子(快)</option>
         <option value="paragraph">段落(較準,等較久)</option>
       </select></label>
+    <label class=fld>斷句 VAD
+      <select id=vad>
+        <option value="energy">能量(預設·快)</option>
+        <option value="silero">silero(神經·較準)</option>
+      </select></label>
     <label class=fld>即時模型
       <select id=model>
         <option value="mlx-community/whisper-small-mlx-q4">small-q4(預設·快·省)</option>
@@ -392,7 +397,8 @@ startBtn.onclick = async () => {
   const unit = document.getElementById('unit').value==='paragraph'
     ? '&silence_ms=1000&max_utt_s=30' : '';
   const sess = session ? '&session='+session : '';
-  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}`);
+  const vad = document.getElementById('vad').value==='silero' ? '&vad=silero' : '';
+  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}`);
   ws.binaryType='arraybuffer';
   function colored(speaker){ return COLORS[speaker]||'#444'; }
   ws.onmessage = e => {
@@ -1164,12 +1170,23 @@ def create_app(store, *, summary_backend, asr_backend=None,
         q = ws.query_params
         sil = max(200, min(3000, int(q.get("silence_ms") or live_silence_ms)))
         maxu = max(5.0, min(40.0, float(q.get("max_utt_s") or live_max_utt_s)))
+
+        def _mk_speech_fn():  # silero VAD per track (own RNN state); None -> energy
+            if q.get("vad") != "silero":
+                return None
+            try:
+                from live import SileroVad
+                return SileroVad("models/silero_vad_v4.onnx")
+            except Exception as e:
+                print(f"silero vad unavailable, using energy: {e}", file=sys.stderr)
+                return None
+
         sessions = {tag: TwoPassSession(
             backend=live_manager, interim_backend=live_interim_backend,
             sample_rate=16000, silence_ms=sil,
             min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
             max_utt_s=maxu, rms_threshold=live_rms_threshold,
-            track=lbl[0]) for tag, lbl in tracks.items()}
+            track=lbl[0], speech_fn=_mk_speech_fn()) for tag, lbl in tracks.items()}
         buffers = {tag: bytearray() for tag in tracks}
 
         # Save raw audio per track for the post-meeting diarization/playback pass.

@@ -77,6 +77,35 @@ def _is_hallucination(text):
     return False
 
 
+class SileroVad:
+    """Optional neural VAD (snakers4 silero v4, via onnxruntime — no torch). A
+    callable frame_bytes->bool for TwoPassSession.speech_fn. Buffers to 512-sample
+    chunks (v4 16k window), carries the h/c RNN state, returns the latest decision."""
+
+    def __init__(self, path="models/silero_vad_v4.onnx", sample_rate=16000, threshold=0.5):
+        import onnxruntime as ort  # noqa: PLC0415
+        self._s = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        self.sr = sample_rate
+        self.th = threshold
+        self._win = 512 if sample_rate == 16000 else 256
+        self._h = np.zeros((2, 1, 64), dtype=np.float32)
+        self._c = np.zeros((2, 1, 64), dtype=np.float32)
+        self._buf = np.zeros(0, dtype=np.float32)
+        self._last = 0.0
+
+    def __call__(self, frame_bytes):
+        x = np.frombuffer(frame_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        self._buf = np.concatenate([self._buf, x])
+        while len(self._buf) >= self._win:
+            chunk = self._buf[:self._win].astype(np.float32)
+            self._buf = self._buf[self._win:]
+            out, self._h, self._c = self._s.run(
+                None, {"input": chunk[None, :], "sr": np.array(self.sr, dtype=np.int64),
+                       "h": self._h, "c": self._c})
+            self._last = float(out[0, 0])
+        return self._last >= self.th
+
+
 class FixedWindowChunker:
     def __init__(self, window_bytes):
         self.window_bytes = window_bytes
@@ -218,10 +247,11 @@ class TwoPassSession:
     def __init__(self, *, backend, interim_backend=None, sample_rate=16000,
                  frame_ms=30, silence_ms=400, max_utt_s=15.0, interim_s=0.6,
                  interim_tail_s=8.0, min_speech_ms=250, rms_threshold=80,
-                 speech_factor=2.0, track="mic", speaker_fn=None):
+                 speech_factor=2.0, track="mic", speaker_fn=None, speech_fn=None):
         self.final_backend = backend
         self.interim_backend = interim_backend
         self.speaker_fn = speaker_fn  # optional audio_bytes -> live speaker label
+        self.speech_fn = speech_fn    # optional frame_bytes -> bool (silero); else energy VAD
         self.sr = sample_rate
         self.track = track
         self.frame_bytes = int(sample_rate * frame_ms / 1000) * 2
@@ -301,7 +331,8 @@ class TwoPassSession:
         while self._scan + self.frame_bytes <= len(self._utt):
             frame = self._utt[self._scan:self._scan + self.frame_bytes]
             self._scan += self.frame_bytes
-            if self._is_speech(_rms(frame)):
+            speech = self.speech_fn(bytes(frame)) if self.speech_fn else self._is_speech(_rms(frame))
+            if speech:
                 self._has_speech = True
                 self._speech_frames += 1
                 self._silence_run = 0

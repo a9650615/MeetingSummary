@@ -94,6 +94,16 @@ def test_twopass_skips_interim_when_not_wanted():
     assert "interim" not in calls  # interim model never called
 
 
+def test_speech_fn_overrides_energy_vad():
+    # an injected speech_fn (e.g. silero) replaces the energy decision per frame
+    calls = {"n": 0}
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "x"}],
+                       frame_ms=30, silence_ms=90,
+                       speech_fn=lambda fb: calls.__setitem__("n", calls["n"] + 1) or True)
+    s.feed(tone(120))
+    assert calls["n"] > 0 and s._has_speech
+
+
 def test_discarded_blip_still_advances_timeline():
     # A too-short blip is dropped from ASR, but its audio is in the saved file,
     # so the committed-byte clock (= timestamp basis) must still advance — else
