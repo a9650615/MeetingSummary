@@ -9,9 +9,12 @@ from live import AdaptiveBackend, mlx_whisper_live_backend
 
 
 def route(model):
-    """Engine for a model id. q4-k-m GGUF -> qwen3cpp (.cpp/Metal sidecar, fast);
-    other qwen3-asr -> transformers; whisper(-mlx) is the Apple-native live engine."""
+    """Engine for a model id. chatllm 1.7B GGUF -> chatllm (.cpp/Metal, persistent
+    binding); q4-k-m -> femelo .cpp (Metal); other qwen3-asr -> transformers;
+    whisper(-mlx) is the Apple-native live engine."""
     m = model.lower()
+    if model == "qwen3-asr-1.7b":
+        return "chatllm"
     if "q4-k-m" in m:
         return "qwen3cpp"
     if "qwen3-asr" in m:
@@ -35,11 +38,103 @@ def make_live_backend(model):
     live finals), or transformers Qwen3-ASR (slow). AdaptiveBackend's warmup grace
     absorbs the daemon's first-call load so it isn't spuriously downgraded."""
     r = route(model)
+    if r == "chatllm":
+        return chatllm_live_backend()
     if r == "qwen3cpp":
         return qwen3_cpp_live_backend()
     if r == "qwen3":
         return qwen3_live_backend(model)
     return mlx_whisper_live_backend(model)
+
+
+class _ChatllmAsrDaemon:
+    """Persistent chatllm.cpp Qwen3-ASR 1.7B (Metal) via the python ctypes binding
+    — loads the GGUF once, in-process (no sidecar; binding is cp-version-agnostic).
+    One request at a time (lock). PCM -> temp wav -> {{audio:path}} message ->
+    transcription (text after <asr_text>). Lazy-loads on first call."""
+
+    def __init__(self):
+        import threading
+        self._m = None
+        self._acc = {"t": ""}
+        self._lock = threading.Lock()
+
+    def _ensure(self):
+        if self._m is not None:
+            return
+        import os
+        import sys
+        here = os.path.dirname(os.path.abspath(__file__))
+        C = os.path.join(here, "chatllm.cpp")
+        sys.argv[0] = os.path.join(C, "scripts", "_x.py")  # chatllm derives paths from argv[0]
+        for p in (os.path.join(C, "bindings"), os.path.join(C, "scripts")):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        from chatllm import ChatLLM, LibChatLLM  # noqa: PLC0415
+        acc = self._acc
+
+        class _Cap(ChatLLM):
+            def callback_print(self, s):
+                acc["t"] += s
+
+            def callback_print_meta(self, s):
+                pass
+
+        lib = LibChatLLM(os.path.join(C, "bindings"))
+        self._m = _Cap(lib, ["-m", os.path.join(C, "quantized", "qwen3-asr-1.7b.bin"),
+                             "-mgl", "all", "999", "--multimedia_file_tags", "{{", "}}",
+                             "--set", "language", "auto"])
+
+    def transcribe(self, pcm_bytes):
+        import os
+        import sys
+        import recorder  # noqa: PLC0415
+        if len(pcm_bytes) < 3200:
+            return []
+        with self._lock:
+            try:
+                self._ensure()
+                tmp = f"/tmp/_chatllm_{os.getpid()}.wav"
+                with open(tmp, "wb") as f:
+                    f.write(recorder.pcm_to_wav(pcm_bytes, sample_rate=16000, channels=1))
+                self._acc["t"] = ""
+                self._m.restart()
+                self._m.chat("{{audio:%s}}" % tmp)
+                out = self._acc["t"]
+            except Exception as e:
+                print(f"chatllm asr error: {e}", file=sys.stderr)
+                self._m = None  # force reload next time
+                return []
+            finally:
+                if 'tmp' in dir() and os.path.exists(tmp):
+                    os.remove(tmp)
+        if "<asr_text>" in out:
+            out = out.split("<asr_text>", 1)[1]
+        out = out.strip()
+        return [{"start": 0.0, "end": 0.0, "text": out}] if out else []
+
+
+_chatllm_daemon = None
+
+
+def chatllm_live_backend():
+    """Live-final backend over the persistent chatllm 1.7B daemon (module singleton)."""
+    global _chatllm_daemon
+    if _chatllm_daemon is None:
+        _chatllm_daemon = _ChatllmAsrDaemon()
+    return _chatllm_daemon.transcribe
+
+
+def chatllm_batch_backend(model="qwen3-asr-1.7b"):
+    """Batch/accurate over the same daemon. callable(audio_path) -> segments
+    (raw .pcm read to bytes; daemon wraps to wav)."""
+    be = chatllm_live_backend()
+
+    def _run(audio_path):
+        with open(str(audio_path), "rb") as f:
+            return be(f.read())
+
+    return _run
 
 
 class _Qwen3CppDaemon:
@@ -140,6 +235,8 @@ def make_batch_backend(model):
     """Batch/accurate: route to Qwen3-ASR .cpp (fast, Metal, word-aligned) or
     transformers Qwen3-ASR or whisper-MLX. callable(audio_path) -> segments."""
     r = route(model)
+    if r == "chatllm":
+        return chatllm_batch_backend(model)
     if r == "qwen3cpp":
         return qwen3_cpp_batch_backend(model)
     if r == "qwen3":

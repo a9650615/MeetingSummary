@@ -280,6 +280,7 @@ _LIVE_BODY = """
         <option value="mlx-community/whisper-base-mlx-q4">base-q4(更快)</option>
         <option value="mlx-community/whisper-tiny-mlx-q4">tiny-q4(最省·最快)</option>
         <option value="qwen3-asr-0.6b-q4-k-m">Qwen3-ASR 0.6B(.cpp·Metal·快)</option>
+        <option value="qwen3-asr-1.7b">Qwen3-ASR 1.7B(chatllm·Metal·最準)</option>
         <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR 0.6B(transformers·慢)</option>
       </select></label>
     <label class=chk style="align-self:end"><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
@@ -685,7 +686,7 @@ _SUPPORTED = [
     {"id": "Qwen/Qwen3-ASR-0.6B", "label": "Qwen3-ASR 0.6B（transformers）", "kind": "hf"},
     {"id": "Qwen/Qwen3-ASR-1.7B", "label": "Qwen3-ASR 1.7B（transformers·最準·慢）", "kind": "hf"},
     {"id": "qwen3-asr-0.6b-q4-k-m", "label": "Qwen3-ASR .cpp 0.6B（femelo·Metal·快）", "kind": "femelo"},
-    {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR .cpp 1.7B（chatllm·Metal·待修）", "kind": "chatllm"},
+    {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR .cpp 1.7B（chatllm·Metal·最準）", "kind": "chatllm"},
 ]
 _FEMELO_DIR = os.path.expanduser("~/Library/Application Support/py_qwen3_asr_cpp/models")
 _CHATLLM_DIR = os.path.abspath("chatllm.cpp/quantized")
@@ -880,8 +881,9 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "<option value='mlx-community/whisper-large-v3-mlx'>large-v3(最準·吃)</option>"
         "<option value='mlx-community/whisper-small-mlx-q4'>small-q4(快)</option>"
         "<option value='qwen3-asr-0.6b-q4-k-m'>Qwen3-ASR 0.6B(.cpp·Metal·快)</option>"
+        "<option value='qwen3-asr-1.7b'>Qwen3-ASR 1.7B(chatllm·Metal·最準)</option>"
         "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B(transformers·慢)</option>"
-        "<option value='Qwen/Qwen3-ASR-1.7B'>Qwen3-ASR 1.7B(transformers·最準·很慢)</option>"
+        "<option value='Qwen/Qwen3-ASR-1.7B'>Qwen3-ASR 1.7B(transformers·很慢)</option>"
         "</select>"
         "<button class=btn id=retr>重新語音辨識</button>"
         "<span class='muted small' id=remsg></span></div>"
