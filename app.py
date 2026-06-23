@@ -235,19 +235,15 @@ async function getStreams(source){
 // One ScriptProcessor for a stream. tag=null -> send raw PCM; tag=0/1 -> prepend
 // a track byte (dual mode). Per-node silence gate + hangover so the server VAD
 // still sees the pause.
-function attach(stream, tag, ratio){
+const GATE=0.006;       // lower gate so quiet speech still transmits
+// gate=true: silence-gate + pre-roll (perf, single-track). gate=false: send
+// continuous so both dual tracks share one wall-clock timeline (else each track's
+// gated/compressed clock drifts vs the other -> 我/對方 timestamps don't line up).
+function attach(stream, tag, ratio, gate){
   const node = ctx.createScriptProcessor(4096,1,1);
   ctx.createMediaStreamSource(stream).connect(node);
-  let hangover = 0;
-  node.onaudioprocess = ev => {
-    if(ws.readyState!==1) return;
-    const input = ev.inputBuffer.getChannelData(0);
-    let sum=0; for(let i=0;i<input.length;i++) sum+=input[i]*input[i];
-    const rms = Math.sqrt(sum/input.length);
-    // keep sending ~1.5s after speech so the server sees the full pause even in
-    // paragraph mode (silence_ms up to 1000ms) — else finals never fire.
-    if(rms > 0.01) hangover = 18; else if(hangover > 0) hangover--;
-    if(rms <= 0.01 && hangover <= 0) return;
+  let hangover = 0, pre = [];
+  function sendFloat(input){
     const outLen = Math.floor(input.length/ratio);
     const pcm = new Int16Array(outLen);
     for(let i=0;i<outLen;i++){
@@ -257,6 +253,22 @@ function attach(stream, tag, ratio){
     if(tag===null){ ws.send(pcm.buffer); }
     else { const b=new Uint8Array(1+pcm.byteLength); b[0]=tag;
            b.set(new Uint8Array(pcm.buffer),1); ws.send(b.buffer); }
+  }
+  node.onaudioprocess = ev => {
+    if(ws.readyState!==1) return;
+    const input = ev.inputBuffer.getChannelData(0);
+    if(!gate){ sendFloat(input); return; }  // continuous (dual): one shared clock
+    let sum=0; for(let i=0;i<input.length;i++) sum+=input[i]*input[i];
+    const rms = Math.sqrt(sum/input.length);
+    if(rms > GATE){
+      if(hangover===0){ pre.forEach(sendFloat); pre=[]; }  // flush pre-roll: save the onset
+      hangover = 18;                                       // ~1.5s tail so finals fire
+    } else if(hangover > 0){ hangover--; }
+    if(rms <= GATE && hangover <= 0){                      // idle: keep a short pre-roll ring
+      pre.push(new Float32Array(input)); if(pre.length>3) pre.shift();
+      return;
+    }
+    sendFloat(input);
   };
   node.connect(gain);
   nodes.push(node);
@@ -307,8 +319,8 @@ startBtn.onclick = async () => {
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
   };
   ws.onopen = () => {
-    if(dual){ attach(streams[0],0,ratio); attach(streams[1],1,ratio); }  // 我 / 對方
-    else { streams.forEach(st=>attach(st,null,ratio)); }  // mic/system/both(mixed)
+    if(dual){ attach(streams[0],0,ratio,false); attach(streams[1],1,ratio,false); }  // 我/對方, continuous
+    else { streams.forEach(st=>attach(st,null,ratio,true)); }  // mic/system/both: gated
   };
   startBtn.disabled=true; stopBtn.disabled=false;
 };
@@ -647,7 +659,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
 def create_app(store, *, summary_backend, asr_backend=None,
                live_manager=None, live_interim_backend=None, model_names=None,
                on_model_change=None,
-               summary_model="mlx-lm", live_silence_ms=400, live_min_speech_ms=250,
+               summary_model="mlx-lm", live_silence_ms=400, live_min_speech_ms=150,
                live_interim_s=0.6, live_max_utt_s=15.0, live_rms_threshold=500,
                live_max_lag_s=4.0):
     app = FastAPI()
@@ -1066,7 +1078,7 @@ if __name__ == "__main__":  # pragma: no cover
     live_model = os.environ.get("LIVE_MODEL", remembered or rec["live"])
     live_interim_model = os.environ.get("LIVE_INTERIM_MODEL", rec["interim"])
     live_silence = int(os.environ.get("LIVE_SILENCE_MS", "400"))
-    live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "250"))
+    live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "150"))  # keep short words
     live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "0.6"))
     live_rms = int(os.environ.get("LIVE_RMS", "500"))
     live_fallback = os.environ.get("LIVE_FALLBACK", ",".join(rec["fallback"]))
