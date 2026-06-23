@@ -35,9 +35,7 @@ _STYLE = """
  --me:#6db3ff;--other:#74d99a;--danger:#ff6b6f;
  --shadow:0 1px 2px rgba(0,0,0,.4),0 14px 34px -14px rgba(0,0,0,.6);
  --capbg:#05070b;--capink:#f3f5fa}}
-body{margin:0;background:
- radial-gradient(1200px 480px at 85% -120px,color-mix(in srgb,var(--accent) 14%,transparent),transparent),
- var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
  font:15px/1.62 -apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Segoe UI",Roboto,sans-serif}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 .wrap{max-width:900px;margin:0 auto;padding:20px 20px 80px}
