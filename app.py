@@ -799,13 +799,29 @@ def create_app(store, *, summary_backend, asr_backend=None,
             else:
                 await ws.send_json({"type": "interim", **ev, "speaker": speaker})
 
-        # Producer/consumer per track: receiver buffers (cheap, drops oldest beyond
-        # the lag ceiling); consumer batches each track's queued audio into one ASR
-        # call, skips interim when behind (final > interim).
+        # Wall-clock continuous recording: on every received chunk, pad EVERY track
+        # with silence up to now-t0, then append the chunk to its track. This makes
+        # all tracks the same length (= session duration) and on one shared clock,
+        # regardless of when each browser stream starts or how it's gated — so 我/對方
+        # timestamps and lengths line up. File + session buffer get the same bytes, so
+        # committed-bytes == file position == wall-clock (seek/highlight aligned).
+        # ponytail: no lag-drop — it broke the invariant; small-q4 keeps up. Add a
+        # smarter back-pressure cap only if a slow model makes the buffer balloon.
         got = asyncio.Event()
         closed = False
-        max_lag_bytes = int(live_max_lag_s * 16000) * 2
         interim_lag_bytes = int(2 * live_interim_s * 16000) * 2
+        written = {tag: 0 for tag in tracks}  # bytes laid down per track (wall-clock)
+
+        def _pad_to(now):
+            target = int((now - t0) * 16000) * 2
+            for tag in tracks:
+                gap = target - written[tag]
+                gap -= gap % 2
+                if gap > 0:
+                    sil = bytes(gap)
+                    audio_files[tag].write(sil)
+                    buffers[tag].extend(sil)
+                    written[tag] += gap
 
         async def receiver():
             nonlocal closed
@@ -813,13 +829,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 while True:
                     data = await ws.receive_bytes()
                     tag, pcm = (data[0], data[1:]) if dual else (0, data)
-                    buf = buffers.get(tag)
-                    if buf is None:
+                    if tag not in buffers:
                         continue
-                    audio_files[tag].write(pcm)  # full audio for diarization
-                    buf.extend(pcm)
-                    if len(buf) > max_lag_bytes:
-                        del buf[:len(buf) - max_lag_bytes]
+                    _pad_to(time.time())          # keep all tracks at wall-clock
+                    audio_files[tag].write(pcm)
+                    buffers[tag].extend(pcm)
+                    written[tag] += len(pcm)
                     got.set()
             except WebSocketDisconnect:
                 closed = True
@@ -852,6 +867,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     await ws.send_json({"type": "notice", "msg": msg})
         finally:
             rtask.cancel()
+            _pad_to(time.time())  # equalize track lengths to the final wall-clock
             for tag, s in sessions.items():
                 for ev in await run_in_threadpool(s.flush):
                     if ev["kind"] == "final":  # audio-position offset, not wall-clock
