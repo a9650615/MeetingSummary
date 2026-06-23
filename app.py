@@ -99,6 +99,7 @@ def _shell(title, body, script="", back=False):
 _INDEX = _shell("MeetingSummary", """
 <h1>本地會議轉錄 · 摘要</h1>
 <a class="btn primary" href="/live" style="font-size:16px;padding:.7em 1.2em">🔴 開始 Live 即時逐字稿</a>
+<a class="btn" href="/models/manage" style="margin-left:8px">⚙️ 模型管理</a>
 <h2>上傳音檔</h2>
 <div class=card>
   <form action="/ingest" method="post" enctype="multipart/form-data" class=row>
@@ -135,6 +136,47 @@ document.getElementById('mergebtn').onclick = async () => {
   setTimeout(()=>location.reload(),600);
 };
 """)
+
+
+def _models_page():
+    body = (
+        "<h1>⚙️ 模型管理</h1>"
+        "<div class=card><div class=row style='margin-bottom:6px'>"
+        "<input id=repo placeholder='HF repo id 預先下載 (e.g. mlx-community/whisper-base-mlx-q4)' "
+        "style='flex:1;min-width:280px'>"
+        "<button class='btn primary' id=dl>下載</button>"
+        "<span class='muted small' id=dlmsg></span></div>"
+        "<p class=hint style='margin:0'>chatllm/.cpp 模型在 Live/重新辨識 選用時自動下載；"
+        "此處下載 HF(whisper/mlx)模型。</p></div>"
+        "<div class=card><h2 style='margin-top:0'>已下載 <span class=muted id=total></span></h2>"
+        "<table class=tx id=tbl><tr><th>模型</th><th>大小</th><th></th></tr></table></div>")
+    script = """
+    function human(mb){return mb>=1000?(mb/1000).toFixed(1)+' GB':mb+' MB';}
+    function load(){fetch('/models/cache').then(r=>r.json()).then(d=>{
+      document.getElementById('total').textContent='共 '+human(d.total_mb);
+      const rows=d.models.map(m=>`<tr><td title="${m.root}">${m.name}</td>`
+        +`<td>${human(m.size_mb)}</td>`
+        +`<td><button class='btn danger' data-p="${m.path.replace(/"/g,'&quot;')}">刪除</button></td></tr>`).join('');
+      document.getElementById('tbl').innerHTML='<tr><th>模型</th><th>大小</th><th></th></tr>'
+        +(rows||'<tr><td colspan=3 class=muted>尚無快取</td></tr>');
+      document.querySelectorAll('#tbl button[data-p]').forEach(b=>b.onclick=async()=>{
+        if(!confirm('刪除 '+b.closest('tr').firstChild.textContent+' ？')) return;
+        b.disabled=true;
+        const r=await fetch('/models/cache/delete',{method:'POST',
+          headers:{'Content-Type':'application/json'},body:JSON.stringify({path:b.dataset.p})});
+        if(r.ok) load(); else b.disabled=false;
+      });
+    });}
+    document.getElementById('dl').onclick=async()=>{
+      const repo=document.getElementById('repo').value.trim(); if(!repo)return;
+      const m=document.getElementById('dlmsg'); m.textContent=' 下載中…(背景)';
+      await fetch('/models/download',{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({repo})});
+      m.textContent=' 已開始背景下載 '+repo+'，完成後重整可見';
+    };
+    load();
+    """
+    return _shell("模型管理", body, script=script, back=True)
 
 
 def _result_page(title, summary, transcripts):
@@ -356,6 +398,14 @@ class ModelIn(BaseModel):
     live: str
 
 
+class PathIn(BaseModel):
+    path: str
+
+
+class DownloadIn(BaseModel):
+    repo: str   # HF repo id to prefetch (mlx/transformers models)
+
+
 class MergeIn(BaseModel):
     ids: list[int]
 
@@ -454,6 +504,55 @@ def _meeting_tracks(store, mid):
                 out.append(t)
                 break
     return out
+
+
+# Model cache roots across the runtimes we use (HF for mlx/transformers, femelo
+# .cpp gguf, chatllm.cpp gguf). The manage tab lists + deletes from these.
+_MODEL_ROOTS = [
+    os.path.expanduser("~/.cache/huggingface/hub"),
+    os.path.expanduser("~/Library/Application Support/py_qwen3_asr_cpp/models"),
+    os.path.abspath("chatllm.cpp/quantized"),
+]
+
+
+def _dir_size(path):
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def _scan_model_cache(roots=None):
+    """List cached models (top-level entry per root) with size. blobs/refs etc.
+    inside HF model dirs are summed, not listed."""
+    out = []
+    for root in (roots or _MODEL_ROOTS):
+        if not os.path.isdir(root):
+            continue
+        for name in sorted(os.listdir(root)):
+            if name.startswith("."):
+                continue
+            p = os.path.join(root, name)
+            out.append({"name": name, "path": p, "root": root,
+                        "size_mb": round(_dir_size(p) / 1e6, 1)})
+    return out
+
+
+def _safe_model_path(path, roots=None):
+    """True only if path is a real child of a known root (not the root, no
+    traversal). Guards the delete route from rm-ing arbitrary paths."""
+    rp = os.path.realpath(path)
+    for root in (roots or _MODEL_ROOTS):
+        rr = os.path.realpath(root)
+        if rp != rr and os.path.commonpath([rp, rr]) == rr:
+            return True
+    return False
 
 
 def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
@@ -714,6 +813,42 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if on_model_change:
             on_model_change(body.live)
         return {"live": live_manager.requested}
+
+    @app.get("/models/manage", response_class=HTMLResponse)
+    def models_manage():
+        return _models_page()
+
+    @app.get("/models/cache")
+    def models_cache():
+        return {"models": _scan_model_cache(),
+                "total_mb": round(sum(m["size_mb"] for m in _scan_model_cache()), 1)}
+
+    @app.post("/models/cache/delete")
+    def models_cache_delete(body: PathIn):
+        if not _safe_model_path(body.path):
+            raise HTTPException(400, "path not under a known model cache root")
+        import shutil
+        if os.path.isdir(body.path):
+            shutil.rmtree(body.path, ignore_errors=True)
+        elif os.path.exists(body.path):
+            os.remove(body.path)
+        else:
+            raise HTTPException(404, "not found")
+        return {"deleted": body.path}
+
+    @app.post("/models/download")
+    def models_download(body: DownloadIn):
+        # Prefetch an HF repo (mlx/transformers). chatllm/.cpp models download on
+        # first use of their dropdown option, so this covers the HF ones.
+        def _dl():
+            try:
+                from huggingface_hub import snapshot_download
+                snapshot_download(body.repo)
+            except Exception as e:
+                print(f"prefetch failed {body.repo}: {e}", file=sys.stderr)
+        import threading
+        threading.Thread(target=_dl, daemon=True).start()
+        return {"downloading": body.repo}
 
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket):
