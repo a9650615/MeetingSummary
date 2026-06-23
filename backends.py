@@ -9,12 +9,24 @@ from live import AdaptiveBackend, mlx_whisper_live_backend
 
 
 def route(model):
-    """Engine for a model id. Qwen3-ASR runs offline (transformers) for the
-    accurate/batch path; whisper(-mlx) is the Apple-native live engine."""
+    """Engine for a model id. q4-k-m GGUF -> qwen3cpp (.cpp/Metal sidecar, fast);
+    other qwen3-asr -> transformers; whisper(-mlx) is the Apple-native live engine."""
     m = model.lower()
+    if "q4-k-m" in m:
+        return "qwen3cpp"
     if "qwen3-asr" in m:
         return "qwen3"
     return "whisper"
+
+
+def qwen3_words_to_segments(words, text):
+    """Map the sidecar's AlignedWord list -> [{start,end,text}] (seconds). Falls
+    back to a single segment from the full text if alignment gave no words."""
+    segs = [{"start": w["start"], "end": w["end"], "text": w["word"]}
+            for w in words if w.get("word", "").strip()]
+    if segs:
+        return segs
+    return [{"start": 0.0, "end": 0.0, "text": text}] if text.strip() else []
 
 
 def make_live_backend(model):
@@ -58,12 +70,59 @@ def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B"):
 
 
 def make_batch_backend(model):
-    """Batch/accurate: route to Qwen3-ASR (best zh, offline transformers) or
-    whisper-MLX. Returns a callable(audio_path) -> segments."""
-    if route(model) == "qwen3":
+    """Batch/accurate: route to Qwen3-ASR .cpp (fast, Metal, word-aligned) or
+    transformers Qwen3-ASR or whisper-MLX. callable(audio_path) -> segments."""
+    r = route(model)
+    if r == "qwen3cpp":
+        return qwen3_cpp_batch_backend(model)
+    if r == "qwen3":
         return qwen3_batch_backend(model)
     import asr
     return asr.mlx_whisper_backend(model)
+
+
+def qwen3_cpp_batch_backend(model="qwen3-asr-0.6b-q4-k-m"):
+    """Qwen3-ASR via the .cpp/GGUF sidecar (Metal, fast, word-level alignment).
+    Runs in .venv-qwen314 as a subprocess (cp314 native module); the app is 3.10.
+    Raw .pcm is wrapped to a temp wav (the .cpp loader needs a container)."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    py = os.path.join(here, ".venv-qwen314/bin/python")
+    cli = os.path.join(here, "qwen3_cpp_cli.py")
+
+    def _run(audio_path):
+        audio_path = str(audio_path)
+        tmp = None
+        if audio_path.endswith(".pcm"):
+            import recorder  # noqa: PLC0415
+            with open(audio_path, "rb") as f:
+                wav = recorder.pcm_to_wav(f.read(), sample_rate=16000, channels=1)
+            tmp = audio_path + ".qwav.wav"
+            with open(tmp, "wb") as f:
+                f.write(wav)
+            audio_path = tmp
+        try:
+            p = subprocess.run([py, cli, audio_path], capture_output=True,
+                               text=True, timeout=1800)
+            line = next((l for l in p.stdout.splitlines()
+                         if l.startswith("QWEN3JSON:")), None)
+            if line is None:
+                print(f"qwen3cpp no output: {p.stderr[-300:]}", file=sys.stderr)
+                return []
+            d = json.loads(line[len("QWEN3JSON:"):])
+            return qwen3_words_to_segments(d.get("words", []), d.get("text", ""))
+        except Exception as e:
+            print(f"qwen3cpp error: {e}", file=sys.stderr)
+            return []
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+
+    return _run
 
 
 def qwen3_batch_backend(model="Qwen/Qwen3-ASR-0.6B"):

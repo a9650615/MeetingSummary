@@ -3,6 +3,7 @@ data/
 *.wav
 __pycache__/
 .venv/
+.venv-qwen314/
 .DS_Store
 .build/
 *.xcodeproj
