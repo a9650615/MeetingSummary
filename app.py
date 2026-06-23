@@ -164,6 +164,9 @@ document.getElementById('mergebtn').onclick = async () => {
 def _models_page():
     body = (
         "<h1>⚙️ 模型管理 <span class=muted id=total></span></h1>"
+        "<div class=card style='display:flex;align-items:center;gap:12px'>"
+        "<button class=btn id=free>釋放閒置記憶體</button>"
+        "<span class=hint id=freemsg style='margin:0'>清掉已載入但閒置的模型權重(下次用會重載)。</span></div>"
         "<div class=card><h2 style='margin-top:0'>加速 runtime（.cpp · Metal）</h2>"
         "<table class=tx id=rt><tr><th>Runtime</th><th>狀態</th><th></th></tr></table>"
         "<p class=hint style='margin:.5em 0 0'>一鍵下載+編譯+安裝。femelo 需 python3.14，"
@@ -212,6 +215,10 @@ def _models_page():
       document.querySelectorAll('#oth button[data-p]').forEach(b=>b.onclick=async()=>{
         if(await del(b.dataset.p,b.dataset.n))load();});
     });}
+    document.getElementById('free').onclick=async()=>{
+      const m=document.getElementById('freemsg');m.textContent=' 釋放中…';
+      const r=await fetch('/models/free',{method:'POST'});const j=await r.json();
+      m.textContent=' 已釋放: '+(j.freed.join(', ')||'無');setTimeout(load,400);};
     load();
     """
     return _shell("模型管理", body, script=script, back=True)
@@ -701,6 +708,29 @@ def _runtime_status():
     }
 
 
+def _free_models():
+    """Drop cached model weights + the Metal memory pool to reclaim RAM when idle.
+    Best-effort. An in-flight transcribe just reloads on its next call (a latency
+    blip, not a crash). ponytail: manual release beats a guessed idle-timer."""
+    import gc
+    freed = []
+    try:
+        import mlx_whisper.load_models as _lm  # whisper weights are lru_cached by repo
+        if hasattr(_lm.load_model, "cache_clear"):
+            _lm.load_model.cache_clear()
+            freed.append("whisper")
+    except Exception:
+        pass
+    gc.collect()
+    try:
+        import mlx.core as mx
+        (getattr(mx, "clear_cache", None) or getattr(mx.metal, "clear_cache"))()
+        freed.append("mlx-pool")
+    except Exception:
+        pass
+    return freed
+
+
 def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
     """Generator: re-transcribe a meeting window-by-window, yielding progress
     events ({type:start,total} / {type:progress,done,total,text} / {type:done,n})
@@ -1030,6 +1060,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         import threading
         threading.Thread(target=_dl, daemon=True).start()
         return {"downloading": m["id"]}
+
+    @app.post("/models/free")
+    def models_free():
+        return {"freed": _free_models()}
 
     @app.post("/models/setup")
     def models_setup(body: SetupIn):
