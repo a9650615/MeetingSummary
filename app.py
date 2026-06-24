@@ -1101,8 +1101,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
             import subprocess
             import time as _t
             _t.sleep(0.3)  # let the HTTP response flush first
+            # SIGKILL the supervisor FIRST so it can't restart the server mid-teardown.
             for pat in ("supervise.sh", "meeting_watch.py", "bootstrap.py"):
-                subprocess.run(["pkill", "-f", pat], capture_output=True)
+                subprocess.run(["pkill", "-9", "-f", pat], capture_output=True)
+            port = os.environ.get("MEETING_PORT", "8765")
+            subprocess.run(f"lsof -ti tcp:{port} | xargs kill -9", shell=True,
+                           capture_output=True)  # frees port (kills any server incl self)
             os._exit(0)
         import threading as _th
         _th.Thread(target=_kill, daemon=True).start()
