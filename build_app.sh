@@ -9,6 +9,7 @@ cd "$(dirname "$0")"
 ROOT="$(pwd)"
 APP="dist/MeetingSummary.app"
 PORT="${MEETING_PORT:-8765}"
+REPO_SLUG="${MEETING_REPO:-a9650615/MeetingSummary}"   # GitHub releases auto-update
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/app"
@@ -59,6 +60,7 @@ else
   /usr/bin/rsync -a --exclude .venv --exclude data "\$SRC/" "\$WD/" 2>/dev/null || cp -R "\$SRC/." "\$WD/"
 fi
 export MEETING_PORT=\$PORT
+export MEETING_REPO="$REPO_SLUG"                # bootstrap polls GitHub releases
 ( sleep 2; open "http://127.0.0.1:\$PORT" ) &   # browser shows the progress page right away
 cd "\$WD"
 exec /usr/bin/python3 bootstrap.py             # serves progress -> installs -> exec real server
