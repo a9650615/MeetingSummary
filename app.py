@@ -5,6 +5,7 @@ Phase 1 = batch loop: create meeting -> transcribe saved PCM -> summarize -> vie
 Live websocket + recording start/stop (Swift helper) land in Phase 2."""
 import asyncio
 import html
+import json
 import os
 import sys
 import time
@@ -77,6 +78,21 @@ select{cursor:pointer}
  background:var(--surface2);color:var(--muted);border:1px solid var(--line)}
 .badge.live{background:color-mix(in srgb,var(--danger) 15%,transparent);color:var(--danger);border-color:transparent}
 .badge.done{background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok);border-color:transparent}
+.tg{display:inline-block;font-size:11px;color:var(--muted);border:1px solid var(--line);
+ border-radius:999px;padding:1px .55em;margin-left:5px;white-space:nowrap}
+.tgbtn{cursor:pointer;margin:0}
+.tgbtn:hover{border-color:var(--accent);color:var(--accent)}
+.tgbtn.on{background:var(--accent);color:#fff;border-color:transparent}
+.tg .x{cursor:pointer;margin-left:5px;opacity:.6}
+.tg .x:hover{opacity:1;color:var(--danger)}
+details.menu{position:relative;display:inline-block}
+details.menu>summary{list-style:none}
+details.menu>summary::-webkit-details-marker{display:none}
+details.menu>summary::marker{content:""}
+.menupop{position:absolute;z-index:30;top:calc(100% + 4px);left:0;display:flex;flex-direction:column;
+ gap:6px;padding:8px;min-width:170px;background:var(--surface);border:1px solid var(--line);
+ border-radius:var(--radius-sm);box-shadow:0 10px 28px -10px rgba(0,0,0,.45)}
+.menupop .btn{width:100%;text-align:left}
 ul.meetings{list-style:none;margin:0;padding:0}
 ul.meetings li{display:flex;align-items:center;gap:11px;padding:13px 6px;border-radius:var(--radius-sm);
  border-bottom:1px solid var(--line)}
@@ -204,24 +220,32 @@ _INDEX = _shell("MeetingSummary", """
     <button class=btn id=mergebtn>整合相近的 live 會議</button>
     <span class="muted small" id=mergemsg></span>
   </div>
+  <div id=tagbar class=row style="gap:6px;margin-bottom:8px"></div>
   <ul class=meetings id=meetings></ul>
 </div>
 """, script="""
-let ALL=[];
+let ALL=[], TAGFILTER=null;
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function chips(tags){return (tags||[]).map(t=>`<span class=tg>#${esc(t)}</span>`).join('');}
 function liFull(m){return `<li><span title="${m.has_audio?'有音檔':'無音檔'}">${m.has_audio?'🔊':'🔇'}</span>
   <a href="/m/${m.id}">${esc(m.title)}</a>
-  <span class="badge ${m.status==='finalized'?'done':'live'}">${m.status}</span></li>`;}
+  <span class="badge ${m.status==='finalized'?'done':'live'}">${m.status}</span>${chips(m.tags)}</li>`;}
 function render(list){const el=document.getElementById('meetings');
   el.innerHTML = list.length ? list.map(liFull).join('') : '<li class="muted small">尚無會議</li>';}
 function renderHits(hits){const el=document.getElementById('meetings');
   el.innerHTML = hits.length ? hits.map(h=>`<li style="display:block"><a href="/m/${h.id}">${esc(h.title)}</a>
     <div class="muted small" style="margin:2px 0 0">${esc(h.snippet)}</div></li>`).join('')
     : '<li class="muted small">查無結果</li>';}
-fetch('/meetings').then(r=>r.json()).then(ms=>{ALL=ms;render(ms);});
+function applyView(){const f=TAGFILTER?ALL.filter(m=>(m.tags||[]).includes(TAGFILTER)):ALL;render(f);}
+function renderTagbar(){fetch('/tags').then(r=>r.json()).then(j=>{
+  const bar=document.getElementById('tagbar');
+  bar.innerHTML=j.tags.map(t=>`<span class="tg tgbtn${t.name===TAGFILTER?' on':''}" data-t="${esc(t.name)}">#${esc(t.name)} ${t.count}</span>`).join('');
+  bar.querySelectorAll('.tgbtn').forEach(s=>s.onclick=()=>{
+    TAGFILTER = TAGFILTER===s.dataset.t ? null : s.dataset.t; renderTagbar(); applyView();});});}
+fetch('/meetings').then(r=>r.json()).then(ms=>{ALL=ms;applyView();renderTagbar();});
 let tmr; const qel=document.getElementById('q');
 qel.oninput=()=>{clearTimeout(tmr);const q=qel.value.trim();
-  if(!q){render(ALL);return;}
+  if(!q){applyView();return;}
   tmr=setTimeout(async()=>{const j=await(await fetch('/search?q='+encodeURIComponent(q))).json();
     renderHits(j.results);},250);};
 document.getElementById('mergebtn').onclick = async () => {
@@ -635,6 +659,11 @@ class DiarizeIn(BaseModel):
     mark_overlap: bool = False       # experimental: tag turn-dense/overlap lines
 
 
+class TagIn(BaseModel):
+    name: str
+    remove: bool = False
+
+
 def _rows(rows):
     return [dict(r) for r in rows]
 
@@ -1046,7 +1075,7 @@ def _save_upload_pcm(src_path, mid, store):
 _TRACK_LABEL = {"system": "對方", "mic": "我", "mixed": "混合"}
 
 
-def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
+def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=()):
     def ts_str(ms):
         s = (ms or 0) // 1000
         return f"{s // 60:d}:{s % 60:02d}"
@@ -1074,6 +1103,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         f"<h1><span id=mtitle>{html.escape(meeting['title'])}</span> "
         f"<button class=btn id=edittitle title='改標題' style='padding:.25em .5em;font-size:13px'>✏️</button> "
         f"<span class='badge {badge}'>{html.escape(meeting['status'])}</span></h1>"
+        "<div id=tags class=row style='gap:6px;margin:-4px 0 14px'></div>"
         + audio_card +
         "<div class=card><h2 style='margin-top:0'>摘要</h2>"
         "<div class=row>"
@@ -1081,12 +1111,14 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "<option value=bullets>條列</option>"
         "<option value=actions>行動項目</option></select>"
         "<button class='btn primary' id=go>產生摘要</button>"
+        "<details class=menu><summary class=btn>⋯ 更多</summary><div class=menupop>"
         "<button class=btn id=dia>多人分群</button>"
-        "<button class=btn id=fin>完成會議</button>"
-        f"<a class=btn href='/meetings/{mid}/export'>匯出 MD</a>"
+        f"<a class=btn href='/meetings/{mid}/export'>匯出 Markdown</a>"
         "<button class=btn id=cpsum>複製摘要</button>"
         "<button class=btn id=cptx>複製逐字稿</button>"
+        "<button class=btn id=fin>完成會議</button>"
         "<button class='btn danger' id=del>刪除會議</button>"
+        "</div></details>"
         "<span class='muted small' id=finmsg></span></div>"
         "<p class=hint style='margin:.6em 0 0'>※ 摘要只在按下按鈕時才產生。停止錄音不會自動完成。"
         "「多人分群」用聲紋把每條音軌(我/對方)各自拆成多位說話者(會後處理,需先有錄音)。</p>"
@@ -1208,7 +1240,19 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "if(nw==null||!nw.trim()||nw.trim()===old)return;"
         f"const r=await fetch('/meetings/{mid}/speaker',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({old:old,new:nw.trim()})});"
-        "if(r.ok)location.reload();};});")
+        "if(r.ok)location.reload();};});"
+        # Tags: chips + remove (✕) + an add input (Enter to add).
+        "function _esc(s){return (s||'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));}"
+        f"const MID={mid};"
+        "async function _postTag(name,remove){return (await fetch(`/meetings/${MID}/tags`,{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({name,remove})})).json();}"
+        "function renderTags(list){const el=document.getElementById('tags');"
+        "el.innerHTML=list.map(t=>`<span class=tg>#${_esc(t)}<span class=x data-rm=\"${_esc(t)}\">✕</span></span>`).join('')"
+        "+`<input id=tagin placeholder='+ 標籤' style='font-size:12px;padding:2px 8px;width:88px'>`;"
+        "el.querySelectorAll('.x').forEach(s=>s.onclick=async()=>renderTags((await _postTag(s.dataset.rm,true)).tags));"
+        "const ti=document.getElementById('tagin');ti.onkeydown=async(e)=>{"
+        "if(e.key==='Enter'&&ti.value.trim()){const j=await _postTag(ti.value.trim(),false);renderTags(j.tags);}};}"
+        f"renderTags({json.dumps(list(tags))});")
     return _shell(html.escape(meeting["title"]), body, script=script, back=True)
 
 
@@ -1298,7 +1342,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # Tracks with retained audio (across all segments — handles merged meetings).
         audio_tracks = _meeting_tracks(store, mid)
         return _detail_page(mid, dict(meeting), _rows(store.list_transcripts(mid)),
-                            _rows(store.list_summaries(mid)), audio_tracks)
+                            _rows(store.list_summaries(mid)), audio_tracks,
+                            tags=store.tags_for(mid))
 
     @app.get("/meetings/{mid}/audio/{track}.wav")
     def meeting_audio(mid: int, track: str):
@@ -1671,8 +1716,23 @@ def create_app(store, *, summary_backend, asr_backend=None,
         for m in store.list_meetings():
             d = dict(m)
             d["has_audio"] = bool(_meeting_tracks(store, m["id"]))
+            d["tags"] = store.tags_for(m["id"])
             out.append(d)
         return out
+
+    @app.get("/tags")
+    def list_tags():
+        return {"tags": store.all_tags()}
+
+    @app.post("/meetings/{mid}/tags")
+    def tag_meeting(mid: int, body: TagIn):
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        if body.remove:
+            store.remove_tag(mid, body.name)
+        else:
+            store.add_tag(mid, body.name)
+        return {"tags": store.tags_for(mid)}
 
     @app.get("/search")
     def search(q: str = ""):

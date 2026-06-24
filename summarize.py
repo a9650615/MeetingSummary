@@ -17,8 +17,15 @@ _INSTRUCTION = {
 }
 
 
+# Small models invent plausible names/owners/deadlines (e.g. 小明/小紅) that were
+# never said. Hard rule up front + explicit fallbacks cut most of it.
+_GUARD = ("嚴格規則:只能根據下方逐字稿的內容,絕對不可杜撰任何人名、數字、日期、期限或"
+          "未提及的事項。逐字稿沒提到負責人就寫「未指定」,沒提到期限就寫「未定」。"
+          "寧可少寫,也不要編造。\n")
+
+
 def build_prompt(text, *, kind, lang):
-    return f"{_INSTRUCTION[kind]}\n輸出語言:{lang}\n\n逐字稿:\n{text}"
+    return f"{_GUARD}{_INSTRUCTION[kind]}\n輸出語言:{lang}\n\n逐字稿:\n{text}"
 
 
 def _chunk(text, max_chars):

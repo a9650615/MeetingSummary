@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS transcripts(
 CREATE TABLE IF NOT EXISTS summaries(
     id INTEGER PRIMARY KEY, meeting_id INTEGER, kind TEXT, lang TEXT,
     text TEXT, model TEXT, created_at REAL);
+CREATE TABLE IF NOT EXISTS tags(id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+CREATE TABLE IF NOT EXISTS meeting_tags(
+    meeting_id INTEGER, tag_id INTEGER, PRIMARY KEY(meeting_id, tag_id));
 """
 
 
@@ -156,6 +159,37 @@ class Store:
                ORDER BY m.created_at DESC LIMIT ?""",
             (like, like, like, like, like, limit)).fetchall()
 
+    # --- tags (many-to-many: a meeting can carry #客戶 #1on1 #產品) ---
+    def add_tag(self, meeting_id, name):
+        name = (name or "").strip().lstrip("#").strip()
+        if not name:
+            return False
+        self.db.execute("INSERT OR IGNORE INTO tags(name) VALUES(?)", (name,))
+        tid = self.db.execute("SELECT id FROM tags WHERE name=?", (name,)).fetchone()[0]
+        self.db.execute("INSERT OR IGNORE INTO meeting_tags(meeting_id, tag_id) VALUES(?,?)",
+                        (meeting_id, tid))
+        self.db.commit()
+        return True
+
+    def remove_tag(self, meeting_id, name):
+        self.db.execute(
+            "DELETE FROM meeting_tags WHERE meeting_id=? AND tag_id="
+            "(SELECT id FROM tags WHERE name=?)", (meeting_id, (name or "").strip().lstrip("#")))
+        self.db.commit()
+
+    def tags_for(self, meeting_id):
+        return [r["name"] for r in self.db.execute(
+            "SELECT t.name FROM tags t JOIN meeting_tags mt ON mt.tag_id=t.id "
+            "WHERE mt.meeting_id=? ORDER BY t.name", (meeting_id,)).fetchall()]
+
+    def all_tags(self):
+        """[{name, count}] over meetings that still exist, most-used first."""
+        return [dict(r) for r in self.db.execute(
+            "SELECT t.name, COUNT(mt.meeting_id) AS count FROM tags t "
+            "JOIN meeting_tags mt ON mt.tag_id=t.id "
+            "JOIN meetings m ON m.id=mt.meeting_id "
+            "GROUP BY t.id ORDER BY count DESC, t.name").fetchall()]
+
     def merge_meetings(self, target_id, source_ids):
         """Fold sources into target: transcripts/segments reassigned, transcript
         start_ms rebased by the created_at gap so the timeline stays ordered.
@@ -194,6 +228,7 @@ class Store:
         self.db.execute("DELETE FROM transcripts WHERE meeting_id=?", (meeting_id,))
         self.db.execute("DELETE FROM summaries WHERE meeting_id=?", (meeting_id,))
         self.db.execute("DELETE FROM segments WHERE meeting_id=?", (meeting_id,))
+        self.db.execute("DELETE FROM meeting_tags WHERE meeting_id=?", (meeting_id,))
         self.db.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
         self.db.commit()
         still = {r["dir_path"] for r in
