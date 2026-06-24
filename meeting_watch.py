@@ -65,7 +65,27 @@ def notify(app):
                         f'display notification "{msg}" with title "{title}" sound name "Glass"'])
 
 
+def _has_terminal_notifier():
+    return subprocess.run(["which", "terminal-notifier"],
+                          capture_output=True).returncode == 0
+
+
+def startup_ping():
+    """Fire one notification on launch so macOS prompts for / registers permission
+    BEFORE the first real meeting (else the first detection may be silently dropped)."""
+    tip = "" if _has_terminal_notifier() else "（裝 terminal-notifier 通知更穩、可點開）"
+    title = "📝 會議偵測已啟動"
+    msg = f"進會議(開麥克風)時會提醒你錄製{tip}"
+    if _has_terminal_notifier():
+        subprocess.run(["terminal-notifier", "-title", title, "-message", msg,
+                        "-open", URL])
+    else:
+        subprocess.run(["osascript", "-e",
+                        f'display notification "{msg}" with title "{title}"'])
+
+
 def main():
+    startup_ping()
     notified = False
     have_mic = os.path.exists(_MICBUSY)
     while True:
