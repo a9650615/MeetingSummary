@@ -25,6 +25,26 @@ def test_add_segment_and_list(tmp_path):
     assert segs[0]["origin"] == "recorded"
 
 
+def test_update_title(tmp_path):
+    s = _store(tmp_path)
+    mid = s.create_meeting(title="舊", created_at=1.0, lang="zh-TW")
+    s.update_title(mid, "週會 6/24")
+    assert s.get_meeting(mid)["title"] == "週會 6/24"
+
+
+def test_rename_speaker_across_meeting(tmp_path):
+    s = _store(tmp_path)
+    mid = s.create_meeting(title="m", created_at=1.0, lang="zh-TW")
+    for i in range(3):
+        s.add_transcript(mid, "live", "system", i * 1000, i * 1000 + 500,
+                         "說話者1", f"t{i}")
+    s.add_transcript(mid, "live", "system", 9000, 9500, "說話者2", "other")
+    n = s.rename_speaker(mid, "說話者1", "Scott")
+    assert n == 3
+    spk = {r["speaker"] for r in s.list_transcripts(mid)}
+    assert spk == {"Scott", "說話者2"}
+
+
 def test_transcripts_roundtrip(tmp_path):
     s = _store(tmp_path)
     mid = s.create_meeting(title="m", created_at=1.0, lang="zh-TW")

@@ -520,6 +520,15 @@ class SetupIn(BaseModel):
     runtime: str   # "femelo" | "chatllm"
 
 
+class TitleIn(BaseModel):
+    title: str
+
+
+class SpeakerRenameIn(BaseModel):
+    old: str
+    new: str
+
+
 class MergeIn(BaseModel):
     ids: list[int]
 
@@ -900,7 +909,8 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
     rows = "".join(
         f"<tr data-track='{html.escape(str(r['track']))}' data-ts='{(r['start_ms'] or 0)/1000:.2f}'>"
         f"<td class=ts>{ts_str(r['start_ms'])}</td>"
-        f"<td class=who>{html.escape(str(r['speaker']))}</td>"
+        f"<td class=who data-spk='{html.escape(str(r['speaker']))}' "
+        f"title='點擊改名'>{html.escape(str(r['speaker']))}</td>"
         f"<td>{html.escape(r['text'])}</td></tr>"
         for r in transcripts) or "<tr><td colspan=3 class=muted>尚無逐字稿</td></tr>"
     sums = "".join(
@@ -917,7 +927,8 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
                   "捲動時播放器固定在頂部。</p></div>") if audio_tracks else ""
     badge = "done" if meeting["status"] == "finalized" else "live"
     body = (
-        f"<h1>{html.escape(meeting['title'])} "
+        f"<h1><span id=mtitle>{html.escape(meeting['title'])}</span> "
+        f"<button class=btn id=edittitle title='改標題' style='padding:.25em .5em;font-size:13px'>✏️</button> "
         f"<span class='badge {badge}'>{html.escape(meeting['status'])}</span></h1>"
         + audio_card +
         "<div class=card><h2 style='margin-top:0'>摘要</h2>"
@@ -1018,7 +1029,22 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "rows.forEach(r=>r.tr.classList.toggle('active',r===cur));"
         "if(cur&&Date.now()>pauseFollow)cur.tr.scrollIntoView({block:'nearest',behavior:'smooth'});"
         "last=cur;};"
-        "});")
+        "});"
+        # Edit title (✏️) -> POST /title.
+        "document.getElementById('edittitle').onclick=async()=>{"
+        "const cur=document.getElementById('mtitle').textContent;"
+        "const t=prompt('會議標題',cur);if(t==null||!t.trim())return;"
+        f"const r=await fetch('/meetings/{mid}/title',{{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t.trim()})});"
+        "if(r.ok)document.getElementById('mtitle').textContent=(await r.json()).title;};"
+        # Click a speaker name -> rename that person across the whole meeting.
+        "document.querySelectorAll('td.who[data-spk]').forEach(td=>{td.style.cursor='pointer';"
+        "td.onclick=async(e)=>{e.stopPropagation();const old=td.dataset.spk;"
+        "const nw=prompt('把「'+old+'」改成(套用到整場該說話者):',old);"
+        "if(nw==null||!nw.trim()||nw.trim()===old)return;"
+        f"const r=await fetch('/meetings/{mid}/speaker',{{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({old:old,new:nw.trim()})});"
+        "if(r.ok)location.reload();};});")
     return _shell(html.escape(meeting["title"]), body, script=script, back=True)
 
 
@@ -1397,6 +1423,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
             d["has_audio"] = bool(_meeting_tracks(store, m["id"]))
             out.append(d)
         return out
+
+    @app.post("/meetings/{mid}/title")
+    def rename_meeting(mid: int, body: TitleIn):
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        store.update_title(mid, body.title.strip() or "未命名")
+        return {"title": body.title.strip() or "未命名"}
+
+    @app.post("/meetings/{mid}/speaker")
+    def rename_speaker(mid: int, body: SpeakerRenameIn):
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        n = store.rename_speaker(mid, body.old, body.new.strip())
+        return {"renamed": n}
 
     @app.delete("/meetings/{mid}")
     def delete_meeting(mid: int):

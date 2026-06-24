@@ -108,6 +108,19 @@ class Store:
                         (speaker, transcript_id))
         self.db.commit()
 
+    def update_title(self, meeting_id, title):
+        self.db.execute("UPDATE meetings SET title=? WHERE id=?", (title, meeting_id))
+        self.db.commit()
+
+    def rename_speaker(self, meeting_id, old, new):
+        """Rename a speaker across a meeting (人工命名, e.g. 說話者1 -> Scott).
+        Returns rows changed."""
+        cur = self.db.execute(
+            "UPDATE transcripts SET speaker=? WHERE meeting_id=? AND speaker=?",
+            (new, meeting_id, old))
+        self.db.commit()
+        return cur.rowcount
+
     def add_summary(self, meeting_id, kind, lang, text, model, created_at):
         return self._insert(
             "INSERT INTO summaries(meeting_id, kind, lang, text, model, "
