@@ -117,13 +117,48 @@ _THEME_JS = (
 )
 
 
+def _png_solid(size, rgb):
+    """Minimal solid-color PNG (pure stdlib) — PWA icon, no image deps."""
+    import struct
+    import zlib
+
+    def chunk(typ, data):
+        c = typ + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xffffffff)
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)  # 8-bit RGB
+    row = b"\x00" + bytes(rgb) * size
+    idat = zlib.compress(row * size, 9)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", idat) + chunk(b"IEND", b""))
+
+
+_MANIFEST = (
+    '{"name":"Meeting·Summary","short_name":"Meeting","start_url":"/",'
+    '"display":"standalone","background_color":"#0c0e13","theme_color":"#5b54e6",'
+    '"icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png"},'
+    '{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]}'
+)
+# Minimal SW: a fetch handler (required for installability); network passthrough —
+# the app needs the live server, so we don't cache dynamic responses.
+_SW_JS = ("self.addEventListener('install',e=>self.skipWaiting());"
+          "self.addEventListener('activate',e=>self.clients.claim());"
+          "self.addEventListener('fetch',e=>{});")
+
+
 def _shell(title, body, script="", back=False):
     nav = '<a href="/">&larr; 回首頁</a>' if back else ''
     return (
         "<!doctype html><html lang=zh-Hant><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<link rel=manifest href='/manifest.webmanifest'>"
+        "<meta name=theme-color content='#5b54e6'>"
+        "<meta name=apple-mobile-web-app-capable content=yes>"
+        "<link rel=apple-touch-icon href='/icon-192.png'>"
         f"<title>{title}</title><style>{_STYLE}</style>"
-        f"<script>{_THEME_JS}</script></head><body><div class=wrap>"
+        f"<script>{_THEME_JS}</script>"
+        "<script>if('serviceWorker' in navigator)"
+        "addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));</script>"
+        "</head><body><div class=wrap>"
         "<header class=top><span class=brand>📝 Meeting<span class=dot>·</span>Summary</span>"
         "<span class=spacer></span>"
         "<button class=btn id=themebtn onclick=_toggleTheme() title='切換深淺色' "
@@ -1025,6 +1060,18 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def health():
         # recording flag lets the meeting-watcher suppress notifications while live.
         return {"status": "ok", "recording": idle["live"] > 0}
+
+    @app.get("/manifest.webmanifest")
+    def manifest():
+        return Response(_MANIFEST, media_type="application/manifest+json")
+
+    @app.get("/sw.js")
+    def service_worker():
+        return Response(_SW_JS, media_type="application/javascript")
+
+    @app.get("/icon-{size}.png")
+    def icon(size: int):
+        return Response(_png_solid(size, (0x5b, 0x54, 0xe6)), media_type="image/png")
 
     @app.get("/", response_class=HTMLResponse)
     def index():
