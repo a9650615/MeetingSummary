@@ -58,11 +58,22 @@ h3{font-size:13px;font-weight:750;margin:14px 0 6px;color:var(--muted);text-tran
 label.fld{display:inline-flex;flex-direction:column;gap:5px;font-size:11px;color:var(--muted);
  font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 label.chk{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);text-transform:none}
-input[type=text],input[type=file],input:not([type]),select{font:inherit;padding:.58em .7em;
- border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2);color:var(--ink);
- transition:.12s}
+input[type=text],input[type=search],input[type=file],input:not([type]),select{font:inherit;
+ padding:.58em .7em;border:1px solid var(--line);border-radius:var(--radius-sm);
+ background:var(--surface2);color:var(--ink);transition:.12s}
+input:hover,select:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
 input:focus,select:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px var(--accentsoft)}
-select{cursor:pointer}
+input[type=search]{-webkit-appearance:none;appearance:none}
+/* custom chevron so the native select arrow doesn't look unstyled */
+select{cursor:pointer;-webkit-appearance:none;appearance:none;padding-right:2em;
+ background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b93a4' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+ background-repeat:no-repeat;background-position:right .7em center}
+/* the native file input "Choose File" button is the ugliest default — make it a chip */
+input[type=file]{cursor:pointer;padding:.32em .5em}
+input[type=file]::file-selector-button{font:inherit;font-weight:650;margin-right:10px;
+ padding:.42em .9em;border:1px solid var(--line);border-radius:8px;background:var(--surface);
+ color:var(--ink);cursor:pointer;transition:.13s}
+input[type=file]::file-selector-button:hover{border-color:var(--accent);color:var(--accent)}
 .btn{font:inherit;font-weight:650;padding:.58em 1.05em;border-radius:var(--radius-sm);
  border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;
  transition:.13s;display:inline-block;line-height:1.2}
