@@ -897,6 +897,25 @@ def _free_models():
     return freed
 
 
+def _is_default_title(t):
+    """A title the user hasn't meaningfully set -> safe to auto-replace on summary."""
+    t = (t or "").strip()
+    return (not t) or t in ("未命名", "實測") or t.startswith("錄音 ")
+
+
+def _auto_title(summary_text, backend):
+    """One short zh title derived from the summary via the LLM. Best-effort -> None."""
+    if not (summary_text or "").strip():
+        return None
+    try:
+        prompt = ("根據以下會議摘要，產生一個能代表主題的標題，12 字以內，"
+                  "只輸出標題本身(不要引號、不要句號、不要說明):\n\n" + summary_text[:2000])
+        line = backend(prompt).strip().splitlines()[0]
+        return line.strip().strip('「」『』"\'。. ')[:40] or None
+    except Exception:
+        return None
+
+
 def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
     """Generator: re-transcribe a meeting window-by-window, yielding progress
     events ({type:start,total} / {type:progress,done,total,text} / {type:done,n})
@@ -1052,7 +1071,8 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         f"const r=await fetch('/meetings/{mid}/summary',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k})});"
         "const j=await r.json();const p=document.createElement('pre');"
-        "p.className='sum';p.textContent=j.text;o.innerHTML='';o.appendChild(p);};"
+        "p.className='sum';p.textContent=j.text;o.innerHTML='';o.appendChild(p);"
+        "if(j.title)document.getElementById('mtitle').textContent=j.title;};"
         "document.getElementById('fin').onclick=async()=>{"
         f"await fetch('/meetings/{mid}/finalize',{{method:'POST'}});"
         "document.getElementById('finmsg').textContent=' 已完成。';};"
@@ -1716,6 +1736,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
             kind=kind, asr_backend=asr_backend,
             summary_backend=summary_backend, summary_model=summary_model)
         mid = result["meeting_id"]
+        # Auto-title from the summary unless the user typed a non-default title.
+        if _is_default_title(title):
+            nt = await run_in_threadpool(_auto_title, result["summary"], summary_backend)
+            if nt:
+                store.update_title(mid, nt)
+                title = nt
         # Decode the upload to data/<mid>/mic.pcm (16k mono) so playback uses the
         # same path as live recordings (player + click-to-seek work). Best-effort.
         await run_in_threadpool(_save_upload_pcm, path, mid, store)
@@ -1733,7 +1759,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
                         backend=summary_backend)
         store.add_summary(mid, body.kind, meeting["lang"], out,
                           summary_model, time.time())
-        return {"text": out, "kind": body.kind}
+        # Summary done -> derive a real title (unless the user set one of their own).
+        new_title = None
+        if _is_default_title(meeting["title"]):
+            nt = _auto_title(out, summary_backend)
+            if nt:
+                store.update_title(mid, nt)
+                new_title = nt
+        return {"text": out, "kind": body.kind, "title": new_title}
 
     @app.post("/meetings/{mid}/finalize")
     def finalize_meeting(mid: int):

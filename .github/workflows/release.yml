@@ -21,17 +21,26 @@ jobs:
         run: ./build_app.sh
       - name: Zip the .app (macOS-correct)
         run: ditto -c -k --sequesterRsrc --keepParent dist/MeetingSummary.app MeetingSummary-${GITHUB_REF_NAME}.zip
-      - name: Build + package prebuilt chatllm runtime (so users need no cmake)
-        # Portable arm64 bundle (rpath -> @loader_path); setup_runtime.sh downloads
-        # this instead of cmake-building on the user's machine. Best-effort: if the
-        # chatllm build fails, the release still ships and users fall back to source.
-        run: ./package_chatllm.sh "$PWD/chatllm-runtime-arm64.tar.gz" || echo "::warning::chatllm prebuild failed; users fall back to source build"
-      - name: Create release + attach app + chatllm runtime
+      - name: Create release + attach the installer
+        # Publish FIRST so the installer always ships — the chatllm prebuild below
+        # is best-effort and must never block or delay the release.
         # .zip = installer (unsigned -> right-click > Open first time).
-        # chatllm-runtime-arm64.tar.gz = fetched on demand by 設定 → 加速 runtime.
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME" "MeetingSummary-${GITHUB_REF_NAME}.zip"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Cache chatllm build
+        uses: actions/cache@v4
+        with:
+          path: chatllm.cpp
+          key: chatllm-arm64-${{ hashFiles('package_chatllm.sh') }}
+      - name: Build + attach prebuilt chatllm runtime (best-effort)
+        # Portable arm64 bundle (rpath -> @loader_path) so users need no cmake;
+        # setup_runtime.sh downloads it. Bounded + continue-on-error -> a slow/failed
+        # chatllm build can't hang or fail the already-published release.
+        continue-on-error: true
+        timeout-minutes: 30
         run: |
-          assets=( "MeetingSummary-${GITHUB_REF_NAME}.zip" )
-          [ -f chatllm-runtime-arm64.tar.gz ] && assets+=( "chatllm-runtime-arm64.tar.gz" )
-          gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME" "${assets[@]}"
+          ./package_chatllm.sh "$PWD/chatllm-runtime-arm64.tar.gz"
+          gh release upload "$GITHUB_REF_NAME" "chatllm-runtime-arm64.tar.gz" --clobber
         env:
           GH_TOKEN: ${{ github.token }}

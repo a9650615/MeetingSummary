@@ -2,6 +2,11 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.1.7
+- 產生摘要時**自動產生標題**：上傳或重新摘要後，依摘要內容產生標題（僅在標題仍為預設時套用，不覆蓋手動命名）。
+- 原生 App **快速跳轉**：服務已在執行時再次開啟 App，直接開頁面、不重跑安裝。
+- 修正版本發佈 CI：**先發佈安裝檔**（installer 一定上架），chatllm 預編譯改為限時非阻塞 + 建置快取，且只編譯 `libchatllm`（不再整包編譯，數十分鐘 → 數分鐘）。
+
 ## 0.1.6
 - chatllm 加速 runtime 改 **CI 預編譯**：設定→加速 runtime 一鍵安裝會先下載可攜 arm64 bundle（rpath 改 `@loader_path` + libggml 同目錄），**免 cmake**；下載不到才原始碼編譯（自動 `brew install cmake`）。
 - femelo 不再綁 python3.14：接受**任何 python≥3.11**（找不到才 `brew install python@3.13`），改用 PyPI wheel 安裝。

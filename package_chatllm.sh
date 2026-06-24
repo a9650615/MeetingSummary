@@ -12,9 +12,10 @@ command -v cmake >/dev/null || { echo "need cmake to build chatllm"; exit 1; }
 [ -d chatllm.cpp ] || git clone --depth 1 https://github.com/foldl/chatllm.cpp
 cd chatllm.cpp
 if [ ! -f bindings/libchatllm.dylib ]; then
-  cmake -B build
-  cmake --build build -j --config Release
-  cmake --build build --target libchatllm -j
+  cmake -B build -DCMAKE_BUILD_TYPE=Release
+  # Build ONLY the shared lib (cmake pulls in its ggml deps). Building the default
+  # "all" target compiles every chatllm example/tool too — minutes vs ~40 min.
+  cmake --build build --target libchatllm -j --config Release
 fi
 test -f bindings/libchatllm.dylib
 

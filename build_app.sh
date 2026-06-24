@@ -46,6 +46,11 @@ cat > "$APP/Contents/MacOS/launcher" <<LAUNCH
 # exists -> instant; otherwise sets up in Application Support.
 set -u
 PORT=$PORT
+# Already running? skip bootstrap/rsync entirely — jump straight to the page.
+if /usr/bin/curl -fsS -m 1 "http://127.0.0.1:\$PORT/health" >/dev/null 2>&1; then
+  open "http://127.0.0.1:\$PORT"
+  exit 0
+fi
 PROJECT="$ROOT"
 SRC="\$(cd "\$(dirname "\$0")/../Resources/app" && pwd)"
 WD="\$HOME/Library/Application Support/MeetingSummary"
