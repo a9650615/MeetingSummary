@@ -67,28 +67,43 @@ def _resolve_models(seg_model=None, emb_model=None, progress=None):
     return seg, emb
 
 
-def assign_speakers(transcripts, segments, *, prefix="說話者"):
+def assign_speakers(transcripts, segments, *, prefix="說話者",
+                    mark_overlap=False, overlap_ratio=0.3):
     """Relabel each transcript with the diarization speaker that has the MOST time
     overlap with the line's [start,end] window — so a short interjection at a line's
     start can't mislabel the whole line (dominant speaker wins). Falls back to the
-    segment at the start point, then keeps the original. Cluster ids -> 1..N."""
+    segment at the start point, then keeps the original. Cluster ids -> 1..N.
+
+    mark_overlap (experimental): when a 2nd speaker also covers >= overlap_ratio of
+    the line, label it "🔀 說話者A+B" and set overlap=True — flags turn-dense /
+    likely-overlapping lines. sherpa collapses simultaneous speech to one speaker, so
+    this is a heuristic from the clustered segments, not true overlap separation."""
     order = {raw: i + 1 for i, raw in
              enumerate(sorted({s["speaker"] for s in segments}))}
     out = []
     for t in transcripts:
         s0 = t.get("start_ms", 0) / 1000.0
         s1 = max(s0 + 0.01, t.get("end_ms", t.get("start_ms", 0)) / 1000.0)
-        best, best_ov = None, 0.0
+        dur = s1 - s0
+        ov = {}  # speaker -> total overlapping seconds with this line
         for seg in segments:
-            ov = min(s1, seg["end"]) - max(s0, seg["start"])
-            if ov > best_ov:
-                best, best_ov = seg["speaker"], ov
-        if best is None:  # zero overlap (point line) -> segment covering the start
+            o = min(s1, seg["end"]) - max(s0, seg["start"])
+            if o > 0:
+                ov[seg["speaker"]] = ov.get(seg["speaker"], 0.0) + o
+        nt = dict(t)
+        if ov:
+            ranked = sorted(ov.items(), key=lambda kv: -kv[1])
+            nt["speaker"] = f"{prefix}{order[ranked[0][0]]}"
+            if (mark_overlap and len(ranked) >= 2 and dur > 0
+                    and ranked[1][1] / dur >= overlap_ratio):
+                ids = sorted(order[ranked[i][0]] for i in (0, 1))
+                nt["speaker"] = "🔀 " + "+".join(f"{prefix}{n}" for n in ids)
+                nt["overlap"] = True
+        else:  # zero overlap (point line) -> segment covering the start, else keep
             best = next((seg["speaker"] for seg in segments
                          if seg["start"] <= s0 < seg["end"]), None)
-        nt = dict(t)
-        if best is not None:
-            nt["speaker"] = f"{prefix}{order[best]}"
+            if best is not None:
+                nt["speaker"] = f"{prefix}{order[best]}"
         out.append(nt)
     return out
 

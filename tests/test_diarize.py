@@ -63,3 +63,23 @@ def test_assign_speakers_remaps_ids_to_1_based():
 def test_assign_speakers_empty_segments_noop():
     t = [{"start_ms": 0, "speaker": "我", "text": "hi"}]
     assert assign_speakers(t, []) == t
+
+
+def test_assign_speakers_mark_overlap():
+    # line [0,4]s split ~evenly between two speakers -> 2nd covers >=30% -> 🔀 tag
+    line = [{"start_ms": 0, "end_ms": 4000, "speaker": "對方", "text": "x"}]
+    segs = [{"start": 0.0, "end": 2.0, "speaker": 0},
+            {"start": 2.0, "end": 4.0, "speaker": 1}]
+    off = assign_speakers(line, segs)                       # default: dominant only
+    assert off[0]["speaker"] == "說話者1" and "overlap" not in off[0]
+    on = assign_speakers(line, segs, mark_overlap=True)
+    assert on[0]["speaker"] == "🔀 說話者1+說話者2" and on[0]["overlap"] is True
+
+
+def test_mark_overlap_ignores_brief_interjection():
+    # 0.4s second speaker on a 5s line (<30%) -> still single dominant, no tag
+    line = [{"start_ms": 0, "end_ms": 5000, "speaker": "我", "text": "x"}]
+    segs = [{"start": 0.0, "end": 0.4, "speaker": 1},
+            {"start": 0.4, "end": 5.0, "speaker": 0}]
+    out = assign_speakers(line, segs, mark_overlap=True)
+    assert out[0]["speaker"] == "說話者1" and "overlap" not in out[0]

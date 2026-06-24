@@ -619,6 +619,7 @@ class DiarizeIn(BaseModel):
     num_speakers: int = -1     # -1 = auto-detect
     seg_model: Optional[str] = None  # override segmentation onnx (e.g. community-1)
     emb_model: Optional[str] = None  # override speaker-embedding onnx
+    mark_overlap: bool = False       # experimental: tag turn-dense/overlap lines
 
 
 def _rows(rows):
@@ -1043,6 +1044,9 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "<span class='muted small' id=finmsg></span></div>"
         "<p class=hint style='margin:.6em 0 0'>※ 摘要只在按下按鈕時才產生。停止錄音不會自動完成。"
         "「多人分群」用聲紋把每條音軌(我/對方)各自拆成多位說話者(會後處理,需先有錄音)。</p>"
+        "<details style='margin:.6em 0 0'><summary class=hint style='cursor:pointer'>🧪 實驗性功能</summary>"
+        "<label class=chk style='margin:.5em 0 0'><input type=checkbox id=diaov> "
+        "分群時標記重疊/多人語音（同一句多位說話者會標「🔀」，啟發式，非真分離）</label></details>"
         f"<div id=out>{sums}</div></div>"
         "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
         "<div class=row style='margin-bottom:10px'>"
@@ -1105,8 +1109,9 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "poll();"  # resume on load if a job is already running
         "document.getElementById('dia').onclick=async()=>{"
         "const fm=document.getElementById('finmsg');fm.textContent=' 分群中…(會後聲紋,需稍候)';"
+        "const ov=document.getElementById('diaov').checked;"
         f"const r=await fetch('/meetings/{mid}/diarize',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all'})});"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all',mark_overlap:ov})});"
         "if(r.ok){const j=await r.json();fm.textContent=' 分出 '+j.speakers+' 位說話者';"
         "location.reload();}else{fm.textContent=' 分群失敗: '+(await r.text());}};"
         # Player for a row: its own track, else the single (unified mixed) player.
@@ -1822,7 +1827,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             rows = [dict(r) for r in store.list_transcripts(mid) if r["track"] == track]
             # prefix per track so 我-side and 對方-side speakers don't collide
             for r in diar.assign_speakers(rows, segments,
-                                          prefix=_TRACK_LABEL.get(track, track)):
+                                          prefix=_TRACK_LABEL.get(track, track),
+                                          mark_overlap=body.mark_overlap):
                 store.update_speaker(r["id"], r["speaker"])
             total += len({s["speaker"] for s in segments})
         return {"tracks": tracks, "speakers": total}
