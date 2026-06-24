@@ -224,6 +224,9 @@ def _models_page():
         "<div class=card style='display:flex;align-items:center;gap:12px'>"
         "<button class=btn id=free>釋放閒置記憶體</button>"
         "<span class=hint id=freemsg style='margin:0'>清掉已載入但閒置的模型權重(下次用會重載)。</span></div>"
+        "<div class=card style='display:flex;align-items:center;gap:12px;flex-wrap:wrap'>"
+        "<button class=btn id=upd>檢查更新</button>"
+        "<span class=hint id=updmsg style='margin:0'>從 GitHub Releases 比對版本。</span></div>"
         "<div class=card><h2 style='margin-top:0'>加速 runtime（.cpp · Metal）</h2>"
         "<table class=tx id=rt><tr><th>Runtime</th><th>狀態</th><th></th></tr></table>"
         "<p class=hint style='margin:.5em 0 0'>一鍵下載+編譯+安裝。femelo 需 python3.14，"
@@ -276,6 +279,19 @@ def _models_page():
       const m=document.getElementById('freemsg');m.textContent=' 釋放中…';
       const r=await fetch('/models/free',{method:'POST'});const j=await r.json();
       m.textContent=' 已釋放: '+(j.freed.join(', ')||'無');setTimeout(load,400);};
+    document.getElementById('upd').onclick=async()=>{
+      const m=document.getElementById('updmsg');m.textContent=' 檢查中…';
+      const j=await (await fetch('/update/check')).json();
+      if(j.error){m.textContent=' 無法檢查: '+j.error;return;}
+      if(!j.has_update){m.textContent=' 已是最新 ('+j.current+')';return;}
+      m.innerHTML=' 有新版 '+j.latest+'（目前 '+j.current+'）';
+      const b=document.createElement('button');b.className='btn primary';b.textContent='更新並重啟';
+      b.style.marginLeft='8px';m.appendChild(b);
+      b.onclick=async()=>{b.disabled=true;m.append(' 下載中…');
+        await fetch('/update/apply',{method:'POST'});
+        m.append(' 重啟中,稍候…');
+        const wait=setInterval(async()=>{try{const h=await(await fetch('/health')).json();
+          if(h){clearInterval(wait);location.reload();}}catch(e){}},1500);};};
     load();
     """
     return _shell("模型管理", body, script=script, back=True)
@@ -1249,6 +1265,27 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.post("/models/free")
     def models_free():
         return {"freed": _free_models()}
+
+    @app.get("/update/check")
+    def update_check():
+        import updater
+        return updater.check(os.environ.get("MEETING_REPO", "a9650615/MeetingSummary"),
+                             os.path.dirname(os.path.abspath(__file__)))
+
+    @app.post("/update/apply")
+    def update_apply():
+        import updater
+        here = os.path.dirname(os.path.abspath(__file__))
+        info = updater.apply(os.environ.get("MEETING_REPO", "a9650615/MeetingSummary"), here)
+        if info.get("applied"):
+            # restart so the new code loads (supervisor relaunches; bare run exits).
+            def _restart():
+                import time as _t
+                _t.sleep(0.4)
+                os._exit(3)   # supervisor relaunches with the new code
+            import threading as _th
+            _th.Thread(target=_restart, daemon=True).start()
+        return info
 
     @app.post("/models/setup")
     def models_setup(body: SetupIn):

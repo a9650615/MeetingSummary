@@ -49,57 +49,20 @@ def _pip(args, log=False):
         return 1
 
 
-def _local_version():
-    try:
-        return open(os.path.join(HERE, "VERSION")).read().strip()
-    except Exception:
-        return "0.0.0"
-
-
-def _vt(s):
-    import re
-    return tuple(int(x) for x in re.findall(r"\d+", s)[:3]) or (0,)
-
-
 def _release_update():
-    # Preferred online update: poll GitHub Releases; if the latest tag > local
-    # VERSION, download that release's source tarball and overwrite the code
-    # (venv/models/data preserved). Versioned + controlled; no git needed.
-    repo = os.environ.get("MEETING_REPO", "")  # "owner/name"; unset -> skip
+    # Preferred online update via GitHub Releases (shared updater module). Offline /
+    # no newer release -> no-op, run the current code.
+    repo = os.environ.get("MEETING_REPO", "")
     if not repo:
         return
     try:
-        import io
-        import shutil
-        import tarfile
-        import tempfile
-        import urllib.request
-        state["step"] = "檢查更新…"
-        req = urllib.request.Request(
-            f"https://api.github.com/repos/{repo}/releases/latest",
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "MeetingSummary"})
-        rel = json.load(urllib.request.urlopen(req, timeout=10))
-        tag = rel.get("tag_name", "")
-        if _vt(tag) <= _vt(_local_version()):
-            return
-        state["step"] = f"下載更新 {tag}…"
-        data = urllib.request.urlopen(rel["tarball_url"], timeout=120).read()
-        tmp = tempfile.mkdtemp()
-        with tarfile.open(fileobj=io.BytesIO(data)) as tf:
-            tf.extractall(tmp)
-        top = os.path.join(tmp, os.listdir(tmp)[0])  # owner-repo-<sha>/
-        keep = {".venv", "data", "models", ".git", "setup.log", "dist"}
-        for item in os.listdir(top):
-            if item in keep:
-                continue
-            src, dst = os.path.join(top, item), os.path.join(HERE, item)
-            if os.path.isdir(src):
-                shutil.copytree(src, dst, dirs_exist_ok=True)
-            else:
-                shutil.copy2(src, dst)
-        shutil.rmtree(tmp, ignore_errors=True)
+        import updater
+        info = updater.check(repo, HERE)
+        if info.get("has_update"):
+            state["step"] = f"下載更新 {info['latest']}…"
+            updater.apply(repo, HERE)
     except Exception:
-        pass  # offline / API limit / no release -> run the current code
+        pass
 
 
 def _git_update():
