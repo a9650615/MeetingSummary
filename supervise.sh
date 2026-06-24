@@ -11,6 +11,15 @@ PY=.venv/bin/python
 PORT=${MEETING_PORT:-8765}
 export MEETING_PORT=$PORT   # server (app.py) + health check bind the same port
 LOG=/tmp/meeting_server.log
+
+# Single-instance: a 2nd supervisor would fight the 1st (each start() kills the
+# port holder) -> endless restart loop -> live dies. Refuse to start a duplicate.
+LOCK="/tmp/meeting_supervise.$PORT.pid"
+if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
+  echo "[supervise] already running (pid $(cat "$LOCK")) on port $PORT — exiting"
+  exit 0
+fi
+echo $$ > "$LOCK"
 POLL=10          # seconds between health checks
 MAX_FAILS=3      # consecutive /health failures -> restart (hang detection)
 SRV=""
@@ -37,7 +46,7 @@ start() {
 }
 
 WATCH=""
-cleanup() { echo "[supervise] stopping"; kill -9 "$SRV" "$WATCH" 2>/dev/null; exit 0; }
+cleanup() { echo "[supervise] stopping"; kill -9 "$SRV" "$WATCH" 2>/dev/null; rm -f "$LOCK"; exit 0; }
 trap cleanup INT TERM
 
 start
