@@ -14,7 +14,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/app"
 
 # 1. Python source (small) — everything needed to run + first-run setup.
-cp -R *.py requirements.txt requirements-app.txt supervise.sh meeting_watch.py micbusy.swift \
+cp -R *.py requirements.txt requirements-app.txt supervise.sh meeting_watch.py \
+      micbusy.swift bootstrap.py \
       "$APP/Contents/Resources/app/" 2>/dev/null || true
 [ -f models/silero_vad_v4.onnx ] && { mkdir -p "$APP/Contents/Resources/app/models"; \
   cp models/silero_vad_v4.onnx "$APP/Contents/Resources/app/models/"; }
@@ -38,31 +39,24 @@ PLIST
 # 3. Launcher (the bundle executable): first-run setup, supervise, open browser.
 cat > "$APP/Contents/MacOS/launcher" <<LAUNCH
 #!/usr/bin/env bash
+# Launch-first UX: open the browser immediately; bootstrap.py serves a progress
+# page on the port and installs deps in the background (skipped if a venv is
+# ready), then hands off to the real server. Reuses the dev project's venv if it
+# exists -> instant; otherwise sets up in Application Support.
 set -u
 PORT=$PORT
+PROJECT="$ROOT"
 SRC="\$(cd "\$(dirname "\$0")/../Resources/app" && pwd)"
-HOME_DIR="\$HOME/Library/Application Support/MeetingSummary"
-mkdir -p "\$HOME_DIR"
-# sync code into a writable home (Resources is read-only in a signed app)
-/usr/bin/rsync -a --exclude .venv --exclude data "\$SRC/" "\$HOME_DIR/" 2>/dev/null || cp -R "\$SRC/." "\$HOME_DIR/"
-cd "\$HOME_DIR"
-PY="\$HOME_DIR/.venv/bin/python"
-if [ ! -x "\$PY" ]; then
-  osascript -e 'display notification "首次啟動：安裝相依套件中（會下載，約數分鐘）" with title "Meeting·Summary"' || true
-  /usr/bin/python3 -m venv .venv
-  "\$HOME_DIR/.venv/bin/pip" install -q --upgrade pip
-  "\$HOME_DIR/.venv/bin/pip" install -q -r requirements-app.txt
+if [ -x "\$PROJECT/.venv/bin/python" ]; then
+  WD="\$PROJECT"                       # dev machine: reuse working venv (instant)
+else
+  WD="\$HOME/Library/Application Support/MeetingSummary"; mkdir -p "\$WD"
+  /usr/bin/rsync -a --exclude .venv --exclude data "\$SRC/" "\$WD/" 2>/dev/null || cp -R "\$SRC/." "\$WD/"
 fi
-[ -f micbusy ] || swiftc micbusy.swift -o micbusy -framework CoreAudio 2>/dev/null || true
 export MEETING_PORT=\$PORT
-cleanup(){ pkill -9 -f "python -m app" 2>/dev/null; pkill -9 -f meeting_watch.py 2>/dev/null; exit 0; }
-trap cleanup INT TERM EXIT
-bash supervise.sh >/tmp/meetingsummary.log 2>&1 &
-for i in \$(seq 1 90); do
-  /usr/bin/curl -sf "http://127.0.0.1:\$PORT/health" >/dev/null && break; sleep 1
-done
-open "http://127.0.0.1:\$PORT"
-wait   # keep the app alive (Dock icon) until quit -> cleanup stops the server
+( sleep 2; open "http://127.0.0.1:\$PORT" ) &   # browser shows the progress page right away
+cd "\$WD"
+exec /usr/bin/python3 bootstrap.py             # serves progress -> installs -> exec real server
 LAUNCH
 chmod +x "$APP/Contents/MacOS/launcher"
 
