@@ -4,11 +4,11 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write   # create the GitHub Release
+  contents: write   # create the GitHub Release + upload the .app asset
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build-app:
+    runs-on: macos-14   # Apple Silicon: swiftc (micbusy) + sips/iconutil for the bundle
     steps:
       - uses: actions/checkout@v4
       - name: VERSION must match the tag
@@ -17,9 +17,14 @@ jobs:
           if [ "$v" != "$t" ]; then
             echo "::error::VERSION ($v) != tag ($t) — bump VERSION before tagging"; exit 1
           fi
-      - name: Create release
-        # the app's bootstrap auto-updater reads releases/latest -> tag_name +
-        # tarball_url (GitHub attaches the source tarball automatically).
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
+      - name: Build MeetingSummary.app
+        run: ./build_app.sh
+      - name: Zip the .app (macOS-correct)
+        run: ditto -c -k --sequesterRsrc --keepParent dist/MeetingSummary.app MeetingSummary-${GITHUB_REF_NAME}.zip
+      - name: Create release + attach the built app
+        # bootstrap's auto-updater still uses the source tarball (releases/latest);
+        # this zip is for fresh installs — download + open, no build needed (unsigned
+        # -> right-click > Open the first time).
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME" "MeetingSummary-${GITHUB_REF_NAME}.zip"
         env:
           GH_TOKEN: ${{ github.token }}
