@@ -67,18 +67,19 @@ def notify(app):
 
 def main():
     notified = False
+    have_mic = os.path.exists(_MICBUSY)
     while True:
-        # Primary signal: mic in use (any app, incl browser meetings). Secondary:
-        # a known meeting-app process (labels the notification, works if micbusy
-        # is absent).
-        app = meeting_app_running()
-        active = mic_in_use() or app
+        # mic-in-use is the real "in a meeting" signal — meeting apps (Teams/Slack)
+        # run in the background constantly, so a process match alone false-fires.
+        # Use the process list only to LABEL the notification (or as fallback if the
+        # micbusy helper isn't built).
+        active = mic_in_use() if have_mic else bool(meeting_app_running())
         if active and not is_recording():
             if not notified:
-                notify(app or "麥克風使用中")
+                notify(meeting_app_running() or "麥克風使用中")
                 notified = True
         elif not active:
-            notified = False  # ended -> re-arm for the next one
+            notified = False  # call ended -> re-arm for the next one
         time.sleep(POLL_S)
 
 

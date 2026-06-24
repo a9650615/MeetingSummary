@@ -36,10 +36,15 @@ start() {
   echo "[supervise] started pid $SRV ($(date '+%H:%M:%S'))"
 }
 
-cleanup() { echo "[supervise] stopping"; kill -9 "$SRV" 2>/dev/null; exit 0; }
+WATCH=""
+cleanup() { echo "[supervise] stopping"; kill -9 "$SRV" "$WATCH" 2>/dev/null; exit 0; }
 trap cleanup INT TERM
 
 start
+# Meeting watcher: notifies you to record when the mic goes in use (a real call).
+"$PY" meeting_watch.py >>"$LOG" 2>&1 &
+WATCH=$!
+echo "[supervise] meeting watcher pid $WATCH"
 fails=0
 while true; do
   sleep "$POLL"
