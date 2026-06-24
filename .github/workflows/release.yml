@@ -38,7 +38,8 @@ jobs:
         # setup_runtime.sh downloads it. Bounded + continue-on-error -> a slow/failed
         # chatllm build can't hang or fail the already-published release.
         continue-on-error: true
-        timeout-minutes: 30
+        timeout-minutes: 50   # cold ggml Metal build is slow; once it completes the
+                              # cache makes subsequent runs fast. Still non-blocking.
         run: |
           ./package_chatllm.sh "$PWD/chatllm-runtime-arm64.tar.gz"
           gh release upload "$GITHUB_REF_NAME" "chatllm-runtime-arm64.tar.gz" --clobber
