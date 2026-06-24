@@ -1,0 +1,13 @@
+# Full Apple-Silicon runtime for the packaged .app (first-launch install).
+# The .cpp Metal runtimes (femelo 0.6B, chatllm 1.7B) are NOT pip — build them
+# from the 模型管理 tab (編譯安裝). Whisper + sherpa work out of the box.
+numpy
+opencc
+fastapi
+uvicorn[standard]
+python-multipart
+huggingface_hub
+mlx-whisper
+mlx-lm
+sherpa-onnx
+onnxruntime

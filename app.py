@@ -1642,6 +1642,15 @@ if __name__ == "__main__":  # pragma: no cover
     asr_model = os.environ.get("ASR_MODEL", rec["accurate"])
     llm_model = os.environ.get("LLM_MODEL", rec["summary"])
     live_model = os.environ.get("LIVE_MODEL", remembered or rec["live"])
+    # Fresh install (no .cpp sidecar built yet)? Don't silently default to a runtime
+    # that isn't installed — fall back to whisper so live works out of the box.
+    import backends as _b
+    _rt = _runtime_status()
+    if (_b.route(live_model) == "qwen3cpp" and not _rt["femelo"]) or \
+       (_b.route(live_model) == "chatllm" and not _rt["chatllm"]):
+        print(f"[profile] {live_model} runtime not installed -> whisper-small-mlx-q4",
+              file=sys.stderr)
+        live_model = "mlx-community/whisper-small-mlx-q4"
     live_interim_model = os.environ.get("LIVE_INTERIM_MODEL", rec["interim"])
     live_silence = int(os.environ.get("LIVE_SILENCE_MS", "400"))
     live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "150"))  # keep short words
