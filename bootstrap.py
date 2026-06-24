@@ -49,42 +49,6 @@ def _pip(args, log=False):
         return 1
 
 
-def _release_update():
-    # Preferred online update via GitHub Releases (shared updater module). Offline /
-    # no newer release -> no-op, run the current code.
-    repo = os.environ.get("MEETING_REPO", "")
-    if not repo:
-        return
-    try:
-        import updater
-        info = updater.check(repo, HERE)
-        if info.get("has_update"):
-            state["step"] = f"下載更新 {info['latest']}…"
-            updater.apply(repo, HERE)
-    except Exception:
-        pass
-
-
-def _git_update():
-    # Online update: if the workdir is a git clone with a remote, fast-forward to
-    # the latest pushed code (pristine deploy -> reset --hard, no conflicts). Code
-    # is tiny; venv/models/data are gitignored so they're untouched. Offline -> skip.
-    if not os.path.isdir(os.path.join(HERE, ".git")):
-        return
-    try:
-        has_remote = subprocess.run(["git", "-C", HERE, "remote"],
-                                    capture_output=True, text=True).stdout.strip()
-        if not has_remote:
-            return
-        state["step"] = "檢查更新…"
-        if subprocess.run(["git", "-C", HERE, "fetch", "--quiet"],
-                          capture_output=True, timeout=30).returncode == 0:
-            subprocess.run(["git", "-C", HERE, "reset", "--hard", "--quiet", "@{u}"],
-                           capture_output=True, timeout=15)
-    except Exception:
-        pass
-
-
 def _reqs_changed():
     # Re-run pip when requirements-app.txt changed since the last successful install.
     try:
@@ -102,8 +66,8 @@ def setup():
     # Best-effort throughout — never block. Install what works, skip what doesn't;
     # the server degrades gracefully (missing mlx -> live falls back / disabled).
     try:
-        _release_update()   # preferred: GitHub Releases (versioned)
-        _git_update()       # dev convenience: pull if workdir is a git clone
+        # NO auto-update on launch — updating is a manual decision (模型管理 →
+        # 檢查更新 → 更新並重啟). Launch always runs the current code as-is.
         if not os.path.exists(PY):
             state["step"] = "建立 Python 環境…"
             subprocess.run([sys.executable, "-m", "venv", ".venv"], cwd=HERE,

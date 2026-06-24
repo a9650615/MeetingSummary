@@ -51,11 +51,12 @@ h3{font-size:13px;font-weight:750;margin:14px 0 6px;color:var(--muted);text-tran
 .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
  box-shadow:var(--shadow);padding:20px 22px;margin:14px 0}
 .muted{color:var(--muted)}.small{font-size:13px}
-.row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
+.row label.chk{align-self:center}
 label.fld{display:inline-flex;flex-direction:column;gap:5px;font-size:11px;color:var(--muted);
  font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 label.chk{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);text-transform:none}
-input[type=text],input[type=file],input:not([type]),select{font:inherit;padding:.55em .7em;
+input[type=text],input[type=file],input:not([type]),select{font:inherit;padding:.58em .7em;
  border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2);color:var(--ink);
  transition:.12s}
 input:focus,select:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px var(--accentsoft)}
@@ -178,8 +179,10 @@ def _shell(title, body, script="", back=False):
 
 _INDEX = _shell("MeetingSummary", """
 <h1>本地會議轉錄 · 摘要</h1>
-<a class="btn primary" href="/live" style="font-size:16px;padding:.7em 1.2em">🔴 開始 Live 即時逐字稿</a>
-<a class="btn" href="/models/manage" style="margin-left:8px">⚙️ 模型管理</a>
+<div class=row style="margin-bottom:4px">
+<a class="btn primary" href="/live">🔴 開始 Live 即時逐字稿</a>
+<a class="btn" href="/models/manage">⚙️ 模型管理</a>
+</div>
 <h2>上傳音檔</h2>
 <div class=card>
   <form action="/ingest" method="post" enctype="multipart/form-data" class=row>
