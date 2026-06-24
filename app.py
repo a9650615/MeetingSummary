@@ -8,6 +8,7 @@ import html
 import os
 import sys
 import time
+from typing import Optional  # not `X | None` — pydantic evals it, fails on 3.9 venvs
 
 from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
                      WebSocketDisconnect)
@@ -540,14 +541,14 @@ class MergeIn(BaseModel):
 
 
 class TranscribeIn(BaseModel):
-    model: str | None = None   # None -> default accurate backend
+    model: Optional[str] = None   # None -> default accurate backend
 
 
 class DiarizeIn(BaseModel):
     track: str = "all"         # "all" -> every track with audio; or mic/system/mixed
     num_speakers: int = -1     # -1 = auto-detect
-    seg_model: str | None = None  # override segmentation onnx (e.g. community-1)
-    emb_model: str | None = None  # override speaker-embedding onnx
+    seg_model: Optional[str] = None  # override segmentation onnx (e.g. community-1)
+    emb_model: Optional[str] = None  # override speaker-embedding onnx
 
 
 def _rows(rows):
