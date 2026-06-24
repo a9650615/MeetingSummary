@@ -8,7 +8,8 @@
 set -u
 cd "$(dirname "$0")"
 PY=.venv/bin/python
-PORT=8000
+PORT=${MEETING_PORT:-8765}
+export MEETING_PORT=$PORT   # server (app.py) + health check bind the same port
 LOG=/tmp/meeting_server.log
 POLL=10          # seconds between health checks
 MAX_FAILS=3      # consecutive /health failures -> restart (hang detection)
@@ -16,9 +17,10 @@ SRV=""
 
 healthy() {
   "$PY" - <<'PYEOF' 2>/dev/null
-import urllib.request, sys
+import urllib.request, sys, os
+port = os.environ.get("MEETING_PORT", "8765")
 try:
-    urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5)
+    urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5)
     sys.exit(0)
 except Exception:
     sys.exit(1)

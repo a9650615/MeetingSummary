@@ -13,8 +13,9 @@ import subprocess
 import time
 import urllib.request
 
-URL = "http://127.0.0.1:8000/live"
-HEALTH = "http://127.0.0.1:8000/health"
+_PORT = os.environ.get("MEETING_PORT", "8765")
+URL = f"http://127.0.0.1:{_PORT}/live"
+HEALTH = f"http://127.0.0.1:{_PORT}/health"
 APPS = (os.environ.get("MEETING_WATCH_APPS")
         or "zoom.us,MSTeams,Microsoft Teams,Webex,RingCentral,Around,Gather,Discord").split(",")
 POLL_S = int(os.environ.get("MEETING_WATCH_POLL_S", "12"))

@@ -1610,4 +1610,5 @@ if __name__ == "__main__":  # pragma: no cover
         live_max_lag_s=live_max_lag,
         summary_model=llm_model,
     )
-    uvicorn.run(app, host="127.0.0.1", port=8000)  # loopback only (G2)
+    port = int(os.environ.get("MEETING_PORT", "8765"))  # 8000 left free for dev
+    uvicorn.run(app, host="127.0.0.1", port=port)  # loopback only (G2)
