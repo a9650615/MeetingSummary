@@ -274,7 +274,8 @@ def _models_page():
         "<nav class=subnav>"
         "<a href='#sec-sys'>系統 · 更新</a>"
         "<a href='#sec-models'>模型</a>"
-        "<a href='#sec-rt'>加速 runtime</a></nav>"
+        "<a href='#sec-rt'>加速 runtime</a>"
+        "<a href='#sec-exp'>實驗性功能</a></nav>"
 
         "<section id=sec-sys><h2>系統 · 更新</h2>"
         "<div class=card>"
@@ -293,6 +294,13 @@ def _models_page():
         "<table class=tx id=sup><tr><th>模型</th><th>大小</th><th></th></tr></table></div>"
         "<div class=card><h3 style='margin:0 0 8px;font-size:13px;color:var(--muted)'>其他快取</h3>"
         "<table class=tx id=oth><tr><th>名稱</th><th>大小</th><th></th></tr></table></div></section>"
+
+        "<section id=sec-exp><h2>🧪 實驗性功能</h2>"
+        "<div class=card>"
+        "<label class=chk><input type=checkbox id=exp_overlap> "
+        "分群時標記重疊/多人語音（同一句多位說話者會標「🔀」，啟發式，非真分離）</label>"
+        "<p class=hint style='margin:.6em 0 0'>實驗性功能可能不穩定或不準確；於各會議的「多人分群」時生效。</p>"
+        "</div></section>"
 
         "<section id=sec-rt><h2>加速 runtime（.cpp · Metal）</h2>"
         "<div class=card>"
@@ -371,6 +379,9 @@ def _models_page():
         m.append(' 重啟中,稍候…');
         const wait=setInterval(async()=>{try{const h=await(await fetch('/health')).json();
           if(h){clearInterval(wait);location.reload();}}catch(e){}},1500);};};
+    (function(){const xo=document.getElementById('exp_overlap');
+      xo.checked=localStorage.getItem('exp_overlap')==='1';
+      xo.onchange=()=>localStorage.setItem('exp_overlap',xo.checked?'1':'0');})();
     load();
     """
     return _shell("設定", body, script=script, back=True)
@@ -1154,9 +1165,6 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         "<span class='muted small' id=finmsg></span></div>"
         "<p class=hint style='margin:.6em 0 0'>※ 摘要只在按下按鈕時才產生。停止錄音不會自動完成。"
         "「多人分群」用聲紋把每條音軌(我/對方)各自拆成多位說話者(會後處理,需先有錄音)。</p>"
-        "<details style='margin:.6em 0 0'><summary class=hint style='cursor:pointer'>🧪 實驗性功能</summary>"
-        "<label class=chk style='margin:.5em 0 0'><input type=checkbox id=diaov> "
-        "分群時標記重疊/多人語音（同一句多位說話者會標「🔀」，啟發式，非真分離）</label></details>"
         f"<div id=out>{sums}</div></div>"
         "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
         "<div class=row style='margin-bottom:10px'>"
@@ -1224,7 +1232,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         "poll();"  # resume on load if a job is already running
         "document.getElementById('dia').onclick=async()=>{"
         "const fm=document.getElementById('finmsg');fm.textContent=' 分群中…(會後聲紋,需稍候)';"
-        "const ov=document.getElementById('diaov').checked;"
+        "const ov=localStorage.getItem('exp_overlap')==='1';  // 設定→實驗性功能"
         f"const r=await fetch('/meetings/{mid}/diarize',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all',mark_overlap:ov})});"
         "if(r.ok){const j=await r.json();fm.textContent=' 分出 '+j.speakers+' 位說話者';"
