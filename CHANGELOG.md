@@ -2,6 +2,11 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.1.6
+- chatllm 加速 runtime 改 **CI 預編譯**：設定→加速 runtime 一鍵安裝會先下載可攜 arm64 bundle（rpath 改 `@loader_path` + libggml 同目錄），**免 cmake**；下載不到才原始碼編譯（自動 `brew install cmake`）。
+- femelo 不再綁 python3.14：接受**任何 python≥3.11**（找不到才 `brew install python@3.13`），改用 PyPI wheel 安裝。
+- `package_chatllm.sh`：產生可攜 chatllm runtime tar，release 自動附上。
+
 ## 0.1.5
 - 「模型管理」重新設計為「設定」頁：分三區（系統·更新 / 模型 / 加速 runtime）+ 區段導覽 + 版本顯示，更新/釋放記憶體整併到系統區。
 

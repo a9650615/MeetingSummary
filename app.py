@@ -260,8 +260,9 @@ def _models_page():
         "<section id=sec-rt><h2>加速 runtime（.cpp · Metal）</h2>"
         "<div class=card>"
         "<table class=tx id=rt><tr><th>Runtime</th><th>狀態</th><th></th></tr></table>"
-        "<p class=hint style='margin:.5em 0 0'>一鍵下載+編譯+安裝。femelo 需 python3.14，"
-        "chatllm 需 cmake（缺則先 brew install）。清除只移除編譯產物，模型權重保留。</p>"
+        "<p class=hint style='margin:.5em 0 0'>一鍵安裝。chatllm 優先下載預編譯(免 cmake)，"
+        "下載不到才原始碼編譯；femelo 需 python≥3.11。缺的環境會自動 brew 安裝。"
+        "清除只移除編譯產物，模型權重保留。</p>"
         "</div></section>")
     script = r"""
     function human(mb){return mb>=1000?(mb/1000).toFixed(1)+' GB':mb+' MB';}

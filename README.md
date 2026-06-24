@@ -41,10 +41,10 @@ App 體積小（~70KB launcher）；相依與模型都在**首次啟動時才下
 | 分群 | sherpa pyannote-3-0 + 3D-Speaker（自動下載） | `SHERPA_SEG_MODEL` / `SHERPA_EMB_MODEL` 覆寫 |
 
 **加速 runtime（.cpp · Metal，選用）**
-- `femelo`（Qwen3-ASR 0.6B GGUF）：需 `python3.14`（`brew install python@3.14`）。
-- `chatllm`（Qwen3-ASR 1.7B GGUF）：需 `cmake`（`brew install cmake`）。
+- `chatllm`（Qwen3-ASR 1.7B GGUF）：設定頁一鍵安裝會**先下載 CI 預編譯版**（可攜 arm64 bundle，免 cmake）；下載不到才從原始碼編譯（自動 `brew install cmake`）。
+- `femelo`（Qwen3-ASR 0.6B GGUF）：需 **python≥3.11**（找不到會自動 `brew install python@3.13`），裝在獨立 venv。
 
-兩者在模型管理頁一鍵編譯安裝；缺前置會在該列顯示明確錯誤（⚠）。
+設定頁一鍵安裝；缺的環境會自動以 brew 補齊，失敗則於該列顯示明確錯誤（⚠）。
 
 ## 隱私
 - 服務只綁 `127.0.0.1`（loopback），不對外。
