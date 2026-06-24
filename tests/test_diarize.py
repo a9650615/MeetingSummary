@@ -1,6 +1,20 @@
 import numpy as np
 
+import diarize
 from diarize import SpeakerTracker, assign_speakers
+
+
+def test_resolve_models_prefers_existing_paths(tmp_path, monkeypatch):
+    # explicit args that exist must win and never trigger a download
+    seg = tmp_path / "seg.onnx"; seg.write_bytes(b"x")
+    emb = tmp_path / "emb.onnx"; emb.write_bytes(b"x")
+    monkeypatch.setattr(diarize, "_ensure_seg", lambda *a, **k: (_ for _ in ()).throw(AssertionError("downloaded")))
+    monkeypatch.setattr(diarize, "_ensure_emb", lambda *a, **k: (_ for _ in ()).throw(AssertionError("downloaded")))
+    assert diarize._resolve_models(str(seg), str(emb)) == (str(seg), str(emb))
+    # missing explicit path -> falls back to the (mocked) provisioner
+    monkeypatch.setattr(diarize, "_ensure_seg", lambda *a, **k: "SEG")
+    monkeypatch.setattr(diarize, "_ensure_emb", lambda *a, **k: "EMB")
+    assert diarize._resolve_models("/nope", "/nope") == ("SEG", "EMB")
 
 
 def test_speaker_tracker_online_clustering():

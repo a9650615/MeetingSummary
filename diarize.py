@@ -5,8 +5,66 @@ CUDA/torch) — segmentation + speaker-embedding + clustering, all offline. Run 
 a post-meeting pass on a saved track; relabel its transcripts by time overlap.
 
 assign_speakers() is the pure relabeling step (tested); diarize_pcm() runs the
-ONNX pipeline (lazy, needs the model files — see SHERPA_* env / models/ dir)."""
+ONNX pipeline (lazy). Models auto-provision on first use: sherpa-onnx's own
+pyannote-3-0 segmentation + 3dspeaker embedding, fetched from k2-fsa releases
+into models/ (override via SHERPA_SEG_MODEL / SHERPA_EMB_MODEL). NOTE: the
+community-1 onnx is NOT sherpa-compatible (its onnx lacks the 'sample_rate'
+metadata sherpa requires) — don't wire it here."""
 import os
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_MODELS = os.path.join(_HERE, "models")
+# sherpa-onnx model zoo (public, no auth). The seg tar extracts to a dir with
+# model.onnx; the emb is a single onnx. Sizes pinned in the comments match the
+# files this app was validated against.
+_SEG_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+            "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2")
+_EMB_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+            "speaker-recongition-models/"
+            "3dspeaker_speech_eres2net_base_200k_sv_zh-cn_16k-common.onnx")
+_SEG_PATH = os.path.join(_MODELS, "sherpa-onnx-pyannote-segmentation-3-0", "model.onnx")
+_EMB_PATH = os.path.join(_MODELS, "emb_zh.onnx")
+
+
+def _fetch(url, dst, progress=None):
+    import urllib.request
+    if progress:
+        progress(f"下載 {os.path.basename(dst)}…")
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    tmp = dst + ".part"
+    urllib.request.urlretrieve(url, tmp)
+    os.replace(tmp, dst)
+
+
+def _ensure_seg(progress=None):
+    if os.path.exists(_SEG_PATH):
+        return _SEG_PATH
+    import tarfile
+    tar = os.path.join(_MODELS, "seg.tar.bz2")
+    if not os.path.exists(tar):
+        _fetch(_SEG_URL, tar, progress)
+    if progress:
+        progress("解壓 segmentation…")
+    with tarfile.open(tar) as tf:
+        tf.extractall(_MODELS)  # -> models/sherpa-onnx-pyannote-segmentation-3-0/
+    return _SEG_PATH
+
+
+def _ensure_emb(progress=None):
+    if not os.path.exists(_EMB_PATH):
+        _fetch(_EMB_URL, _EMB_PATH, progress)
+    return _EMB_PATH
+
+
+def _resolve_models(seg_model=None, emb_model=None, progress=None):
+    """(seg, emb) absolute paths — explicit arg > env > local models/ > download.
+    Downloads the sherpa-validated models into models/ when nothing is present, so
+    diarization works on a fresh machine with no manual model setup."""
+    seg = seg_model or os.environ.get("SHERPA_SEG_MODEL")
+    emb = emb_model or os.environ.get("SHERPA_EMB_MODEL")
+    seg = seg if (seg and os.path.exists(seg)) else _ensure_seg(progress)
+    emb = emb if (emb and os.path.exists(emb)) else _ensure_emb(progress)
+    return seg, emb
 
 
 def assign_speakers(transcripts, segments, *, prefix="說話者"):
@@ -75,7 +133,7 @@ def embedding_extractor(model=None):
     import numpy as np  # noqa: PLC0415
     import sherpa_onnx  # noqa: PLC0415
 
-    emb = model or os.environ.get("SHERPA_EMB_MODEL") or "models/emb_zh.onnx"
+    _, emb = _resolve_models(emb_model=model)
     ext = sherpa_onnx.SpeakerEmbeddingExtractor(
         sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb))
 
@@ -89,19 +147,14 @@ def embedding_extractor(model=None):
 
 
 def diarize_pcm(pcm_path, *, sample_rate=16000, num_speakers=-1,
-                seg_model=None, emb_model=None):
+                seg_model=None, emb_model=None, progress=None):
     """Cluster speakers in a 16-bit mono PCM file -> [{start,end,speaker}].
-    num_speakers=-1 auto-detects the count. Models default to env
-    SHERPA_SEG_MODEL / SHERPA_EMB_MODEL (download once, see README)."""
+    num_speakers=-1 auto-detects the count. Models auto-provision into models/
+    on first use (see _resolve_models); override via SHERPA_SEG/EMB_MODEL."""
     import numpy as np  # noqa: PLC0415
     import sherpa_onnx  # noqa: PLC0415
 
-    seg = (seg_model or os.environ.get("SHERPA_SEG_MODEL")
-           or "models/sherpa-onnx-pyannote-segmentation-3-0/model.onnx")
-    emb = emb_model or os.environ.get("SHERPA_EMB_MODEL") or "models/emb_zh.onnx"
-    if not (os.path.exists(seg) and os.path.exists(emb)):
-        raise RuntimeError("diarization models missing — set SHERPA_SEG_MODEL "
-                           "and SHERPA_EMB_MODEL (see README)")
+    seg, emb = _resolve_models(seg_model, emb_model, progress)
 
     config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(

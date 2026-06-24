@@ -226,6 +226,7 @@ def _models_page():
         "<span class=hint id=freemsg style='margin:0'>清掉已載入但閒置的模型權重(下次用會重載)。</span></div>"
         "<div class=card style='display:flex;align-items:center;gap:12px;flex-wrap:wrap'>"
         "<button class=btn id=upd>檢查更新</button>"
+        "<a class=btn href='/changelog'>更新紀錄</a>"
         "<span class=hint id=updmsg style='margin:0'>從 GitHub Releases 比對版本。</span></div>"
         "<div class=card><h2 style='margin-top:0'>加速 runtime（.cpp · Metal）</h2>"
         "<table class=tx id=rt><tr><th>Runtime</th><th>狀態</th><th></th></tr></table>"
@@ -238,6 +239,10 @@ def _models_page():
     script = r"""
     function human(mb){return mb>=1000?(mb/1000).toFixed(1)+' GB':mb+' MB';}
     function esc(s){return s.replace(/"/g,'&quot;');}
+    function tmsg(t){if(!t)return '';
+      const c=t.state==='error'?'#e66':t.state==='done'?'#3a3':'var(--muted)';
+      const ic=t.state==='error'?'⚠ ':t.state==='running'?'⏳ ':t.state==='done'?'✓ ':'';
+      return ` <span style="color:${c};font-size:11px">${ic}${esc(t.msg||t.state)}</span>`;}
     async function del(path,name){if(!confirm('刪除 '+name+' ？'))return false;
       const r=await fetch('/models/cache/delete',{method:'POST',
         headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});return r.ok;}
@@ -246,25 +251,25 @@ def _models_page():
       // runtimes
       document.getElementById('rt').innerHTML='<tr><th>Runtime</th><th>狀態</th><th></th></tr>'
         +Object.entries(d.runtimes).map(([k,ok])=>`<tr><td>${k}</td>`
-          +`<td>${ok?'✅ 已安裝':'— 未安裝'}</td>`
+          +`<td>${ok?'✅ 已安裝':'— 未安裝'}${tmsg(d.tasks[k])}</td>`
           +`<td><button class='btn' data-rt="${k}">${ok?'重新編譯':'編譯安裝'}</button></td></tr>`).join('');
       document.querySelectorAll('#rt button[data-rt]').forEach(b=>b.onclick=async()=>{
-        b.disabled=true;b.textContent='編譯中…(背景,數分鐘)';
+        b.disabled=true;b.textContent='編譯中…';
         await fetch('/models/setup',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({runtime:b.dataset.rt})});
-        b.textContent='編譯中…完成後重整';});
+        setTimeout(load,800);});
       // supported
       document.getElementById('sup').innerHTML='<tr><th>模型</th><th>大小</th><th></th></tr>'
         +d.supported.map(m=>{const act=m.cached
           ?`<button class='btn danger' data-p="${esc(m.path)}" data-n="${esc(m.label)}">刪除</button>`
           :`<button class='btn primary' data-id="${esc(m.id)}">下載</button>`;
           return `<tr><td>${m.label}<div class=muted style='font-size:11px'>${m.id} · ${m.kind}</div></td>`
-            +`<td>${m.cached?human(m.size_mb):'—'}</td><td>${act}</td></tr>`;}).join('');
+            +`<td>${m.cached?human(m.size_mb):'—'}${tmsg(d.tasks[m.id])}</td><td>${act}</td></tr>`;}).join('');
       document.querySelectorAll('#sup button[data-id]').forEach(b=>b.onclick=async()=>{
         b.disabled=true;b.textContent='下載中…';
         const r=await fetch('/models/download',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({id:b.dataset.id})});
-        b.textContent=r.ok?'下載中…(背景)':'失敗:'+(await r.text());});
+        if(!r.ok)b.textContent='失敗:'+(await r.text());else setTimeout(load,800);});
       document.querySelectorAll('#sup button[data-p]').forEach(b=>b.onclick=async()=>{
         if(await del(b.dataset.p,b.dataset.n))load();});
       // other cache
@@ -274,6 +279,7 @@ def _models_page():
           ||'<tr><td colspan=3 class=muted>無</td></tr>');
       document.querySelectorAll('#oth button[data-p]').forEach(b=>b.onclick=async()=>{
         if(await del(b.dataset.p,b.dataset.n))load();});
+      if(Object.values(d.tasks||{}).some(t=>t.state==='running'))setTimeout(load,3000);
     });}
     document.getElementById('free').onclick=async()=>{
       const m=document.getElementById('freemsg');m.textContent=' 釋放中…';
@@ -782,11 +788,16 @@ _SUPPORTED = [
     {"id": "Qwen/Qwen3-ASR-1.7B", "label": "Qwen3-ASR 1.7B（transformers·最準·慢）", "kind": "hf"},
     {"id": "qwen3-asr-0.6b-q4-k-m", "label": "Qwen3-ASR .cpp 0.6B（femelo·Metal·快）", "kind": "femelo"},
     {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR .cpp 1.7B（chatllm·Metal·最準）", "kind": "chatllm"},
-    {"id": "altunenes/speaker-diarization-community-1-onnx",
-     "label": "說話者分離 community-1（分群可選·onnx）", "kind": "hf"},
+    # 說話者分群模型(sherpa pyannote-3-0 seg + 3dspeaker emb)由 diarize.py 首次分群時
+    # 自動下載到 models/，不在此清單(community-1 onnx 與 sherpa 不相容,缺 sample_rate metadata)。
 ]
 _FEMELO_DIR = os.path.expanduser("~/Library/Application Support/py_qwen3_asr_cpp/models")
 _CHATLLM_DIR = os.path.abspath("chatllm.cpp/quantized")
+
+# Background download/compile state, keyed by model id or runtime name, so the
+# manage UI can show "進行中 / 完成 / 失敗:<reason>" instead of a silent thread
+# whose error only ever hit the server log. {key: {state, msg}}.
+_MODEL_TASKS = {}
 
 
 def _hf_dir(model_id):
@@ -1207,6 +1218,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def models_manage():
         return _models_page()
 
+    @app.get("/changelog", response_class=HTMLResponse)
+    def changelog_page():
+        here = os.path.dirname(os.path.abspath(__file__))
+        try:
+            md = open(os.path.join(here, "CHANGELOG.md")).read()
+        except Exception:
+            md = "（找不到 CHANGELOG.md）"
+        import updater
+        ver = updater.current_version(here)
+        body = (f"<h1>📝 變更紀錄 <span class=muted>v{html.escape(ver)}</span></h1>"
+                f"<div class=card><pre class=sum>{html.escape(md)}</pre></div>")
+        return _shell("變更紀錄", body, back=True)
+
     @app.get("/models/status")
     def models_status():
         scan = _scan_model_cache()
@@ -1217,7 +1241,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         sup_paths = {os.path.realpath(s["path"]) for s in supported if s["cached"]}
         other = [e for e in scan if os.path.realpath(e["path"]) not in sup_paths]
         return {"runtimes": _runtime_status(), "supported": supported,
-                "other": other,
+                "other": other, "tasks": _MODEL_TASKS,
                 "total_mb": round(sum(e["size_mb"] for e in scan), 1)}
 
     @app.post("/models/cache/delete")
@@ -1244,6 +1268,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
         def _dl():
             import subprocess
+            _MODEL_TASKS[m["id"]] = {"state": "running", "msg": "下載中…"}
             try:
                 if m["kind"] == "hf":
                     from huggingface_hub import snapshot_download
@@ -1251,12 +1276,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 elif m["kind"] == "femelo":
                     subprocess.run([".venv-qwen314/bin/python", "-c",
                                     "from py_qwen3_asr_cpp.model import Qwen3ASRModel as M;"
-                                    f"M(asr_model='{m['id']}')"], check=True, timeout=3600)
+                                    f"M(asr_model='{m['id']}')"],
+                                   check=True, timeout=3600,
+                                   capture_output=True, text=True)
                 else:  # chatllm: model_downloader resolves :id and fetches
                     subprocess.run([".venv/bin/python",
                                     "chatllm.cpp/scripts/model_downloader.py",
-                                    f":qwen3-asr:1.7b"], check=True, timeout=3600)
+                                    ":qwen3-asr:1.7b"],
+                                   check=True, timeout=3600,
+                                   capture_output=True, text=True)
+                _MODEL_TASKS[m["id"]] = {"state": "done", "msg": "完成"}
             except Exception as e:
+                detail = getattr(e, "stderr", "") or str(e)
+                detail = detail.strip().splitlines()[-1] if detail.strip() else str(e)
+                _MODEL_TASKS[m["id"]] = {"state": "error", "msg": detail[:300]}
                 print(f"download failed {m['id']}: {e}", file=sys.stderr)
         import threading
         threading.Thread(target=_dl, daemon=True).start()
@@ -1294,10 +1327,16 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
         def _build():
             import subprocess
+            _MODEL_TASKS[body.runtime] = {"state": "running", "msg": "編譯中…(數分鐘)"}
             try:
-                subprocess.run(["bash", "setup_runtime.sh", body.runtime],
-                               check=True, timeout=3600)
+                r = subprocess.run(["bash", "setup_runtime.sh", body.runtime],
+                                   timeout=3600, capture_output=True, text=True)
+                if r.returncode != 0:
+                    tail = (r.stderr or r.stdout).strip().splitlines()
+                    raise RuntimeError(tail[-1] if tail else f"exit {r.returncode}")
+                _MODEL_TASKS[body.runtime] = {"state": "done", "msg": "完成"}
             except Exception as e:
+                _MODEL_TASKS[body.runtime] = {"state": "error", "msg": str(e)[:300]}
                 print(f"setup {body.runtime} failed: {e}", file=sys.stderr)
         import threading
         threading.Thread(target=_build, daemon=True).start()
