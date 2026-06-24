@@ -1243,7 +1243,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         "poll();"  # resume on load if a job is already running
         "document.getElementById('dia').onclick=async()=>{"
         "const fm=document.getElementById('finmsg');fm.textContent=' 分群中…(會後聲紋,需稍候)';"
-        "const ov=localStorage.getItem('exp_overlap')==='1';  // 設定→實驗性功能"
+        "const ov=localStorage.getItem('exp_overlap')==='1';"
         f"const r=await fetch('/meetings/{mid}/diarize',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all',mark_overlap:ov})});"
         "if(r.ok){const j=await r.json();fm.textContent=' 分出 '+j.speakers+' 位說話者';"
