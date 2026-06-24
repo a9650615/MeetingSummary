@@ -9,3 +9,4 @@ __pycache__/
 *.xcodeproj
 models/
 chatllm.cpp/
+micbusy

@@ -20,6 +20,22 @@ APPS = (os.environ.get("MEETING_WATCH_APPS")
 POLL_S = int(os.environ.get("MEETING_WATCH_POLL_S", "12"))
 
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_MICBUSY = os.path.join(_HERE, "micbusy")
+
+
+def mic_in_use():
+    """True if the default mic is in use by ANY app (CoreAudio, via micbusy) —
+    catches browser meetings + native apps + any mic-open. False if binary absent."""
+    if not os.path.exists(_MICBUSY):
+        return False
+    try:
+        return subprocess.run([_MICBUSY], capture_output=True, text=True,
+                              timeout=5).stdout.strip() == "1"
+    except Exception:
+        return False
+
+
 def meeting_app_running():
     for app in APPS:
         app = app.strip()
@@ -51,13 +67,17 @@ def notify(app):
 def main():
     notified = False
     while True:
+        # Primary signal: mic in use (any app, incl browser meetings). Secondary:
+        # a known meeting-app process (labels the notification, works if micbusy
+        # is absent).
         app = meeting_app_running()
-        if app and not is_recording():
+        active = mic_in_use() or app
+        if active and not is_recording():
             if not notified:
-                notify(app)
+                notify(app or "麥克風使用中")
                 notified = True
-        elif not app:
-            notified = False  # meeting ended -> re-arm for the next one
+        elif not active:
+            notified = False  # ended -> re-arm for the next one
         time.sleep(POLL_S)
 
 
