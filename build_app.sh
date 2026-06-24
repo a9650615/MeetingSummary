@@ -15,7 +15,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/app"
 
 # 1. Python source (small) — everything needed to run + first-run setup.
 cp -R *.py requirements.txt requirements-app.txt supervise.sh meeting_watch.py \
-      micbusy.swift bootstrap.py \
+      micbusy.swift bootstrap.py stop.sh \
       "$APP/Contents/Resources/app/" 2>/dev/null || true
 [ -f models/silero_vad_v4.onnx ] && { mkdir -p "$APP/Contents/Resources/app/models"; \
   cp models/silero_vad_v4.onnx "$APP/Contents/Resources/app/models/"; }
