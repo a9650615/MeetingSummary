@@ -1,0 +1,25 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: VERSION must match the tag
+        run: |
+          v=$(cat VERSION); t="${GITHUB_REF_NAME#v}"
+          if [ "$v" != "$t" ]; then
+            echo "::error::VERSION ($v) != tag ($t) — bump VERSION before tagging"; exit 1
+          fi
+      - name: Create release
+        # the app's bootstrap auto-updater reads releases/latest -> tag_name +
+        # tarball_url (GitHub attaches the source tarball automatically).
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}
