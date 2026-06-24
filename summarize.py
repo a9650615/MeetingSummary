@@ -57,12 +57,18 @@ def mlx_lm_backend(model="mlx-community/Qwen2.5-14B-Instruct-4bit", max_tokens=1
     """Real backend — Apple Silicon only, imported lazily. 7B is the default
     for very long single-pass inputs; pick by input length upstream (spec §6)."""
     from mlx_lm import generate, load  # noqa: PLC0415
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler  # noqa: PLC0415
 
     model_obj, tokenizer = load(model)
+    # Greedy (temp 0) keeps the summary factual — sampling is what invents 小明/期限.
+    # repetition_penalty stops the model from looping the same line/phrase.
+    sampler = make_sampler(temp=0.0)
+    logits_processors = make_logits_processors(repetition_penalty=1.3)
 
     def _run(prompt):
         messages = [{"role": "user", "content": prompt}]
         text = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-        return generate(model_obj, tokenizer, prompt=text, max_tokens=max_tokens)
+        return generate(model_obj, tokenizer, prompt=text, max_tokens=max_tokens,
+                        sampler=sampler, logits_processors=logits_processors)
 
     return _run
