@@ -356,7 +356,12 @@ function attach(stream, tag, ratio, gate){
     const outLen = Math.floor(input.length/ratio);
     const pcm = new Int16Array(outLen);
     for(let i=0;i<outLen;i++){
-      const s = Math.max(-1,Math.min(1,input[Math.floor(i*ratio)]));
+      // box-average the source block (cheap anti-alias) instead of nearest-sample
+      // decimation — picking every Nth sample aliases HF -> garbled consonants/英文.
+      const a = Math.floor(i*ratio), b = Math.floor((i+1)*ratio);
+      let sum=0, n=0;
+      for(let j=a;j<b && j<input.length;j++){ sum+=input[j]; n++; }
+      const s = Math.max(-1,Math.min(1, n ? sum/n : 0));
       pcm[i] = s*32767;
     }
     if(tag===null){ ws.send(pcm.buffer); }
@@ -388,7 +393,10 @@ startBtn.onclick = async () => {
   const dual = source==='dual';
   try { streams = await getStreams(source); }
   catch(e){ S.textContent=' 取得音源失敗: '+e.message; return; }
-  ctx = new AudioContext();
+  // Ask for a 16 kHz context so the browser's quality resampler does the work
+  // (ratio≈1, no crude decimation). Falls back to the device rate if unsupported.
+  try { ctx = new AudioContext({sampleRate:16000}); }
+  catch(e){ ctx = new AudioContext(); }
   gain = ctx.createGain(); gain.gain.value = 0;  // mute: no self-echo
   gain.connect(ctx.destination);
   const ratio = ctx.sampleRate/16000;
