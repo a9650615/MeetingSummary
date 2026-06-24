@@ -11,3 +11,4 @@ models/
 chatllm.cpp/
 micbusy
 dist/
+setup.log
