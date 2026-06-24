@@ -9,6 +9,7 @@ import os
 import sys
 import time
 from typing import Optional  # not `X | None` — pydantic evals it, fails on 3.9 venvs
+from urllib.parse import quote
 
 from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
                      WebSocketDisconnect)
@@ -190,27 +191,39 @@ _INDEX = _shell("MeetingSummary", """
     <label class=fld>標題<input name=title value="實測"></label>
     <label class=fld>摘要型式<select name=kind>
       <option value=minutes>會議記錄 minutes</option>
-      <option value=bullets>條列 bullets</option></select></label>
+      <option value=bullets>條列 bullets</option>
+      <option value=actions>行動項目 actions</option></select></label>
     <button class="btn primary" type=submit>上傳並產生摘要</button>
   </form>
   <p class=hint style="margin:.8em 0 0">上傳後會跑 transcribe + summary，第一次會下載模型，請稍候。</p>
 </div>
 <h2>會議紀錄</h2>
 <div class=card>
-  <div class=row style="margin-bottom:6px">
+  <div class=row style="margin-bottom:8px">
+    <input id=q type=search placeholder="搜尋標題 / 逐字稿 / 摘要…" style="flex:1;min-width:200px">
     <button class=btn id=mergebtn>整合相近的 live 會議</button>
     <span class="muted small" id=mergemsg></span>
   </div>
   <ul class=meetings id=meetings></ul>
 </div>
 """, script="""
-fetch('/meetings').then(r=>r.json()).then(ms=>{
-  document.getElementById('meetings').innerHTML = ms.length
-    ? ms.map(m=>`<li><span title="${m.has_audio?'有音檔':'無音檔'}">${m.has_audio?'🔊':'🔇'}</span>
-        <a href="/m/${m.id}">${m.title}</a>
-        <span class="badge ${m.status==='finalized'?'done':'live'}">${m.status}</span></li>`).join('')
-    : '<li class="muted small">尚無會議</li>';
-});
+let ALL=[];
+function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function liFull(m){return `<li><span title="${m.has_audio?'有音檔':'無音檔'}">${m.has_audio?'🔊':'🔇'}</span>
+  <a href="/m/${m.id}">${esc(m.title)}</a>
+  <span class="badge ${m.status==='finalized'?'done':'live'}">${m.status}</span></li>`;}
+function render(list){const el=document.getElementById('meetings');
+  el.innerHTML = list.length ? list.map(liFull).join('') : '<li class="muted small">尚無會議</li>';}
+function renderHits(hits){const el=document.getElementById('meetings');
+  el.innerHTML = hits.length ? hits.map(h=>`<li style="display:block"><a href="/m/${h.id}">${esc(h.title)}</a>
+    <div class="muted small" style="margin:2px 0 0">${esc(h.snippet)}</div></li>`).join('')
+    : '<li class="muted small">查無結果</li>';}
+fetch('/meetings').then(r=>r.json()).then(ms=>{ALL=ms;render(ms);});
+let tmr; const qel=document.getElementById('q');
+qel.oninput=()=>{clearTimeout(tmr);const q=qel.value.trim();
+  if(!q){render(ALL);return;}
+  tmr=setTimeout(async()=>{const j=await(await fetch('/search?q='+encodeURIComponent(q))).json();
+    renderHits(j.results);},250);};
 document.getElementById('mergebtn').onclick = async () => {
   const mm=document.getElementById('mergemsg'); mm.textContent='整合中…';
   const r=await fetch('/meetings/merge-nearby?gap_min=10',{method:'POST'});
@@ -640,6 +653,35 @@ def _transcript_text(rows):
     return "\n".join(f"{r['speaker']}: {r['text']}" for r in rows)
 
 
+def _snippet(text, q, span=44):
+    """A ~span-char window of text centered on the first case-insensitive hit of q."""
+    text = (text or "").replace("\n", " ").strip()
+    i = text.lower().find((q or "").lower())
+    if i < 0:
+        return text[:span * 2]
+    a = max(0, i - span // 2)
+    b = min(len(text), i + len(q) + span)
+    return ("…" if a else "") + text[a:b] + ("…" if b < len(text) else "")
+
+
+def _ts(ms):
+    s = int(ms) // 1000
+    return f"{s // 60:02d}:{s % 60:02d}"
+
+
+def _export_text(meeting, transcripts, summaries):
+    """Plain Markdown of a meeting: title + summaries + timestamped transcript."""
+    import datetime
+    when = datetime.datetime.fromtimestamp(meeting["created_at"]).strftime("%Y-%m-%d %H:%M")
+    lines = [f"# {meeting['title']}", f"> {when}", ""]
+    for s in summaries:
+        lines += [f"## 摘要（{s['kind']}）", s["text"], ""]
+    lines.append("## 逐字稿")
+    for r in transcripts:
+        lines.append(f"- `{_ts(r['start_ms'])}` **{r['speaker']}**：{r['text']}")
+    return "\n".join(lines) + "\n"
+
+
 _TRACKS = ("system", "mic", "mixed")
 
 
@@ -1036,10 +1078,14 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "<div class=card><h2 style='margin-top:0'>摘要</h2>"
         "<div class=row>"
         "<select id=kind><option value=minutes>會議記錄</option>"
-        "<option value=bullets>條列</option></select>"
+        "<option value=bullets>條列</option>"
+        "<option value=actions>行動項目</option></select>"
         "<button class='btn primary' id=go>產生摘要</button>"
         "<button class=btn id=dia>多人分群</button>"
         "<button class=btn id=fin>完成會議</button>"
+        f"<a class=btn href='/meetings/{mid}/export'>匯出 MD</a>"
+        "<button class=btn id=cpsum>複製摘要</button>"
+        "<button class=btn id=cptx>複製逐字稿</button>"
         "<button class='btn danger' id=del>刪除會議</button>"
         "<span class='muted small' id=finmsg></span></div>"
         "<p class=hint style='margin:.6em 0 0'>※ 摘要只在按下按鈕時才產生。停止錄音不會自動完成。"
@@ -1080,6 +1126,11 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "document.getElementById('fin').onclick=async()=>{"
         f"await fetch('/meetings/{mid}/finalize',{{method:'POST'}});"
         "document.getElementById('finmsg').textContent=' 已完成。';};"
+        "function _cp(txt,btn){navigator.clipboard.writeText(txt).then(()=>{"
+        "const o=btn.textContent;btn.textContent='已複製';setTimeout(()=>btn.textContent=o,1200);});}"
+        "document.getElementById('cpsum').onclick=(e)=>_cp(document.getElementById('out').innerText.trim(),e.target);"
+        "document.getElementById('cptx').onclick=(e)=>_cp("
+        "[...document.querySelectorAll('tr[data-ts]')].map(tr=>tr.innerText.replace(/\\t/g,' ')).join('\\n'),e.target);"
         "document.getElementById('del').onclick=async()=>{"
         "if(!confirm('確定刪除這場會議?逐字稿與音檔都會移除,無法復原。'))return;"
         f"const r=await fetch('/meetings/{mid}',{{method:'DELETE'}});"
@@ -1622,6 +1673,29 @@ def create_app(store, *, summary_backend, asr_backend=None,
             d["has_audio"] = bool(_meeting_tracks(store, m["id"]))
             out.append(d)
         return out
+
+    @app.get("/search")
+    def search(q: str = ""):
+        results = []
+        for r in store.search(q):
+            snip = r["t_snip"] or r["s_snip"] or r["title"]
+            results.append({"id": r["id"], "title": r["title"],
+                            "created_at": r["created_at"],
+                            "snippet": _snippet(snip, q)})
+        return {"q": q, "results": results}
+
+    @app.get("/meetings/{mid}/export")
+    def export_meeting(mid: int):
+        meeting = store.get_meeting(mid)
+        if meeting is None:
+            raise HTTPException(404, "meeting not found")
+        md = _export_text(dict(meeting), store.list_transcripts(mid),
+                          store.list_summaries(mid))
+        safe = "".join(c for c in meeting["title"] if c.isalnum() or c in " -_")[:40].strip()
+        fname = (safe or f"meeting-{mid}") + ".md"
+        return Response(md, media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition":
+                                 f"attachment; filename*=UTF-8''{quote(fname)}"})
 
     @app.post("/meetings/{mid}/title")
     def rename_meeting(mid: int, body: TitleIn):

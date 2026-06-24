@@ -32,10 +32,25 @@ def qwen3_words_to_segments(words, text):
     return [{"start": 0.0, "end": 0.0, "text": text}] if text.strip() else []
 
 
+# femelo's Qwen3-ASR .cpp IGNORES the language arg — verified: ''/zh/ja/Chinese/zh-CN
+# all auto-detect identically. So a forced language silently does nothing and short
+# ambiguous clips misdetect (e.g. zh -> Japanese kana). whisper-MLX honors language
+# strictly (zh->Chinese, ja->Japanese), so when the user FORCES a language we route the
+# femelo path to whisper turbo-q4 (RTF~0.07, plenty fast). Auto mode keeps femelo.
+_LANG_FALLBACK_MODEL = "mlx-community/whisper-large-v3-turbo-q4"
+
+
+def _honor_language(model, language):
+    if language and route(model) == "qwen3cpp":
+        return _LANG_FALLBACK_MODEL
+    return model
+
+
 def make_live_backend(model, language=None):
     """Live backend, callable(pcm_bytes) -> segments. language=None -> auto-detect;
     a code ("zh"/"en"/"ja"...) forces it. whisper-MLX (default), Qwen3-ASR .cpp via a
     persistent daemon (Metal), or transformers Qwen3-ASR."""
+    model = _honor_language(model, language)
     r = route(model)
     if r == "chatllm":
         return chatllm_live_backend(language)
@@ -268,6 +283,7 @@ def make_batch_backend(model, language=None):
     """Batch/accurate: route to Qwen3-ASR .cpp (fast, Metal, word-aligned) or
     transformers Qwen3-ASR or whisper-MLX. callable(audio_path) -> segments.
     language=None -> auto-detect; a code forces it."""
+    model = _honor_language(model, language)  # femelo ignores language -> whisper
     r = route(model)
     if r == "chatllm":
         return chatllm_batch_backend(model, language)

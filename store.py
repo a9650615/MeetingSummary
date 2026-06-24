@@ -134,6 +134,28 @@ class Store:
             (meeting_id,),
         ).fetchall()
 
+    def search(self, q, limit=50):
+        """Find meetings whose title, transcript, or summary contains q. LIKE is
+        correct for CJK substring matching (no whitespace tokenization needed);
+        FTS5-trigram only if this ever gets slow on a large archive. Returns rows
+        with a best-effort matching snippet + where it hit."""
+        q = (q or "").strip()
+        if not q:
+            return []
+        like = f"%{q}%"
+        return self.db.execute(
+            """SELECT m.id, m.title, m.created_at,
+                 (SELECT t.text FROM transcripts t WHERE t.meeting_id=m.id
+                    AND t.text LIKE ? ORDER BY t.start_ms LIMIT 1) AS t_snip,
+                 (SELECT s.text FROM summaries s WHERE s.meeting_id=m.id
+                    AND s.text LIKE ? LIMIT 1) AS s_snip
+               FROM meetings m
+               WHERE m.title LIKE ?
+                 OR EXISTS(SELECT 1 FROM transcripts t WHERE t.meeting_id=m.id AND t.text LIKE ?)
+                 OR EXISTS(SELECT 1 FROM summaries s WHERE s.meeting_id=m.id AND s.text LIKE ?)
+               ORDER BY m.created_at DESC LIMIT ?""",
+            (like, like, like, like, like, limit)).fetchall()
+
     def merge_meetings(self, target_id, source_ids):
         """Fold sources into target: transcripts/segments reassigned, transcript
         start_ms rebased by the created_at gap so the timeline stays ordered.
