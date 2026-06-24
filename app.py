@@ -114,6 +114,10 @@ _THEME_JS = (
     "document.getElementById('themebtn').textContent=t==='dark'?'🌙':'☀️';}"
     "addEventListener('DOMContentLoaded',()=>{const b=document.getElementById('themebtn');"
     "if(b)b.textContent=_r.dataset.theme==='dark'?'🌙':'☀️';});"
+    "async function _quitApp(){if(!confirm('結束服務並關閉 app？(錄製中的會議會停止)'))return;"
+    "try{await fetch('/shutdown',{method:'POST'});}catch(e){}"
+    "document.body.innerHTML='<div style=\"font:18px sans-serif;padding:60px;text-align:center\">"
+    "✅ 已關閉服務，可關閉此視窗。</div>';}"
 )
 
 
@@ -163,6 +167,8 @@ def _shell(title, body, script="", back=False):
         "<span class=spacer></span>"
         "<button class=btn id=themebtn onclick=_toggleTheme() title='切換深淺色' "
         "style='padding:.4em .6em'>🌓</button>"
+        "<button class='btn danger' onclick=_quitApp() title='結束服務' "
+        "style='padding:.4em .6em'>⏻</button>"
         f"{nav}</header>{body}</div>"
         + (f"<script>{script}</script>" if script else "")
         + "</body></html>"
@@ -1086,6 +1092,21 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def health():
         # recording flag lets the meeting-watcher suppress notifications while live.
         return {"status": "ok", "recording": idle["live"] > 0}
+
+    @app.post("/shutdown")
+    def shutdown():
+        # Clean in-app quit: kill the supervisor (so it won't restart us) + the
+        # watcher, then exit. For the .app this ends its whole process -> app quits.
+        def _kill():
+            import subprocess
+            import time as _t
+            _t.sleep(0.3)  # let the HTTP response flush first
+            for pat in ("supervise.sh", "meeting_watch.py", "bootstrap.py"):
+                subprocess.run(["pkill", "-f", pat], capture_output=True)
+            os._exit(0)
+        import threading as _th
+        _th.Thread(target=_kill, daemon=True).start()
+        return {"shutdown": True}
 
     @app.get("/manifest.webmanifest")
     def manifest():
