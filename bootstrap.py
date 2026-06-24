@@ -83,13 +83,19 @@ _PAGE = ("<!doctype html><meta charset=utf-8><title>準備中</title>"
          "<div style='height:100%;width:40%;background:#5b54e6;animation:i 1.2s linear infinite'></div></div>"
          "<pre id=l style='color:#888;font-size:12px;white-space:pre-wrap;margin-top:14px'></pre>"
          "<style>@keyframes i{0%{margin-left:-40%}100%{margin-left:100%}}</style>"
-         "<script>setInterval(async()=>{try{let r=await(await fetch('/_setup')).json();"
-         "if(r.error){document.getElementById('s').innerHTML='<b style=color:#e5484d>啟動失敗</b>';"
+         "<script>let _done=false;const S=document.getElementById('s'),L=document.getElementById('l');"
+         "setInterval(async()=>{"
+         "if(!_done){try{let r=await(await fetch('/_setup')).json();"
+         "if(r.error){S.innerHTML='<b style=color:#e5484d>啟動失敗</b>';"
          "document.getElementById('bar').style.display='none';"
-         "let l=document.getElementById('l');l.style.color='#e5484d';l.textContent=r.error;return;}"
-         "document.getElementById('s').textContent=r.step;"
-         "document.getElementById('l').textContent=r.line||'';"
-         "if(r.done)setTimeout(()=>location.reload(),1500)}catch(e){location.reload()}},1000)</script>")
+         "L.style.color='#e5484d';L.textContent=r.error;return;}"
+         "S.textContent=r.step;L.textContent=r.line||'';if(r.done)_done=true;"
+         "}catch(e){}return;}"
+         # done -> wait for the REAL server to actually answer /health (JSON) before
+         # reloading, so we never reload into the dead port during handoff.
+         "S.textContent='啟動服務中…';"
+         "try{let j=await(await fetch('/health')).json();if(j&&j.status==='ok')location.reload();}catch(e){}"
+         "},800)</script>")
 
 
 class H(http.server.BaseHTTPRequestHandler):
