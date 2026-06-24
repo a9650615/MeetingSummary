@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS summaries(
 CREATE TABLE IF NOT EXISTS tags(id INTEGER PRIMARY KEY, name TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS meeting_tags(
     meeting_id INTEGER, tag_id INTEGER, PRIMARY KEY(meeting_id, tag_id));
+CREATE TABLE IF NOT EXISTS speakers(
+    id INTEGER PRIMARY KEY, name TEXT, centroid BLOB, count INTEGER DEFAULT 1);
 """
 
 
@@ -158,6 +160,31 @@ class Store:
                  OR EXISTS(SELECT 1 FROM summaries s WHERE s.meeting_id=m.id AND s.text LIKE ?)
                ORDER BY m.created_at DESC LIMIT ?""",
             (like, like, like, like, like, limit)).fetchall()
+
+    # --- global speaker voiceprints (recognize the same voice across meetings) ---
+    def list_speakers(self):
+        return self.db.execute(
+            "SELECT id, name, centroid, count FROM speakers").fetchall()
+
+    def add_speaker(self, name, centroid_bytes):
+        return self._insert("INSERT INTO speakers(name, centroid, count) VALUES(?,?,1)",
+                            (name, centroid_bytes))
+
+    def set_speaker_name(self, speaker_id, name):
+        self.db.execute("UPDATE speakers SET name=? WHERE id=?", (name, speaker_id))
+        self.db.commit()
+
+    def update_speaker_centroid(self, speaker_id, centroid_bytes, count):
+        self.db.execute("UPDATE speakers SET centroid=?, count=? WHERE id=?",
+                        (centroid_bytes, count, speaker_id))
+        self.db.commit()
+
+    def rename_global_speaker(self, old, new):
+        """Rename every global voiceprint currently labeled `old` -> `new`, so a
+        rename in one meeting propagates to future auto-labels. Returns rowcount."""
+        cur = self.db.execute("UPDATE speakers SET name=? WHERE name=?", (new, old))
+        self.db.commit()
+        return cur.rowcount
 
     # --- tags (many-to-many: a meeting can carry #客戶 #1on1 #產品) ---
     def add_tag(self, meeting_id, name):

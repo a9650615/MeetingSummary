@@ -67,7 +67,7 @@ def _resolve_models(seg_model=None, emb_model=None, progress=None):
     return seg, emb
 
 
-def assign_speakers(transcripts, segments, *, prefix="說話者",
+def assign_speakers(transcripts, segments, *, prefix="說話者", names=None,
                     mark_overlap=False, overlap_ratio=0.3):
     """Relabel each transcript with the diarization speaker that has the MOST time
     overlap with the line's [start,end] window — so a short interjection at a line's
@@ -80,6 +80,9 @@ def assign_speakers(transcripts, segments, *, prefix="說話者",
     this is a heuristic from the clustered segments, not true overlap separation."""
     order = {raw: i + 1 for i, raw in
              enumerate(sorted({s["speaker"] for s in segments}))}
+    # names (optional): cluster id -> persistent voiceprint label; else 說話者N.
+    label = (lambda spk: names.get(spk, f"{prefix}{order[spk]}")) if names \
+        else (lambda spk: f"{prefix}{order[spk]}")
     out = []
     for t in transcripts:
         s0 = t.get("start_ms", 0) / 1000.0
@@ -93,17 +96,16 @@ def assign_speakers(transcripts, segments, *, prefix="說話者",
         nt = dict(t)
         if ov:
             ranked = sorted(ov.items(), key=lambda kv: -kv[1])
-            nt["speaker"] = f"{prefix}{order[ranked[0][0]]}"
+            nt["speaker"] = label(ranked[0][0])
             if (mark_overlap and len(ranked) >= 2 and dur > 0
                     and ranked[1][1] / dur >= overlap_ratio):
-                ids = sorted(order[ranked[i][0]] for i in (0, 1))
-                nt["speaker"] = "🔀 " + "+".join(f"{prefix}{n}" for n in ids)
+                nt["speaker"] = "🔀 " + "+".join(label(ranked[i][0]) for i in (0, 1))
                 nt["overlap"] = True
         else:  # zero overlap (point line) -> segment covering the start, else keep
             best = next((seg["speaker"] for seg in segments
                          if seg["start"] <= s0 < seg["end"]), None)
             if best is not None:
-                nt["speaker"] = f"{prefix}{order[best]}"
+                nt["speaker"] = label(best)
         out.append(nt)
     return out
 
@@ -159,6 +161,51 @@ def embedding_extractor(model=None):
         return np.asarray(ext.compute(stream), dtype=np.float32)
 
     return _run
+
+
+def cluster_embeddings(pcm_path, segments, *, sample_rate=16000, max_secs=12,
+                       model=None):
+    """One L2-normalized speaker embedding per cluster id, from up to max_secs of
+    that cluster's audio (concatenated). {} on no audio. Lazy (sherpa emb model)."""
+    import numpy as np  # noqa: PLC0415
+    audio = np.frombuffer(open(pcm_path, "rb").read(), dtype=np.int16)
+    ext = embedding_extractor(model)
+    spans = {}
+    for seg in segments:
+        spans.setdefault(seg["speaker"], []).append((seg["start"], seg["end"]))
+    cap = int(max_secs * sample_rate)
+    out = {}
+    for spk, ss in spans.items():
+        chunks, total = [], 0
+        for s, e in ss:
+            piece = audio[int(s * sample_rate):int(e * sample_rate)]
+            if total + len(piece) > cap:
+                piece = piece[:cap - total]
+            if len(piece):
+                chunks.append(piece)
+                total += len(piece)
+            if total >= cap:
+                break
+        if not chunks:
+            continue
+        emb = np.asarray(ext(np.concatenate(chunks).tobytes(), sample_rate),
+                         dtype=np.float32)
+        out[spk] = emb / (np.linalg.norm(emb) + 1e-9)
+    return out
+
+
+def match_speaker(emb, known, threshold=0.62):
+    """known = [(id, centroid_np)]. Best cosine match >= threshold -> (id, sim),
+    else (None, best_sim). Conservative threshold: prefer a new speaker over a
+    wrong merge (3D-Speaker cosine: same voice ~0.7+, different <0.4; measured
+    distinct speakers at 0.34-0.57, so 0.62 keeps them apart). Tune via the route."""
+    import numpy as np  # noqa: PLC0415
+    best_id, best = None, -1.0
+    for sid, c in known:
+        sim = float(np.dot(emb, c))
+        if sim > best:
+            best, best_id = sim, sid
+    return (best_id if best >= threshold else None), best
 
 
 def diarize_pcm(pcm_path, *, sample_rate=16000, num_speakers=-1,

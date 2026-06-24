@@ -1,7 +1,23 @@
 import numpy as np
 
 import diarize
-from diarize import SpeakerTracker, assign_speakers
+from diarize import SpeakerTracker, assign_speakers, match_speaker
+
+
+def test_match_speaker_cosine():
+    a = np.array([1.0, 0, 0], dtype=np.float32)
+    b = np.array([0, 1.0, 0], dtype=np.float32)
+    known = [(1, a), (2, b)]
+    assert match_speaker(a, known, 0.55)[0] == 1            # same vector -> match
+    assert match_speaker(b + np.array([0, 0, .1]), known, 0.55)[0] == 2
+    assert match_speaker(np.array([0, 0, 1.0], np.float32), known, 0.55)[0] is None  # orthogonal -> new
+
+
+def test_assign_speakers_uses_names_map():
+    line = [{"start_ms": 0, "end_ms": 2000, "speaker": "x"}]
+    segs = [{"start": 0.0, "end": 2.0, "speaker": 7}]   # cluster id 7
+    out = assign_speakers(line, segs, names={7: "Alice"})
+    assert out[0]["speaker"] == "Alice"
 
 
 def test_resolve_models_prefers_existing_paths(tmp_path, monkeypatch):

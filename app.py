@@ -89,7 +89,7 @@ details.menu{position:relative;display:inline-block}
 details.menu>summary{list-style:none}
 details.menu>summary::-webkit-details-marker{display:none}
 details.menu>summary::marker{content:""}
-.menupop{position:absolute;z-index:30;top:calc(100% + 4px);left:0;display:flex;flex-direction:column;
+.menupop{position:absolute;z-index:30;top:calc(100% + 4px);right:0;left:auto;display:flex;flex-direction:column;
  gap:6px;padding:8px;min-width:170px;background:var(--surface);border:1px solid var(--line);
  border-radius:var(--radius-sm);box-shadow:0 10px 28px -10px rgba(0,0,0,.45)}
 .menupop .btn{width:100%;text-align:left}
@@ -657,6 +657,7 @@ class DiarizeIn(BaseModel):
     seg_model: Optional[str] = None  # override segmentation onnx (e.g. community-1)
     emb_model: Optional[str] = None  # override speaker-embedding onnx
     mark_overlap: bool = False       # experimental: tag turn-dense/overlap lines
+    enroll: bool = True              # persistent voiceprints: recognize voices across meetings
 
 
 class TagIn(BaseModel):
@@ -967,6 +968,37 @@ def _free_models():
     except Exception:
         pass
     return freed
+
+
+def _persistent_names(store, embs, prefix, threshold=0.62):
+    """cluster id -> persistent voiceprint label. Match each cluster embedding to the
+    global speakers table (cosine); reuse the matched speaker's name + nudge its
+    centroid, else enroll a new globally-unique speaker. So a voice you named "Alice"
+    in one meeting auto-labels "Alice" in later ones; renaming propagates (see
+    /speaker route -> rename_global_speaker)."""
+    import numpy as np  # noqa: PLC0415
+    import diarize as diar  # noqa: PLC0415
+    known = [(r["id"], np.frombuffer(r["centroid"], dtype=np.float32))
+             for r in store.list_speakers() if r["centroid"]]
+    rows = {r["id"]: r for r in store.list_speakers()}
+    names = {}
+    for spk, emb in embs.items():
+        mid, _sim = diar.match_speaker(emb, known, threshold)
+        if mid is not None:
+            r = rows[mid]
+            n = r["count"] or 1
+            cen = np.frombuffer(r["centroid"], dtype=np.float32) * n + emb
+            cen = (cen / (np.linalg.norm(cen) + 1e-9)).astype(np.float32)
+            store.update_speaker_centroid(mid, cen.tobytes(), n + 1)
+            names[spk] = r["name"]
+        else:
+            sid = store.add_speaker(prefix, emb.astype(np.float32).tobytes())
+            nm = f"{prefix}{sid}"  # globally-unique placeholder until the user renames
+            store.set_speaker_name(sid, nm)
+            names[spk] = nm
+            known.append((sid, emb))
+            rows[sid] = {"id": sid, "name": nm, "centroid": emb.tobytes(), "count": 1}
+    return names
 
 
 def _is_default_title(t):
@@ -1768,7 +1800,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def rename_speaker(mid: int, body: SpeakerRenameIn):
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
-        n = store.rename_speaker(mid, body.old, body.new.strip())
+        new = body.new.strip()
+        n = store.rename_speaker(mid, body.old, new)
+        # propagate to the global voiceprint so future meetings auto-use the new name
+        store.rename_global_speaker(body.old, new)
         return {"renamed": n}
 
     @app.delete("/meetings/{mid}")
@@ -1949,10 +1984,18 @@ def create_app(store, *, summary_backend, asr_backend=None,
             os.makedirs(f"data/{mid}", exist_ok=True)
             with open(tmp, "wb") as f:
                 f.write(pcm_bytes)
+            names = None
             try:
                 segments = diar.diarize_pcm(tmp, num_speakers=body.num_speakers,
                                             seg_model=body.seg_model,
                                             emb_model=body.emb_model)
+                if body.enroll:  # persistent cross-meeting voiceprints (best-effort)
+                    try:
+                        embs = diar.cluster_embeddings(tmp, segments)
+                        names = _persistent_names(
+                            store, embs, _TRACK_LABEL.get(track, track))
+                    except Exception as e:
+                        print(f"speaker enroll skipped: {e}", file=sys.stderr)
             except Exception as e:
                 raise HTTPException(503, f"diarization unavailable: {e}")
             finally:
@@ -1962,7 +2005,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             # prefix per track so 我-side and 對方-side speakers don't collide
             for r in diar.assign_speakers(rows, segments,
                                           prefix=_TRACK_LABEL.get(track, track),
-                                          mark_overlap=body.mark_overlap):
+                                          names=names, mark_overlap=body.mark_overlap):
                 store.update_speaker(r["id"], r["speaker"])
             total += len({s["speaker"] for s in segments})
         return {"tracks": tracks, "speakers": total}
