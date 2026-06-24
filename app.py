@@ -255,7 +255,14 @@ def _models_page():
       document.getElementById('rt').innerHTML='<tr><th>Runtime</th><th>狀態</th><th></th></tr>'
         +Object.entries(d.runtimes).map(([k,ok])=>`<tr><td>${k}</td>`
           +`<td>${ok?'✅ 已安裝':'— 未安裝'}${tmsg(d.tasks[k])}</td>`
-          +`<td><button class='btn' data-rt="${k}">${ok?'重新編譯':'編譯安裝'}</button></td></tr>`).join('');
+          +`<td><button class='btn' data-rt="${k}">${ok?'重新編譯':'編譯安裝'}</button>`
+          +`${ok?` <button class='btn danger' data-rtdel="${k}">清除</button>`:''}</td></tr>`).join('');
+      document.querySelectorAll('#rt button[data-rtdel]').forEach(b=>b.onclick=async()=>{
+        if(!confirm('清除 '+b.dataset.rtdel+' runtime？(模型權重保留,重新編譯可復原)'))return;
+        b.disabled=true;b.textContent='清除中…';
+        await fetch('/models/runtime/delete',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({runtime:b.dataset.rtdel})});
+        load();});
       document.querySelectorAll('#rt button[data-rt]').forEach(b=>b.onclick=async()=>{
         b.disabled=true;b.textContent='編譯中…';
         await fetch('/models/setup',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1344,6 +1351,21 @@ def create_app(store, *, summary_backend, asr_backend=None,
         import threading
         threading.Thread(target=_build, daemon=True).start()
         return {"building": body.runtime}
+
+    @app.post("/models/runtime/delete")
+    def models_runtime_delete(body: SetupIn):
+        # Uninstall a .cpp runtime = remove its build dir -> status flips to 未安裝.
+        # Re-compile re-fetches/builds. Model weights live elsewhere, untouched.
+        import shutil
+        targets = {"femelo": ".venv-qwen314", "chatllm": "chatllm.cpp"}
+        d = targets.get(body.runtime)
+        if not d:
+            raise HTTPException(400, "unknown runtime")
+        p = os.path.abspath(d)
+        existed = os.path.isdir(p)
+        shutil.rmtree(p, ignore_errors=True)
+        _MODEL_TASKS.pop(body.runtime, None)
+        return {"removed": existed, "runtime": body.runtime}
 
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket):
