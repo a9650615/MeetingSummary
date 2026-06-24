@@ -47,15 +47,11 @@ cat > "$APP/Contents/MacOS/launcher" <<LAUNCH
 set -u
 PORT=$PORT
 PROJECT="$ROOT"
-REPO_URL="${REPO_URL:-}"               # baked at build: git URL -> online auto-update
 SRC="\$(cd "\$(dirname "\$0")/../Resources/app" && pwd)"
 WD="\$HOME/Library/Application Support/MeetingSummary"
 if [ -x "\$PROJECT/.venv/bin/python" ]; then
   WD="\$PROJECT"                       # dev machine: reuse working venv (instant)
-elif [ -n "$REPO_URL" ]; then          # distribution: git clone -> bootstrap git-pulls each launch
-  [ -d "\$WD/.git" ] || { mkdir -p "\$WD"; git clone "$REPO_URL" "\$WD" 2>/dev/null; }
-  [ -d "\$WD/.git" ] || /usr/bin/rsync -a --exclude .venv --exclude data "\$SRC/" "\$WD/"
-else
+else                                   # distribution: bootstrap release-update keeps code fresh
   mkdir -p "\$WD"
   /usr/bin/rsync -a --exclude .venv --exclude data "\$SRC/" "\$WD/" 2>/dev/null || cp -R "\$SRC/." "\$WD/"
 fi
