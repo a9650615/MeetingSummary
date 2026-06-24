@@ -181,7 +181,7 @@ _INDEX = _shell("MeetingSummary", """
 <h1>本地會議轉錄 · 摘要</h1>
 <div class=row style="margin-bottom:4px">
 <a class="btn primary" href="/live">🔴 開始 Live 即時逐字稿</a>
-<a class="btn" href="/models/manage">⚙️ 模型管理</a>
+<a class="btn" href="/models/manage">⚙️ 設定</a>
 </div>
 <h2>上傳音檔</h2>
 <div class=card>
@@ -223,22 +223,46 @@ document.getElementById('mergebtn').onclick = async () => {
 
 def _models_page():
     body = (
-        "<h1>⚙️ 模型管理 <span class=muted id=total></span></h1>"
-        "<div class=card style='display:flex;align-items:center;gap:12px'>"
-        "<button class=btn id=free>釋放閒置記憶體</button>"
-        "<span class=hint id=freemsg style='margin:0'>清掉已載入但閒置的模型權重(下次用會重載)。</span></div>"
-        "<div class=card style='display:flex;align-items:center;gap:12px;flex-wrap:wrap'>"
-        "<button class=btn id=upd>檢查更新</button>"
+        "<style>"
+        ".subnav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px}"
+        ".subnav a{font-size:13px;font-weight:650;padding:.4em .9em;border-radius:999px;"
+        "border:1px solid var(--line);color:var(--muted);text-decoration:none;transition:.12s}"
+        ".subnav a:hover{border-color:var(--accent);color:var(--accent)}"
+        "section{margin:0 0 26px}section>h2{margin:0 0 10px;font-size:15px}"
+        ".setrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}"
+        ".verpill{font-weight:750;font-size:13px;padding:.25em .7em;border-radius:999px;"
+        "background:var(--surface2);border:1px solid var(--line)}"
+        "</style>"
+        "<h1>⚙️ 設定</h1>"
+        "<nav class=subnav>"
+        "<a href='#sec-sys'>系統 · 更新</a>"
+        "<a href='#sec-models'>模型</a>"
+        "<a href='#sec-rt'>加速 runtime</a></nav>"
+
+        "<section id=sec-sys><h2>系統 · 更新</h2>"
+        "<div class=card>"
+        "<div class=setrow style='margin-bottom:14px'>"
+        "<span class=verpill>版本 <span id=ver>…</span></span>"
+        "<span class=muted id=total></span></div>"
+        "<div class=setrow>"
+        "<button class='btn primary' id=upd>檢查更新</button>"
         "<a class=btn href='/changelog'>更新紀錄</a>"
-        "<span class=hint id=updmsg style='margin:0'>從 GitHub Releases 比對版本。</span></div>"
-        "<div class=card><h2 style='margin-top:0'>加速 runtime（.cpp · Metal）</h2>"
+        "<button class=btn id=free>釋放閒置記憶體</button></div>"
+        "<p class=hint id=updmsg style='margin:.7em 0 0'>更新比對 GitHub Releases，由你決定是否更新並重啟；"
+        "釋放會清掉閒置模型權重(下次用會重載)。</p></div></section>"
+
+        "<section id=sec-models><h2>模型</h2>"
+        "<div class=card><h3 style='margin:0 0 8px;font-size:13px;color:var(--muted)'>支援的模型</h3>"
+        "<table class=tx id=sup><tr><th>模型</th><th>大小</th><th></th></tr></table></div>"
+        "<div class=card><h3 style='margin:0 0 8px;font-size:13px;color:var(--muted)'>其他快取</h3>"
+        "<table class=tx id=oth><tr><th>名稱</th><th>大小</th><th></th></tr></table></div></section>"
+
+        "<section id=sec-rt><h2>加速 runtime（.cpp · Metal）</h2>"
+        "<div class=card>"
         "<table class=tx id=rt><tr><th>Runtime</th><th>狀態</th><th></th></tr></table>"
         "<p class=hint style='margin:.5em 0 0'>一鍵下載+編譯+安裝。femelo 需 python3.14，"
-        "chatllm 需 cmake（缺則先 brew install）。</p></div>"
-        "<div class=card><h2 style='margin-top:0'>支援的模型</h2>"
-        "<table class=tx id=sup><tr><th>模型</th><th>大小</th><th></th></tr></table></div>"
-        "<div class=card><h2 style='margin-top:0'>其他快取</h2>"
-        "<table class=tx id=oth><tr><th>名稱</th><th>大小</th><th></th></tr></table></div>")
+        "chatllm 需 cmake（缺則先 brew install）。清除只移除編譯產物，模型權重保留。</p>"
+        "</div></section>")
     script = r"""
     function human(mb){return mb>=1000?(mb/1000).toFixed(1)+' GB':mb+' MB';}
     function esc(s){return s.replace(/"/g,'&quot;');}
@@ -250,7 +274,8 @@ def _models_page():
       const r=await fetch('/models/cache/delete',{method:'POST',
         headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});return r.ok;}
     function load(){fetch('/models/status').then(r=>r.json()).then(d=>{
-      document.getElementById('total').textContent='共 '+human(d.total_mb);
+      document.getElementById('ver').textContent=d.version||'?';
+      document.getElementById('total').textContent='模型快取共 '+human(d.total_mb);
       // runtimes
       document.getElementById('rt').innerHTML='<tr><th>Runtime</th><th>狀態</th><th></th></tr>'
         +Object.entries(d.runtimes).map(([k,ok])=>`<tr><td>${k}</td>`
@@ -292,7 +317,7 @@ def _models_page():
       if(Object.values(d.tasks||{}).some(t=>t.state==='running'))setTimeout(load,3000);
     });}
     document.getElementById('free').onclick=async()=>{
-      const m=document.getElementById('freemsg');m.textContent=' 釋放中…';
+      const m=document.getElementById('updmsg');m.textContent=' 釋放中…';
       const r=await fetch('/models/free',{method:'POST'});const j=await r.json();
       m.textContent=' 已釋放: '+(j.freed.join(', ')||'無');setTimeout(load,400);};
     document.getElementById('upd').onclick=async()=>{
@@ -310,7 +335,7 @@ def _models_page():
           if(h){clearInterval(wait);location.reload();}}catch(e){}},1500);};};
     load();
     """
-    return _shell("模型管理", body, script=script, back=True)
+    return _shell("設定", body, script=script, back=True)
 
 
 def _result_page(title, summary, transcripts):
@@ -1250,8 +1275,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
             supported.append({**m, "cached": cached, "size_mb": size_mb, "path": path})
         sup_paths = {os.path.realpath(s["path"]) for s in supported if s["cached"]}
         other = [e for e in scan if os.path.realpath(e["path"]) not in sup_paths]
+        import updater
         return {"runtimes": _runtime_status(), "supported": supported,
                 "other": other, "tasks": _MODEL_TASKS,
+                "version": updater.current_version(os.path.dirname(os.path.abspath(__file__))),
                 "total_mb": round(sum(e["size_mb"] for e in scan), 1)}
 
     @app.post("/models/cache/delete")
