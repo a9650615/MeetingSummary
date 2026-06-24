@@ -18,12 +18,15 @@ def main():
     model = Qwen3ASRModel(asr_model=_ASR, n_threads=4)
     print("QWEN3READY", flush=True)
     for line in sys.stdin:
-        path = line.strip()
-        if not path:
+        line = line.rstrip("\n")
+        if not line:
             continue
+        lang, _, path = line.partition("\t")   # protocol: "lang<TAB>path"
+        if not path:                            # back-compat: bare path = auto lang
+            path, lang = lang, ""
         text = ""
         try:
-            res = model.transcribe(path)
+            res = model.transcribe(path, language=lang or "")
             res = res[0] if isinstance(res, tuple) else res
             text = getattr(res, "text", "") or ""
         except Exception as e:

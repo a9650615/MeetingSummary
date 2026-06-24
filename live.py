@@ -413,10 +413,11 @@ class AdaptiveBackend:
         return out
 
 
-def mlx_whisper_live_backend(model="mlx-community/whisper-small-mlx"):
+def mlx_whisper_live_backend(model="mlx-community/whisper-small-mlx", language=None):
     """Real live backend — Apple Silicon only, lazy import. Takes int16 PCM
-    bytes for one window, returns whisper segments."""
+    bytes for one window, returns whisper segments. language=None -> auto."""
     import mlx_whisper  # noqa: PLC0415
+    lang = language or None
 
     def _run(window_bytes):
         if len(window_bytes) < 2:
@@ -428,7 +429,7 @@ def mlx_whisper_live_backend(model="mlx-community/whisper-small-mlx"):
         audio = preprocess(audio)  # DC removal + normalize for poor recordings
         try:
             segs = mlx_whisper.transcribe(
-                audio, path_or_hf_repo=model,
+                audio, path_or_hf_repo=model, language=lang,
                 condition_on_previous_text=False,  # don't propagate a loop forward
             )["segments"]
         except Exception as e:  # one bad window must not kill the live session

@@ -27,7 +27,7 @@ def test_qwen3_words_to_segments():
 def test_live_manager_set_model_rebuilds_chain():
     made = []
     mgr = backends.LiveModelManager(
-        make=lambda m: made.append(m) or (lambda b: [{"start": 0, "end": 1, "text": "x"}]),
+        make=lambda m, lang=None: made.append(m) or (lambda b: [{"start": 0, "end": 1, "text": "x"}]),
         model="turbo", fallback=["small", "base"], rtf_budget=0.8)
     assert mgr.requested == "turbo" and mgr.current == "turbo"
     assert mgr.backend.models == ["turbo", "small", "base"]  # chain = model + fallback
@@ -36,7 +36,7 @@ def test_live_manager_set_model_rebuilds_chain():
 
 def test_live_manager_hot_swap():
     mgr = backends.LiveModelManager(
-        make=lambda m: (lambda b: [{"start": 0, "end": 1, "text": m}]),
+        make=lambda m, lang=None: (lambda b: [{"start": 0, "end": 1, "text": m}]),
         model="turbo", fallback=["small"])
     assert mgr.current == "turbo"
     mgr.set_model("small")  # hot swap, no restart

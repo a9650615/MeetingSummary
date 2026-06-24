@@ -20,14 +20,16 @@ def transcribe(audio_path, *, profile, track, backend):
     return out
 
 
-def mlx_whisper_backend(model="mlx-community/whisper-large-v3-mlx"):
+def mlx_whisper_backend(model="mlx-community/whisper-large-v3-mlx", language=None):
     """Real backend — Apple Silicon only. Imported lazily so tests and
-    non-Mac dev don't need mlx-whisper installed.
+    non-Mac dev don't need mlx-whisper installed. language=None -> auto-detect;
+    or a whisper code ("zh"/"en"/"ja"...) to force it.
 
     Containers (m4a/wav/mp3) are passed by path (ffmpeg decodes). Raw headerless
     .pcm (our recorder/segment format, 16 kHz mono s16le) is loaded into an array
     here — ffmpeg can't sniff a format from raw PCM."""
     import mlx_whisper  # noqa: PLC0415
+    lang = language or None
 
     def _run(audio_path):
         audio_path = str(audio_path)
@@ -35,9 +37,9 @@ def mlx_whisper_backend(model="mlx-community/whisper-large-v3-mlx"):
             import numpy as np  # noqa: PLC0415
             with open(audio_path, "rb") as f:
                 audio = np.frombuffer(f.read(), dtype=np.int16).astype(np.float32) / 32768.0
-            result = mlx_whisper.transcribe(audio, path_or_hf_repo=model)
+            result = mlx_whisper.transcribe(audio, path_or_hf_repo=model, language=lang)
         else:
-            result = mlx_whisper.transcribe(audio_path, path_or_hf_repo=model)
+            result = mlx_whisper.transcribe(audio_path, path_or_hf_repo=model, language=lang)
         return result["segments"]
 
     return _run

@@ -32,19 +32,18 @@ def qwen3_words_to_segments(words, text):
     return [{"start": 0.0, "end": 0.0, "text": text}] if text.strip() else []
 
 
-def make_live_backend(model):
-    """Live backend, callable(pcm_bytes) -> segments. whisper-MLX (default),
-    Qwen3-ASR .cpp via a persistent daemon (Metal, model loaded once -> usable for
-    live finals), or transformers Qwen3-ASR (slow). AdaptiveBackend's warmup grace
-    absorbs the daemon's first-call load so it isn't spuriously downgraded."""
+def make_live_backend(model, language=None):
+    """Live backend, callable(pcm_bytes) -> segments. language=None -> auto-detect;
+    a code ("zh"/"en"/"ja"...) forces it. whisper-MLX (default), Qwen3-ASR .cpp via a
+    persistent daemon (Metal), or transformers Qwen3-ASR."""
     r = route(model)
     if r == "chatllm":
-        return chatllm_live_backend()
+        return chatllm_live_backend(language)
     if r == "qwen3cpp":
-        return qwen3_cpp_live_backend()
+        return qwen3_cpp_live_backend(language)
     if r == "qwen3":
-        return qwen3_live_backend(model)
-    return mlx_whisper_live_backend(model)
+        return qwen3_live_backend(model, language)
+    return mlx_whisper_live_backend(model, language)
 
 
 class _ChatllmAsrDaemon:
@@ -58,6 +57,12 @@ class _ChatllmAsrDaemon:
         self._m = None
         self._acc = {"t": ""}
         self._lock = threading.Lock()
+        self.lang = "auto"   # chatllm wants a NAME (Chinese/English/…) or auto
+
+    def set_lang(self, lang):
+        if lang != self.lang:
+            self.lang = lang
+            self._m = None   # respawn with the new --set language
 
     def _ensure(self):
         if self._m is not None:
@@ -83,7 +88,7 @@ class _ChatllmAsrDaemon:
         lib = LibChatLLM(os.path.join(C, "bindings"))
         self._m = _Cap(lib, ["-m", os.path.join(C, "quantized", "qwen3-asr-1.7b.bin"),
                              "-mgl", "all", "999", "--multimedia_file_tags", "{{", "}}",
-                             "--set", "language", "auto"])
+                             "--set", "language", self.lang])
 
     def transcribe(self, pcm_bytes):
         import os
@@ -115,20 +120,28 @@ class _ChatllmAsrDaemon:
 
 
 _chatllm_daemon = None
+# UI language code -> chatllm language NAME (chatllm wants names; "" -> auto).
+_CHATLLM_LANG = {"": "auto", "zh": "Chinese", "en": "English", "ja": "Japanese",
+                 "ko": "Korean", "yue": "Cantonese"}
 
 
-def chatllm_live_backend():
-    """Live-final backend over the persistent chatllm 1.7B daemon (module singleton)."""
+def _chatllm_get(language):
     global _chatllm_daemon
     if _chatllm_daemon is None:
         _chatllm_daemon = _ChatllmAsrDaemon()
-    return _chatllm_daemon.transcribe
+    _chatllm_daemon.set_lang(_CHATLLM_LANG.get(language or "", "auto"))
+    return _chatllm_daemon
 
 
-def chatllm_batch_backend(model="qwen3-asr-1.7b"):
+def chatllm_live_backend(language=None):
+    """Live-final backend over the persistent chatllm 1.7B daemon (module singleton)."""
+    return _chatllm_get(language).transcribe
+
+
+def chatllm_batch_backend(model="qwen3-asr-1.7b", language=None):
     """Batch/accurate over the same daemon. callable(audio_path) -> segments
     (raw .pcm read to bytes; daemon wraps to wav)."""
-    be = chatllm_live_backend()
+    be = _chatllm_get(language).transcribe
 
     def _run(audio_path):
         with open(str(audio_path), "rb") as f:
@@ -181,7 +194,7 @@ class _Qwen3CppDaemon:
             if line.strip() == "QWEN3READY":
                 break
 
-    def transcribe(self, pcm_bytes):
+    def transcribe(self, pcm_bytes, language=""):
         import json
         import os
         import recorder  # noqa: PLC0415
@@ -193,7 +206,7 @@ class _Qwen3CppDaemon:
             with open(tmp, "wb") as f:
                 f.write(recorder.pcm_to_wav(pcm_bytes, sample_rate=16000, channels=1))
             try:
-                self._proc.stdin.write(tmp + "\n")
+                self._proc.stdin.write(f"{language or ''}\t{tmp}\n")  # lang<TAB>path
                 self._proc.stdin.flush()
                 text = ""
                 for line in self._proc.stdout:
@@ -213,15 +226,15 @@ class _Qwen3CppDaemon:
 _qwen3_daemon = None
 
 
-def qwen3_cpp_live_backend():
+def qwen3_cpp_live_backend(language=None):
     """Live-final backend over the persistent .cpp daemon (module singleton)."""
     global _qwen3_daemon
     if _qwen3_daemon is None:
         _qwen3_daemon = _Qwen3CppDaemon()
-    return _qwen3_daemon.transcribe
+    return lambda pcm: _qwen3_daemon.transcribe(pcm, language or "")
 
 
-def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B"):
+def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B", language=None):
     """Per-utterance Qwen3-ASR for live finals (experimental). Slower than
     whisper-MLX + ~63s cold load; best zh accuracy. Interim must stay whisper.
     Lazy-loads on first call so hot-swap (set_model) doesn't block the request."""
@@ -229,6 +242,7 @@ def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B"):
     import numpy as np  # noqa: PLC0415
 
     state = {}
+    lang = language or None
 
     def _run(window_bytes):
         if len(window_bytes) < 2:
@@ -240,7 +254,7 @@ def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B"):
             if "m" not in state:
                 from qwen_asr import Qwen3ASRModel  # noqa: PLC0415
                 state["m"] = Qwen3ASRModel.from_pretrained(model)
-            out = state["m"].transcribe((audio, 16000), language=None)
+            out = state["m"].transcribe((audio, 16000), language=lang)
         except Exception as e:
             print(f"qwen3 live error (skipped): {e}", file=sys.stderr)
             return []
@@ -250,21 +264,22 @@ def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B"):
     return _run
 
 
-def make_batch_backend(model):
+def make_batch_backend(model, language=None):
     """Batch/accurate: route to Qwen3-ASR .cpp (fast, Metal, word-aligned) or
-    transformers Qwen3-ASR or whisper-MLX. callable(audio_path) -> segments."""
+    transformers Qwen3-ASR or whisper-MLX. callable(audio_path) -> segments.
+    language=None -> auto-detect; a code forces it."""
     r = route(model)
     if r == "chatllm":
-        return chatllm_batch_backend(model)
+        return chatllm_batch_backend(model, language)
     if r == "qwen3cpp":
-        return qwen3_cpp_batch_backend(model)
+        return qwen3_cpp_batch_backend(model, language)
     if r == "qwen3":
-        return qwen3_batch_backend(model)
+        return qwen3_batch_backend(model, language)
     import asr
-    return asr.mlx_whisper_backend(model)
+    return asr.mlx_whisper_backend(model, language)
 
 
-def qwen3_cpp_batch_backend(model="qwen3-asr-0.6b-q4-k-m"):
+def qwen3_cpp_batch_backend(model="qwen3-asr-0.6b-q4-k-m", language=None):
     """Qwen3-ASR via the .cpp/GGUF sidecar (Metal, fast, word-level alignment).
     Runs in .venv-qwen314 as a subprocess (cp314 native module); the app is 3.10.
     Raw .pcm is wrapped to a temp wav (the .cpp loader needs a container)."""
@@ -289,8 +304,8 @@ def qwen3_cpp_batch_backend(model="qwen3-asr-0.6b-q4-k-m"):
                 f.write(wav)
             audio_path = tmp
         try:
-            p = subprocess.run([py, cli, audio_path], capture_output=True,
-                               text=True, timeout=1800)
+            p = subprocess.run([py, cli, audio_path, language or ""],
+                               capture_output=True, text=True, timeout=1800)
             line = next((l for l in p.stdout.splitlines()
                          if l.startswith("QWEN3JSON:")), None)
             if line is None:
@@ -313,17 +328,18 @@ def qwen3_cpp_batch_backend(model="qwen3-asr-0.6b-q4-k-m"):
     return _run
 
 
-def qwen3_batch_backend(model="Qwen/Qwen3-ASR-0.6B"):
+def qwen3_batch_backend(model="Qwen/Qwen3-ASR-0.6B", language=None):
     """Offline Qwen3-ASR via the qwen-asr transformers backend. Apple Silicon:
     torch on MPS/CPU (slow, not realtime) — for post-meeting accuracy only.
     Lazy import so the heavy torch/transformers stack isn't required otherwise."""
     state = {}
+    lang = language or None
 
     def _run(audio_path):
         if "m" not in state:  # lazy: don't block startup / first request beyond load
             from qwen_asr import Qwen3ASRModel  # noqa: PLC0415
             state["m"] = Qwen3ASRModel.from_pretrained(model)
-        out = state["m"].transcribe(str(audio_path), language=None)  # auto lang
+        out = state["m"].transcribe(str(audio_path), language=lang)
         text = " ".join(t.text for t in out).strip()
         return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
 
@@ -340,15 +356,23 @@ class LiveModelManager:
         self._on_change = on_change
         self.backend = None
         self.requested = None
+        self.language = None    # None -> auto-detect; a code ("zh"/"en"/…) forces it
         self.set_model(model)
 
     def set_model(self, model):
         chain = [model] + [m for m in self._fallback if m != model]
         self.backend = AdaptiveBackend(
-            [self._make(m) for m in chain], chain,
+            [self._make(m, self.language) for m in chain], chain,
             rtf_budget=self._rtf_budget, on_change=self._on_change)
         self.requested = model
         return model
+
+    def set_language(self, language):
+        # Rebuild the chain so the new language is baked in (models stay cached).
+        if (language or None) != self.language:
+            self.language = language or None
+            self.set_model(self.requested)
+        return self.language
 
     @property
     def current(self):

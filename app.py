@@ -319,6 +319,15 @@ _LIVE_BODY = """
         <option value="energy">能量(預設·快)</option>
         <option value="silero">silero(神經·較準)</option>
       </select></label>
+    <label class=fld>語言
+      <select id=lang>
+        <option value="">自動偵測</option>
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+        <option value="ja">日本語</option>
+        <option value="ko">한국어</option>
+        <option value="yue">粵語</option>
+      </select></label>
     <label class=fld>即時模型
       <select id=model>
         <option value="qwen3-asr-0.6b-q4-k-m">Qwen3-ASR 0.6B(.cpp·Metal·預設)</option>
@@ -448,7 +457,9 @@ startBtn.onclick = async () => {
     ? '&silence_ms=1000&max_utt_s=30' : '';
   const sess = session ? '&session='+session : '';
   const vad = document.getElementById('vad').value==='silero' ? '&vad=silero' : '';
-  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}`);
+  const lv = document.getElementById('lang').value;
+  const lang = lv ? '&lang='+lv : '';
+  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}${lang}`);
   ws.binaryType='arraybuffer';
   function colored(speaker){ return COLORS[speaker]||'#444'; }
   ws.onmessage = e => {
@@ -541,7 +552,8 @@ class MergeIn(BaseModel):
 
 
 class TranscribeIn(BaseModel):
-    model: Optional[str] = None   # None -> default accurate backend
+    model: Optional[str] = None      # None -> default accurate backend
+    language: Optional[str] = None   # None -> auto-detect; "zh"/"en"/"ja"… forces it
 
 
 class DiarizeIn(BaseModel):
@@ -961,6 +973,11 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B(transformers·慢)</option>"
         "<option value='Qwen/Qwen3-ASR-1.7B'>Qwen3-ASR 1.7B(transformers·很慢)</option>"
         "</select>"
+        "<select id=relang>"
+        "<option value=''>語言:自動</option><option value='zh'>中文</option>"
+        "<option value='en'>English</option><option value='ja'>日本語</option>"
+        "<option value='ko'>한국어</option><option value='yue'>粵語</option>"
+        "</select>"
         "<button class=btn id=retr>重新語音辨識</button>"
         "<span class='muted small' id=remsg></span></div>"
         "<table class=tx><tr><th>時間</th><th>說話者</th><th>內容</th></tr>"
@@ -997,9 +1014,10 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=()):
         "else if(p.state==='error'){retr.disabled=false;rm.textContent=' 失敗: '+p.msg;}"
         "else retr.disabled=false;});}"
         "retr.onclick=()=>{const mdl=document.getElementById('remodel').value;"
+        "const lng=document.getElementById('relang').value;"
         "rm.textContent=' 啟動中…';retr.disabled=true;sawRunning=true;"
         f"fetch('/meetings/{mid}/transcribe/start',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({model:mdl})})"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({model:mdl,language:lng})})"
         ".then(()=>poll());};"
         "poll();"  # resume on load if a job is already running
         "document.getElementById('dia').onclick=async()=>{"
@@ -1286,6 +1304,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         q = ws.query_params
         sil = max(200, min(3000, int(q.get("silence_ms") or live_silence_ms)))
         maxu = max(5.0, min(40.0, float(q.get("max_utt_s") or live_max_utt_s)))
+        live_manager.set_language(q.get("lang") or None)  # ""/absent -> auto-detect
 
         def _mk_speech_fn():  # silero VAD per track (own RNN state); None -> energy
             if q.get("vad") != "silero":
@@ -1500,7 +1519,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             raise HTTPException(404, "meeting not found")
         if body.model:
             import backends
-            backend = backends.make_batch_backend(body.model)
+            backend = backends.make_batch_backend(body.model, body.language)
         elif asr_backend is not None:
             backend = asr_backend
         else:
@@ -1533,7 +1552,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             return {"state": "running"}  # already in progress
         if body.model:
             import backends
-            backend = backends.make_batch_backend(body.model)
+            backend = backends.make_batch_backend(body.model, body.language)
         elif asr_backend is not None:
             backend = asr_backend
         else:

@@ -17,8 +17,9 @@ _ALIGN = "qwen3-forced-aligner-0.6b-q4-k-m"
 
 def main():
     audio = sys.argv[1]
+    lang = sys.argv[2] if len(sys.argv) > 2 else ""   # "" -> auto-detect
     model = Qwen3ASRModel(asr_model=_ASR, align_model=_ALIGN, n_threads=4)
-    res, al = model.transcribe_and_align(audio)
+    res, al = model.transcribe_and_align(audio, language=lang or "")
     words = [{"start": float(w.start), "end": float(w.end), "word": w.word}
              for w in (al.words if al and al.success else [])]
     # Emit one clean JSON line (model load logs go to stderr); prefix-tagged so the
