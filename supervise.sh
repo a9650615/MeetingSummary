@@ -51,12 +51,15 @@ trap cleanup INT TERM
 
 start
 # Meeting watcher: notifies you to record when the mic goes in use (a real call).
-"$PY" meeting_watch.py >>"$LOG" 2>&1 &
-WATCH=$!
-echo "[supervise] meeting watcher pid $WATCH"
+start_watch() { "$PY" meeting_watch.py >>"$LOG" 2>&1 & WATCH=$!;
+  echo "[supervise] meeting watcher pid $WATCH"; }
+start_watch
 fails=0
 while true; do
   sleep "$POLL"
+  # keep the watcher alive too — it had no respawn, so a single crash killed
+  # meeting detection for the whole session.
+  kill -0 "$WATCH" 2>/dev/null || { echo "[supervise] watcher died — restarting"; start_watch; }
   if ! kill -0 "$SRV" 2>/dev/null; then
     echo "[supervise] server exited — restarting"; start; fails=0; continue
   fi

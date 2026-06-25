@@ -179,6 +179,29 @@ _SW_JS = ("self.addEventListener('install',e=>self.skipWaiting());"
           "self.addEventListener('fetch',e=>{});")
 
 
+# Meeting detection, surfaced IN the web UI (reliable) instead of via osascript
+# (which is silently suppressed by macOS notification permission/Focus). Every page
+# polls /detect; on a meeting (mic in use / meeting app) while not recording, shows a
+# top banner + a Web Notification (PWA, permission-based — actually visible).
+_DETECT_JS = (
+    "if(window.Notification&&Notification.permission==='default')"
+    "{try{Notification.requestPermission();}catch(e){}}"
+    "let _detSeen=false;"
+    "async function _detTick(){try{const d=await(await fetch('/detect')).json();"
+    "const bar=document.getElementById('_detbar');if(!bar)return;"
+    "const show=d.meeting&&!d.recording&&sessionStorage.getItem('_detX')!=='1';"
+    "bar.style.display=show?'flex':'none';"
+    "if(show)document.getElementById('_detapp').textContent=d.app||'麥克風使用中';"
+    "if(!d.meeting){sessionStorage.removeItem('_detX');_detSeen=false;}"
+    "if(show&&!_detSeen){_detSeen=true;"
+    "if(window.Notification&&Notification.permission==='granted')"
+    "{try{new Notification('📝 偵測到會議',{body:(d.app||'麥克風使用中')+' — 點開始錄音'});}catch(e){}}}"
+    "}catch(e){}}"
+    "function _detDismiss(){sessionStorage.setItem('_detX','1');"
+    "document.getElementById('_detbar').style.display='none';}"
+    "setInterval(_detTick,10000);_detTick();")
+
+
 def _shell(title, body, script="", back=False):
     nav = '<a href="/">&larr; 回首頁</a>' if back else ''
     return (
@@ -192,7 +215,16 @@ def _shell(title, body, script="", back=False):
         f"<script>{_THEME_JS}</script>"
         "<script>if('serviceWorker' in navigator)"
         "addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));</script>"
-        "</head><body><div class=wrap>"
+        "</head><body>"
+        "<div id=_detbar style=\"display:none;position:fixed;inset:0 0 auto 0;z-index:200;"
+        "align-items:center;gap:12px;justify-content:center;padding:10px 16px;"
+        "background:linear-gradient(180deg,var(--accent2),var(--accent));color:#fff;"
+        "font-weight:650;box-shadow:0 6px 20px -8px rgba(0,0,0,.5)\">"
+        "<span>📝 偵測到會議（<span id=_detapp></span>）</span>"
+        "<a href='/live' style='color:#fff;text-decoration:underline'>開始錄音 →</a>"
+        "<button onclick=_detDismiss() style='background:rgba(255,255,255,.2);border:0;"
+        "color:#fff;border-radius:8px;padding:.2em .6em;cursor:pointer'>✕</button></div>"
+        "<div class=wrap>"
         "<header class=top><span class=brand>📝 Meeting<span class=dot>·</span>Summary</span>"
         "<span class=spacer></span>"
         "<button class=btn id=themebtn onclick=_toggleTheme() title='切換深淺色' "
@@ -201,6 +233,7 @@ def _shell(title, body, script="", back=False):
         "style='padding:.4em .6em'>⏻</button>"
         f"{nav}</header>{body}</div>"
         + (f"<script>{script}</script>" if script else "")
+        + f"<script>{_DETECT_JS}</script>"
         + "</body></html>"
     )
 
@@ -1345,6 +1378,25 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def health():
         # recording flag lets the meeting-watcher suppress notifications while live.
         return {"status": "ok", "recording": idle["live"] > 0}
+
+    @app.get("/detect")
+    def detect():
+        # Meeting = mic in use (CoreAudio via micbusy) or a known meeting app running.
+        # Polled by every page (_DETECT_JS) -> banner + Web Notification.
+        import meeting_watch as mw
+        app_name = None
+        try:
+            app_name = mw.meeting_app_running()
+        except Exception:
+            pass
+        mic = False
+        try:
+            mic = mw.mic_in_use()
+        except Exception:
+            pass
+        label = app_name or ("麥克風使用中" if mic else None)
+        return {"meeting": bool(mic or app_name), "app": label,
+                "recording": idle["live"] > 0}
 
     @app.post("/shutdown")
     def shutdown():
