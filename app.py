@@ -213,9 +213,10 @@ _SW_JS = ("self.addEventListener('install',e=>self.skipWaiting());"
 _DETECT_JS = (
     "if(window.Notification&&Notification.permission==='default')"
     "{try{Notification.requestPermission();}catch(e){}}"
-    "let _detSeen=false;"
+    "let _detSeen=false,_detRec=false;"
     "async function _detTick(){try{const d=await(await fetch('/detect')).json();"
-    "const bar=document.getElementById('_detbar');if(!bar)return;"
+    "_detRec=!!d.recording;"
+    "const bar=document.getElementById('_detbar');if(bar){"
     "const show=d.meeting&&!d.recording&&sessionStorage.getItem('_detX')!=='1';"
     "bar.style.display=show?'flex':'none';"
     "if(show)document.getElementById('_detapp').textContent=d.app||'麥克風使用中';"
@@ -223,10 +224,11 @@ _DETECT_JS = (
     "if(show&&!_detSeen){_detSeen=true;"
     "if(window.Notification&&Notification.permission==='granted')"
     "{try{new Notification('📝 偵測到會議',{body:(d.app||'麥克風使用中')+' — 點開始錄音'});}catch(e){}}}"
-    "}catch(e){}}"
+    "}}catch(e){}"
+    "setTimeout(_detTick,_detRec?30000:10000);}"
     "function _detDismiss(){sessionStorage.setItem('_detX','1');"
     "document.getElementById('_detbar').style.display='none';}"
-    "setInterval(_detTick,10000);_detTick();")
+    "_detTick();")
 
 
 def _md_html(text):
