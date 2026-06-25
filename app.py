@@ -527,8 +527,8 @@ _LIVE_BODY = """
       </select></label>
     <label class=fld>斷句 VAD
       <select id=vad>
-        <option value="energy">能量(預設·快)</option>
-        <option value="silero">silero(神經·較準)</option>
+        <option value="silero">silero(神經·較準·預設)</option>
+        <option value="energy">能量(快·省)</option>
       </select></label>
     <label class=fld>語言
       <select id=lang>
@@ -667,7 +667,7 @@ startBtn.onclick = async () => {
   const unit = document.getElementById('unit').value==='paragraph'
     ? '&silence_ms=1000&max_utt_s=30' : '';
   const sess = session ? '&session='+session : '';
-  const vad = document.getElementById('vad').value==='silero' ? '&vad=silero' : '';
+  const vad = '&vad='+document.getElementById('vad').value;
   const lv = document.getElementById('lang').value;
   const lang = lv ? '&lang='+lv : '';
   ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}${lang}`);
@@ -1726,7 +1726,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         live_manager.set_language(q.get("lang") or None)  # ""/absent -> auto-detect
 
         def _mk_speech_fn():  # silero VAD per track (own RNN state); None -> energy
-            if q.get("vad") != "silero":
+            # silero is the DEFAULT now — neural VAD endpoints far better than energy
+            # RMS (energy reads soft trailing syllables as silence -> cuts words). Only
+            # ?vad=energy opts out; missing/broken model falls back to energy.
+            if q.get("vad") == "energy":
                 return None
             try:
                 from live import SileroVad
