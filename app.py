@@ -109,6 +109,25 @@ ul.meetings li{display:flex;align-items:center;gap:11px;padding:13px 6px;border-
  border-bottom:1px solid var(--line)}
 ul.meetings li:last-child{border:0}ul.meetings li:hover{background:var(--surface2)}
 ul.meetings a{font-weight:650;flex:1}
+/* richer history rows */
+.mdate{font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;
+ margin:16px 4px 4px;padding-top:8px;border-top:1px solid var(--line)}
+.mdate:first-child{border-top:0;margin-top:4px}
+li.mrow{padding:11px 8px}
+.mico{font-size:15px;flex:none;width:1.4em;text-align:center}
+.mmain{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.mmain .mtitle{font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mmeta{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.mmeta .dotsep{opacity:.5}
+.mact{flex:none;display:flex;gap:4px;opacity:0;transition:.12s}
+li.mrow:hover .mact,li.mrow:focus-within .mact{opacity:1}
+.mact .btn{padding:.28em .5em;font-size:13px}
+.msel{flex:none;width:16px;height:16px;accent-color:var(--accent);display:none}
+ul.meetings.picking .msel{display:inline-block}
+ul.meetings.picking .mact{display:none}
+.selbar{display:none;align-items:center;gap:10px;margin:0 0 8px;padding:8px 10px;
+ background:var(--accentsoft);border-radius:var(--radius-sm)}
+.selbar.on{display:flex}
 .caption{font-size:clamp(22px,4.2vw,34px);font-weight:800;line-height:1.34;background:var(--capbg);
  color:var(--capink);border-radius:var(--radius);padding:20px 24px;min-height:1.4em;margin:16px 0 8px;
  box-shadow:inset 0 0 0 1px rgba(255,255,255,.05)}
@@ -261,26 +280,57 @@ _INDEX = _shell("MeetingSummary", """
 <div class=card>
   <div class=row style="margin-bottom:8px">
     <input id=q type=search placeholder="搜尋標題 / 逐字稿 / 摘要…" style="flex:1;min-width:200px">
+    <button class=btn id=pickbtn>選取</button>
     <button class=btn id=mergebtn>整合相近的 live 會議</button>
     <span class="muted small" id=mergemsg></span>
+  </div>
+  <div id=selbar class=selbar>
+    <span id=selcount class="small">已選 0</span>
+    <span class=spacer></span>
+    <button class=btn id=selmerge>合併</button>
+    <button class="btn danger" id=seldel>刪除</button>
+    <button class=btn id=selcancel>取消</button>
   </div>
   <div id=tagbar class=row style="gap:6px;margin-bottom:8px"></div>
   <ul class=meetings id=meetings></ul>
 </div>
 """, script="""
-let ALL=[], TAGFILTER=null;
+let ALL=[], TAGFILTER=null, PICK=false; const SEL=new Set();
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function chips(tags){return (tags||[]).map(t=>`<span class=tg>#${esc(t)}</span>`).join('');}
-function liFull(m){return `<li><span title="${m.has_audio?'有音檔':'無音檔'}">${m.has_audio?'🔊':'🔇'}</span>
-  <a href="/m/${m.id}">${esc(m.title)}</a>
-  <span class="badge ${m.status==='finalized'?'done':'live'}">${m.status}</span>${chips(m.tags)}</li>`;}
-function render(list){const el=document.getElementById('meetings');
-  el.innerHTML = list.length ? list.map(liFull).join('') : '<li class="muted small">尚無會議</li>';}
-function renderHits(hits){const el=document.getElementById('meetings');
-  el.innerHTML = hits.length ? hits.map(h=>`<li style="display:block"><a href="/m/${h.id}">${esc(h.title)}</a>
-    <div class="muted small" style="margin:2px 0 0">${esc(h.snippet)}</div></li>`).join('')
+function fmtDur(s){s=Math.round(s||0);if(s<60)return s+'秒';const m=Math.round(s/60);return m<60?m+'分':(m/60).toFixed(1)+'時';}
+function dayKey(ts){const d=new Date(ts*1000),n=new Date();
+  const a=new Date(d.getFullYear(),d.getMonth(),d.getDate()),b=new Date(n.getFullYear(),n.getMonth(),n.getDate());
+  const diff=Math.round((b-a)/86400000);
+  if(diff<=0)return '今天';if(diff===1)return '昨天';if(diff<7)return diff+' 天前';
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function hhmm(ts){const d=new Date(ts*1000);return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
+function rowHtml(m){
+  const meta=[hhmm(m.created_at)];
+  if(m.duration_s>0)meta.push(fmtDur(m.duration_s));
+  meta.push(`<span class="badge ${m.status==='finalized'?'done':'live'}">${m.status}</span>`);
+  return `<li class=mrow data-id="${m.id}">
+    <input type=checkbox class=msel data-id="${m.id}"${SEL.has(m.id)?' checked':''}>
+    <span class=mico title="${m.has_audio?'有音檔':'無音檔'}">${m.has_audio?'🔊':'🔇'}</span>
+    <div class=mmain><a class=mtitle href="/m/${m.id}">${esc(m.title)}</a>
+      <div class=mmeta>${meta.join('<span class=dotsep>·</span>')}${chips(m.tags)}</div></div>
+    <div class=mact><button class="btn mdel" data-id="${m.id}" title=刪除>🗑</button></div></li>`;}
+function render(list){const el=document.getElementById('meetings');el.classList.toggle('picking',PICK);
+  if(!list.length){el.innerHTML='<li class="muted small">尚無會議</li>';return;}
+  let html='',last=null;
+  for(const m of list){const k=dayKey(m.created_at);if(k!==last){html+=`<div class=mdate>${k}</div>`;last=k;}html+=rowHtml(m);}
+  el.innerHTML=html;
+  el.querySelectorAll('.mdel').forEach(b=>b.onclick=async(e)=>{e.preventDefault();e.stopPropagation();
+    const id=+b.dataset.id;if(!confirm('刪除這場會議?逐字稿與音檔都會移除,無法復原。'))return;
+    await fetch('/meetings/'+id,{method:'DELETE'});ALL=ALL.filter(x=>x.id!==id);SEL.delete(id);applyView();renderTagbar();});
+  el.querySelectorAll('.msel').forEach(c=>{c.onclick=e=>{e.stopPropagation();
+    c.checked?SEL.add(+c.dataset.id):SEL.delete(+c.dataset.id);updateSel();};});}
+function renderHits(hits){const el=document.getElementById('meetings');el.classList.remove('picking');
+  el.innerHTML = hits.length ? hits.map(h=>`<li class=mrow style="display:block"><a class=mtitle href="/m/${h.id}">${esc(h.title)}</a>
+    <div class="mmeta" style="margin-top:2px">${esc(h.snippet)}</div></li>`).join('')
     : '<li class="muted small">查無結果</li>';}
-function applyView(){const f=TAGFILTER?ALL.filter(m=>(m.tags||[]).includes(TAGFILTER)):ALL;render(f);}
+function applyView(){render(TAGFILTER?ALL.filter(m=>(m.tags||[]).includes(TAGFILTER)):ALL);}
+function updateSel(){document.getElementById('selcount').textContent='已選 '+SEL.size;}
 function renderTagbar(){fetch('/tags').then(r=>r.json()).then(j=>{
   const bar=document.getElementById('tagbar');
   bar.innerHTML=j.tags.map(t=>`<span class="tg tgbtn${t.name===TAGFILTER?' on':''}" data-t="${esc(t.name)}">#${esc(t.name)} ${t.count}</span>`).join('');
@@ -292,6 +342,17 @@ qel.oninput=()=>{clearTimeout(tmr);const q=qel.value.trim();
   if(!q){applyView();return;}
   tmr=setTimeout(async()=>{const j=await(await fetch('/search?q='+encodeURIComponent(q))).json();
     renderHits(j.results);},250);};
+function setPick(on){PICK=on;SEL.clear();updateSel();
+  document.getElementById('selbar').classList.toggle('on',on);
+  document.getElementById('pickbtn').textContent=on?'結束選取':'選取';applyView();}
+document.getElementById('pickbtn').onclick=()=>setPick(!PICK);
+document.getElementById('selcancel').onclick=()=>setPick(false);
+document.getElementById('seldel').onclick=async()=>{if(!SEL.size||!confirm('刪除選取的 '+SEL.size+' 場?無法復原。'))return;
+  for(const id of [...SEL])await fetch('/meetings/'+id,{method:'DELETE'});
+  ALL=ALL.filter(x=>!SEL.has(x.id));setPick(false);renderTagbar();};
+document.getElementById('selmerge').onclick=async()=>{if(SEL.size<2){alert('合併需選 2 場以上');return;}
+  await fetch('/meetings/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:[...SEL]})});
+  setTimeout(()=>location.reload(),400);};
 document.getElementById('mergebtn').onclick = async () => {
   const mm=document.getElementById('mergemsg'); mm.textContent='整合中…';
   const r=await fetch('/meetings/merge-nearby?gap_min=10',{method:'POST'});
@@ -1823,8 +1884,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
         out = []
         for m in store.list_meetings():
             d = dict(m)
+            segs = store.list_segments(m["id"])
             d["has_audio"] = bool(_meeting_tracks(store, m["id"]))
             d["tags"] = store.tags_for(m["id"])
+            d["duration_s"] = round(sum((s["duration_s"] or 0) for s in segs))
+            d["n_segments"] = len(segs)
             out.append(d)
         return out
 
