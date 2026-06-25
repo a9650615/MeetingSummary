@@ -1243,6 +1243,60 @@ def _run_transcribe_job(store, mid, backend, jobs):
         jobs[mid] = {"state": "error", "msg": str(e)}
 
 
+def _run_diarize_job(store, mid, body, jobs):
+    """Background speaker diarization with progress (jobs[mid], polled by the
+    meeting page). sherpa's process() reports chunk progress via a callback;
+    surface it as done/total. Multi-track meetings run one track at a time."""
+    import diarize as diar  # noqa: PLC0415
+    jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": "準備中…"}
+    try:
+        playable = _meeting_tracks(store, mid)
+        tracks = playable if body.track == "all" else [body.track]
+        tracks = [t for t in tracks if t in playable]
+        if not tracks:
+            jobs[mid] = {"state": "error", "msg": "no saved audio for this meeting"}
+            return
+        total_spk = 0
+        for ti, track in enumerate(tracks):
+            pcm_bytes = _assemble_track(store, mid, track)
+            if pcm_bytes is None:
+                continue
+            os.makedirs(f"data/{mid}", exist_ok=True)
+            tmp = f"data/{mid}/_diar_{track}.pcm"
+            with open(tmp, "wb") as f:
+                f.write(pcm_bytes)
+            label = _TRACK_LABEL.get(track, track)
+            pre = f"[{ti + 1}/{len(tracks)}] " if len(tracks) > 1 else ""
+
+            def on_prog(done, total, _p=pre, _l=label):
+                jobs[mid].update(done=done, total=total, text=f"{_p}{_l} 分群中…")
+
+            names = None
+            try:
+                segments = diar.diarize_pcm(tmp, num_speakers=body.num_speakers,
+                                            seg_model=body.seg_model,
+                                            emb_model=body.emb_model,
+                                            on_progress=on_prog)
+                if body.enroll:  # cross-meeting voiceprints (best-effort)
+                    try:
+                        jobs[mid].update(text=f"{pre}{label} 建立聲紋…")
+                        embs = diar.cluster_embeddings(tmp, segments)
+                        names = _persistent_names(store, embs, label)
+                    except Exception as e:
+                        print(f"speaker enroll skipped: {e}", file=sys.stderr)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            rows = [dict(r) for r in store.list_transcripts(mid) if r["track"] == track]
+            for r in diar.assign_speakers(rows, segments, prefix=label,
+                                          names=names, mark_overlap=body.mark_overlap):
+                store.update_speaker(r["id"], r["speaker"])
+            total_spk += len({s["speaker"] for s in segments})
+        jobs[mid] = {"state": "done", "speakers": total_spk, "tracks": tracks}
+    except Exception as e:
+        jobs[mid] = {"state": "error", "msg": str(e)}
+
+
 def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
                     summary_model, kind, title, jobs):
     """Background upload pipeline (mirrors run_pipeline, off the request thread):
@@ -1426,13 +1480,27 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({model:mdl,language:lng})})"
         ".then(()=>poll());};"
         "poll();"  # resume on load if a job is already running
-        "document.getElementById('dia').onclick=async()=>{"
-        "const fm=document.getElementById('finmsg');fm.textContent=' 分群中…(會後聲紋,需稍候)';"
-        "const ov=localStorage.getItem('exp_overlap')==='1';"
-        f"const r=await fetch('/meetings/{mid}/diarize',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all',mark_overlap:ov})});"
-        "if(r.ok){const j=await r.json();fm.textContent=' 分出 '+j.speakers+' 位說話者';"
-        "location.reload();}else{fm.textContent=' 分群失敗: '+(await r.text());}};"
+        # Diarize = async background job with progress (sherpa reports chunk %),
+        # polled like re-transcribe: resumes on refresh, reloads once on done.
+        "const fm2=document.getElementById('finmsg'),diab=document.getElementById('dia');"
+        "let dp=null,dseen=false;"
+        "function dpoll(){"
+        f"fetch('/meetings/{mid}/diarize/progress').then(r=>r.json()).then(p=>{{"
+        "if(p.state==='running'){dseen=true;diab.disabled=true;"
+        "const pct=p.total?Math.round(p.done/p.total*100)+'%':'';"
+        "fm2.textContent=' '+(p.text||'分群中…')+' '+pct;"
+        "if(!dp)dp=setInterval(dpoll,1000);return;}"
+        "if(dp){clearInterval(dp);dp=null;}"
+        "if(p.state==='done'){fm2.textContent=' 分出 '+(p.speakers||0)+' 位說話者';"
+        "if(dseen){dseen=false;setTimeout(()=>location.reload(),500);}}"
+        "else if(p.state==='error'){diab.disabled=false;fm2.textContent=' 分群失敗: '+p.msg;}"
+        "else diab.disabled=false;});}"
+        "diab.onclick=()=>{const ov=localStorage.getItem('exp_overlap')==='1';"
+        "diab.disabled=true;dseen=true;fm2.textContent=' 啟動分群…';"
+        f"fetch('/meetings/{mid}/diarize',{{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all',mark_overlap:ov})})"
+        ".then(()=>dpoll());};"
+        "dpoll();"
         # Player for a row: its own track, else the single (unified mixed) player.
         "const onlyAudio=document.querySelector('audio[id^=aud-]');"
         "function rowAudio(trk){return document.getElementById('aud-'+trk)||onlyAudio;}"
@@ -1500,6 +1568,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                live_max_lag_s=4.0, live_interim_duty=0.75):
     app = FastAPI()
     transcribe_jobs = {}  # mid -> progress dict; survives page refresh (in-memory)
+    diarize_jobs = {}     # mid -> diarization progress dict (same shape)
 
     # Idle auto-release: free loaded models after N seconds with no activity and no
     # live connection. Loaded weights lazy-reload on next use.
@@ -2192,48 +2261,23 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.post("/meetings/{mid}/diarize")
     def diarize_meeting(mid: int, body: DiarizeIn):
+        # Async: diarization is minutes of sherpa clustering. Kick it to a
+        # background thread (progress -> diarize_jobs, polled by the page) and
+        # return at once so the POST doesn't hold the connection / look hung.
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
-        import diarize as diar
+        if diarize_jobs.get(mid, {}).get("state") == "running":
+            return {"started": True}
+        import threading
+        diarize_jobs[mid] = {"state": "running", "done": 0, "total": 0,
+                             "text": "準備中…"}
+        threading.Thread(target=_run_diarize_job,
+                         args=(store, mid, body, diarize_jobs), daemon=True).start()
+        return {"started": True}
 
-        tracks = _meeting_tracks(store, mid) if body.track == "all" else [body.track]
-        tracks = [t for t in tracks if t in _meeting_tracks(store, mid)]
-        if not tracks:
-            raise HTTPException(404, "no saved audio for this meeting")
-        total = 0
-        for track in tracks:
-            pcm_bytes = _assemble_track(store, mid, track)  # offset-aligned, all segments
-            if pcm_bytes is None:
-                continue
-            tmp = f"data/{mid}/_diar_{track}.pcm"
-            os.makedirs(f"data/{mid}", exist_ok=True)
-            with open(tmp, "wb") as f:
-                f.write(pcm_bytes)
-            names = None
-            try:
-                segments = diar.diarize_pcm(tmp, num_speakers=body.num_speakers,
-                                            seg_model=body.seg_model,
-                                            emb_model=body.emb_model)
-                if body.enroll:  # persistent cross-meeting voiceprints (best-effort)
-                    try:
-                        embs = diar.cluster_embeddings(tmp, segments)
-                        names = _persistent_names(
-                            store, embs, _TRACK_LABEL.get(track, track))
-                    except Exception as e:
-                        print(f"speaker enroll skipped: {e}", file=sys.stderr)
-            except Exception as e:
-                raise HTTPException(503, f"diarization unavailable: {e}")
-            finally:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            rows = [dict(r) for r in store.list_transcripts(mid) if r["track"] == track]
-            # prefix per track so 我-side and 對方-side speakers don't collide
-            for r in diar.assign_speakers(rows, segments,
-                                          prefix=_TRACK_LABEL.get(track, track),
-                                          names=names, mark_overlap=body.mark_overlap):
-                store.update_speaker(r["id"], r["speaker"])
-            total += len({s["speaker"] for s in segments})
-        return {"tracks": tracks, "speakers": total}
+    @app.get("/meetings/{mid}/diarize/progress")
+    def diarize_progress(mid: int):
+        return diarize_jobs.get(mid, {"state": "idle"})
 
     return app
 

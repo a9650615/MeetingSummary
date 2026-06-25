@@ -71,6 +71,40 @@ def test_upload_pcm_anchored_at_created_at_not_now(tmp_path, monkeypatch):
     assert seg["started_at"] == created   # offset 0 -> no silence prefix
 
 
+def test_run_diarize_job_reports_progress_then_done(tmp_path, monkeypatch):
+    # Diarization runs as a bg job; sherpa's chunk callback -> jobs[mid] progress.
+    import app
+    import diarize as diar
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "m.db")
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    store.add_transcript(mid, "accurate", "mixed", 0, 1000, "對方", "你好")
+    monkeypatch.setattr(app, "_meeting_tracks", lambda s, m: ["mixed"])
+    monkeypatch.setattr(app, "_assemble_track", lambda s, m, t: b"\x00\x00")
+    progress = []
+
+    def fake_diar(tmp, num_speakers=-1, seg_model=None, emb_model=None, on_progress=None):
+        on_progress(1, 2)
+        on_progress(2, 2)  # callback drives the progress dict
+        return [{"start": 0.0, "end": 1.0, "speaker": 0}]
+    monkeypatch.setattr(diar, "diarize_pcm", fake_diar)
+    body = app.DiarizeIn(track="all", enroll=False)  # skip cross-meeting voiceprints
+    jobs = {}
+    app._run_diarize_job(store, mid, body, jobs)
+    assert jobs[mid]["state"] == "done" and jobs[mid]["speakers"] == 1
+    assert store.list_transcripts(mid)[0]["speaker"] != "對方"   # got a diarized label
+
+
+def test_run_diarize_job_errors_without_audio(tmp_path, monkeypatch):
+    import app
+    store = Store(tmp_path / "m.db")
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    monkeypatch.setattr(app, "_meeting_tracks", lambda s, m: [])  # no playable audio
+    jobs = {}
+    app._run_diarize_job(store, mid, app.DiarizeIn(), jobs)
+    assert jobs[mid]["state"] == "error"
+
+
 def test_merge_nearby_route(tmp_path):
     c, store = make_client(tmp_path)
     store.create_meeting("A", 1000.0, "zh-TW")

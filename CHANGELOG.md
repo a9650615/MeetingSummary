@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.1.32
+- **多人分群顯示進度**：分群改為非同步背景工作，沿用 re-transcribe 的進度輪詢機制。sherpa `OfflineSpeakerDiarization.process` 本來就支援 chunk 進度 callback，現在把它接到 `diarize_pcm(on_progress=…)` → 會議頁即時顯示「分群中 N%」（多軌會標 `[1/2]`），重整可續、完成自動刷新。POST 立即返回（不再卡著連線到分群結束）。
+
 ## 0.1.31
 - **修正 femelo 安裝出現 `cannot import name '_py_qwen3_asr_cpp'`**：`py-qwen3-asr-cpp` 在 PyPI 沒有對應 (python, arm64) 的 wheel，一律是原始碼編譯（scikit-build/cmake，需 cmake + C/C++ 工具鏈）。缺工具鏈時會裝進 python 檔案卻沒編出原生模組 `.so`，且一旦半套安裝卡住，之後 `pip install` 會視為「已滿足」而不再重編，無法自癒。修正：femelo 路徑現在(1) 驗證**真正的** model import；(2) 失敗時自動 `brew install cmake`、檢查 Xcode CLT；(3) **先卸載再 `--force-reinstall --no-cache-dir` 乾淨重編**；(4) 仍失敗則給明確指引（裝 `xcode-select --install` + cmake）。先前只有 chatllm 會自動裝 cmake，femelo 沒有。
 

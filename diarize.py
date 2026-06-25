@@ -209,10 +209,11 @@ def match_speaker(emb, known, threshold=0.62):
 
 
 def diarize_pcm(pcm_path, *, sample_rate=16000, num_speakers=-1,
-                seg_model=None, emb_model=None, progress=None):
+                seg_model=None, emb_model=None, progress=None, on_progress=None):
     """Cluster speakers in a 16-bit mono PCM file -> [{start,end,speaker}].
     num_speakers=-1 auto-detects the count. Models auto-provision into models/
-    on first use (see _resolve_models); override via SHERPA_SEG/EMB_MODEL."""
+    on first use (see _resolve_models); override via SHERPA_SEG/EMB_MODEL.
+    on_progress(done, total): optional, called as sherpa processes chunks."""
     import numpy as np  # noqa: PLC0415
     import sherpa_onnx  # noqa: PLC0415
 
@@ -227,5 +228,14 @@ def diarize_pcm(pcm_path, *, sample_rate=16000, num_speakers=-1,
     sd = sherpa_onnx.OfflineSpeakerDiarization(config)
     audio = np.frombuffer(open(pcm_path, "rb").read(), dtype=np.int16)
     samples = audio.astype(np.float32) / 32768.0
-    result = sd.process(samples).sort_by_start_time()
+    cb = None
+    if on_progress:
+        def cb(done, total):  # sherpa: (processed_chunks, num_chunks)->int, !=0 aborts
+            try:
+                on_progress(int(done), int(total))
+            except Exception:
+                pass
+            return 0
+    raw = sd.process(samples, cb) if cb else sd.process(samples)
+    result = raw.sort_by_start_time()
     return [{"start": s.start, "end": s.end, "speaker": s.speaker} for s in result]
