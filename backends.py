@@ -49,40 +49,57 @@ def _honor_language(model, language):
 
 
 _QWEN3_MLX = {}  # repo -> loaded mlx-audio model (heavy; load once)
+_QWEN3_MLX_EXEC = None  # single dedicated thread for ALL mlx-audio work
+
+
+def _qwen3_mlx_exec():
+    # MLX streams are thread-local; mlx-audio's Qwen3-ASR creates a non-default GPU
+    # stream, so loading on one thread and running on another (live threadpool vs the
+    # re-transcribe job thread) -> "no Stream(gpu, 1) in current thread" / crashes.
+    # Pin load + every inference to ONE dedicated thread so the stream is consistent.
+    global _QWEN3_MLX_EXEC
+    if _QWEN3_MLX_EXEC is None:
+        import concurrent.futures
+        _QWEN3_MLX_EXEC = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="qwen3mlx")
+    return _QWEN3_MLX_EXEC
 
 
 def qwen3_mlx_backend(model="mlx-community/Qwen3-ASR-1.7B-8bit", language=None):
     """MLX-native Qwen3-ASR via mlx-audio (Metal, in-process). ~4x faster than the
-    chatllm GGUF path (measured RTF 0.15 vs 0.61 on M3). callable(audio_path) ->
-    [{start,end,text}] (one segment; iter_transcribe windows for timestamps)."""
-    from mlx_audio.stt.generate import generate_transcription  # noqa: PLC0415
-    from mlx_audio.stt.utils import load  # noqa: PLC0415
-    m = _QWEN3_MLX.get(model)
-    if m is None:
-        m = load(model)
-        _QWEN3_MLX[model] = m
+    chatllm GGUF path (RTF ~0.13 vs 0.61 on M3). callable(audio) -> [{start,end,text}]
+    (one segment; iter_transcribe windows for timestamps). All MLX work runs on a
+    single dedicated thread (thread-local stream safety)."""
 
     def _txt(r):
         t = getattr(r, "text", None) or (r.get("text") if isinstance(r, dict) else str(r))
         return (t or "").strip()
 
-    def _run(audio):
-        # Accept what both paths actually pass: live -> raw int16 PCM bytes; batch
-        # (iter_transcribe) -> a raw 16k mono .pcm path; uploads -> a real audio file.
-        # mlx-audio loads files itself but not headerless PCM, so feed those as an
-        # mx.array (16k float32, what Qwen3-ASR's feature extractor expects).
+    def _infer(audio):  # runs ON the dedicated thread
         import numpy as np  # noqa: PLC0415
+        from mlx_audio.stt.generate import generate_transcription  # noqa: PLC0415
+        from mlx_audio.stt.utils import load  # noqa: PLC0415
+        m = _QWEN3_MLX.get(model)
+        if m is None:
+            m = load(model)
+            _QWEN3_MLX[model] = m
+        # live -> raw int16 PCM bytes; batch -> raw 16k mono .pcm path; upload -> file.
+        # mlx-audio can't load headerless PCM, so feed those as an mx.array (16k f32).
         if isinstance(audio, (bytes, bytearray)):
             pcm = np.frombuffer(bytes(audio), dtype=np.int16)
         elif isinstance(audio, str) and audio.endswith(".pcm"):
             pcm = np.frombuffer(open(audio, "rb").read(), dtype=np.int16)
         else:
-            return [{"start": 0.0, "end": 0.0,
-                     "text": _txt(generate_transcription(model=m, audio=str(audio), verbose=False))}]
+            return _txt(generate_transcription(model=m, audio=str(audio), verbose=False))
         import mlx.core as mx  # noqa: PLC0415
         arr = mx.array(pcm.astype(np.float32) / 32768.0)
-        return [{"start": 0.0, "end": 0.0,
-                 "text": _txt(generate_transcription(model=m, audio=arr, verbose=False))}]
+        out = _txt(generate_transcription(model=m, audio=arr, verbose=False))
+        mx.clear_cache()  # return the transient buffers — caps peak over a long session
+        return out
+
+    def _run(audio):
+        text = _qwen3_mlx_exec().submit(_infer, audio).result()
+        return [{"start": 0.0, "end": 0.0, "text": text}]
 
     return _run
 

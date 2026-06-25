@@ -2,6 +2,10 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.1.24
+- **修正 Qwen3-ASR 1.7B（mlx）在 live / 重新辨識崩潰**：MLX 的 GPU stream 是 thread-local，模型在某 thread 載入、卻在另一 thread（live threadpool / 重新辨識背景 thread）執行 → `no Stream(gpu, 1) in current thread` 崩潰。改成所有 mlx-audio 工作（載入＋每次推論）固定在**單一專屬 thread**，並於每次推論後 `clear_cache` 降峰值記憶體。重新辨識實測 30/30 通過。
+- 註：1.7B 權重常駐約 2.5GB；記憶體吃緊的 Mac 同時跑 live（interim whisper + 1.7B + 摘要）仍可能 OOM。**1.7B 建議用於批次精校；live 用較輕模型（turbo-q4 / 0.6b / whisper-small）。**
+
 ## 0.1.23
 - **Qwen3-ASR 1.7B Metal 加速（mlx-audio）**：改用 `mlx-audio` 載入 mlx-community 官方轉檔（8bit），in-process Metal，**RTF 0.13（比 chatllm GGUF 的 0.61 快約 4.6x）**，正確 zh、輸出轉繁體。live 與重新辨識可選、模型管理可下載。chatllm 1.7B 保留為備用。捨棄會跑社群個人自訂程式碼的 mlx-vlm 路線（改用維護中、社群信任的 mlx-audio + mlx-community 權重）。
 
