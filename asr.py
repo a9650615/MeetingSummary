@@ -17,9 +17,14 @@ def _collapse_repeats(text):
 
 
 def _degenerate(text):
-    """A whole-segment loop (e.g. 喬喬喬…×100) -> drop it entirely."""
+    """A whole-segment loop (喬喬喬…×100 / 我們每日每日…) -> drop it entirely. Few
+    distinct chars catches single-token loops; compression ratio catches multi-char
+    loops even behind a real prefix (natural zh ~0.9, loops >=2.3 — threshold 1.8)."""
+    import zlib
     s = text.replace(" ", "")
-    return len(s) >= 8 and len(set(s)) <= 3
+    if len(s) >= 8 and len(set(s)) <= 3:
+        return True
+    return len(s) >= 12 and len(s.encode()) / max(1, len(zlib.compress(s.encode(), 9))) >= 1.8
 
 
 def transcribe(audio_path, *, profile, track, backend):

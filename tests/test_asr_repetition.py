@@ -20,6 +20,22 @@ def test_transcribe_drops_loop_segment():
     assert len(out) == 1 and out[0]["text"] == "正常內容可以保留"
 
 
+def test_repetition_compression_catches_prefixed_loops():
+    from live import _is_repetition
+    assert _is_repetition("我們每日每日每日每日每日每日每日每日每日每日每日")  # loop behind a prefix
+    assert _is_repetition("喬" * 40)
+    assert _is_repetition("segment segment segment segment segment")
+    assert not _is_repetition("比較建議或是比較正規的做法這個可能就是要麥克風可以")  # natural zh
+    assert not _is_repetition("好其實那個Talker我先大概解釋一下因為有一種情境")     # natural zh+en
+
+
+def test_transcribe_drops_prefixed_loop():
+    segs = [{"start": 0, "end": 1, "text": "我們每日每日每日每日每日每日每日每日每日每日每日"},
+            {"start": 1, "end": 2, "text": "正常的討論內容繼續進行下去"}]
+    out = transcribe("x", profile="accurate", track="system", backend=lambda p: segs)
+    assert [o["text"] for o in out] == ["正常的討論內容繼續進行下去"]
+
+
 def test_summary_post_converts_to_traditional():
     from summarize import _post
     out = _post("讨论关于项目的补充内容", "zh-TW")

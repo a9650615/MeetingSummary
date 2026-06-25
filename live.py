@@ -31,14 +31,26 @@ def preprocess(audio):
     return audio
 
 
+def _compress_ratio(stripped):
+    import zlib  # noqa: PLC0415
+    b = stripped.encode()
+    return len(b) / max(1, len(zlib.compress(b, 9)))
+
+
 def _is_repetition(text):
-    """Whisper loops on silence/noise, repeating one token (e.g. 'segment
-    segment segment...'). Drop those degenerate outputs."""
+    """Drop degenerate ASR loops (whisper/qwen repeat a token on silence/noise:
+    'segment segment…', '每日每日每日…'). The robust universal signal is COMPRESSION
+    RATIO — a loop compresses far more than speech (measured: natural zh ~0.9, 每日×N
+    ~4.2, 喬×N ~8.6; threshold 1.8 has a wide margin and catches loops behind a real
+    prefix like 我們每日每日…). Cheap distinct-word/char checks handle the short cases
+    where compression overhead is unreliable."""
     parts = text.split()
     if len(parts) >= 4 and len(set(parts)) <= 2:
         return True
     stripped = text.replace(" ", "")
-    return len(stripped) >= 8 and len(set(stripped)) <= 3
+    if len(stripped) >= 8 and len(set(stripped)) <= 3:
+        return True
+    return len(stripped) >= 12 and _compress_ratio(stripped) >= 1.8
 
 
 # Whisper's stock hallucinations on breath/noise — drop when they ARE the whole
