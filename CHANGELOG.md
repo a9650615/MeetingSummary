@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.1.28
+- **修正 Qwen3-ASR (mlx) 把 `STTOutput(text='', segments=[...])` 整串存進逐字稿**：靜音段的 `STTOutput.text` 是合法的空字串，但舊的取值 `getattr(r,'text',None) or str(r)` 遇到空字串會 falsy → 退而 `str(r)` 變成整個物件的 repr。改成空字串照樣回空（下游正常丟棄）。對受影響的場次按「重新語音辨識」即可清掉。
+
 ## 0.1.27
 - **live interim 節奏依算力自動調整（鎖定 duty cycle ~75%）**：macOS 拿不到非 sudo 的 GPU 使用率，但 interim 重辨識的 RTF（compute / 即時）就是 GPU-bound MLX pipeline 的有效負載。每次 interim 計時後，把下次間隔設為 `compute / 目標duty`（夾在 0.4~3.0s）：快模型自動更頻繁（吃滿閒置算力）、慢模型（1.7B）自動拉長間隔不再積壓拖垮 live。沿用 `AdaptiveBackend` 的同套 RTF 訊號。目標 duty 預設 0.75，可用 `LIVE_INTERIM_DUTY` 調。
 

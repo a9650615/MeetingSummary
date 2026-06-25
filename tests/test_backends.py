@@ -11,6 +11,20 @@ def test_route_qwen3_vs_whisper():
     assert backends.route("mlx-community/whisper-small-mlx") == "whisper"
 
 
+def test_stt_text_empty_is_not_repr():
+    class STTOutput:
+        def __init__(self, text):
+            self.text = text
+        def __repr__(self):
+            return f"STTOutput(text={self.text!r}, segments=[...])"
+    assert backends._stt_text(STTOutput("你好")) == "你好"
+    assert backends._stt_text(STTOutput("")) == ""          # silence -> empty, NOT repr
+    assert backends._stt_text(STTOutput("  hi ")) == "hi"
+    assert backends._stt_text({"text": "嗨"}) == "嗨"
+    assert backends._stt_text({"text": ""}) == ""
+    assert "STTOutput(" not in backends._stt_text(STTOutput(""))
+
+
 def test_qwen3_words_to_segments():
     words = [{"start": 0.0, "end": 0.5, "word": "今天"},
              {"start": 0.5, "end": 1.0, "word": "會議"},

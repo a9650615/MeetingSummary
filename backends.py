@@ -65,15 +65,27 @@ def _qwen3_mlx_exec():
     return _QWEN3_MLX_EXEC
 
 
+def _stt_text(r):
+    """Pull transcript text out of an mlx-audio STTOutput / dict / str.
+    STTOutput.text is '' on silence — a VALID empty result. The old
+    `getattr(r,'text',None) or str(r)` fell back to repr(STTOutput) on '' and
+    stored the whole "STTOutput(text='', segments=[...])" string as transcript."""
+    if hasattr(r, "text"):
+        t = r.text
+    elif isinstance(r, dict):
+        t = r.get("text", "")
+    else:
+        t = str(r)
+    return (t or "").strip()
+
+
 def qwen3_mlx_backend(model="mlx-community/Qwen3-ASR-1.7B-8bit", language=None):
     """MLX-native Qwen3-ASR via mlx-audio (Metal, in-process). ~4x faster than the
     chatllm GGUF path (RTF ~0.13 vs 0.61 on M3). callable(audio) -> [{start,end,text}]
     (one segment; iter_transcribe windows for timestamps). All MLX work runs on a
     single dedicated thread (thread-local stream safety)."""
 
-    def _txt(r):
-        t = getattr(r, "text", None) or (r.get("text") if isinstance(r, dict) else str(r))
-        return (t or "").strip()
+    _txt = _stt_text
 
     def _infer(audio):  # runs ON the dedicated thread
         import numpy as np  # noqa: PLC0415
