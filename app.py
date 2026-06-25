@@ -148,6 +148,14 @@ table.tx tr[data-ts]:hover{background:var(--surface2)}
 table.tx tr.active{background:var(--accentsoft)!important;box-shadow:inset 3px 0 0 var(--accent)}
 pre.sum{white-space:pre-wrap;font:inherit;background:var(--surface2);border:1px solid var(--line);
  border-radius:var(--radius-sm);padding:16px;margin:8px 0;overflow-x:auto}
+.md{background:var(--surface2);border:1px solid var(--line);border-radius:var(--radius-sm);
+ padding:4px 18px;margin:8px 0;overflow-x:auto}
+.md h1{font-size:20px;margin:.7em 0 .4em}.md h2{font-size:16px;margin:.9em 0 .4em}
+.md h3{font-size:13px;color:var(--muted);text-transform:none;margin:.8em 0 .3em}
+.md h4,.md h5,.md h6{font-size:13px;margin:.7em 0 .3em}
+.md p{margin:.4em 0}.md ul,.md ol{margin:.4em 0;padding-left:1.5em}.md li{margin:.2em 0}
+.md code{background:var(--surface);border:1px solid var(--line);border-radius:5px;padding:.05em .4em;font-size:.92em}
+.md strong{font-weight:750}
 .hint{color:var(--muted);font-size:13px;line-height:1.55}
 audio{filter:saturate(.9)}:root[data-theme=dark] audio{filter:invert(.92) hue-rotate(180deg)}
 .card.sticky{position:sticky;top:60px;z-index:20;backdrop-filter:blur(8px);
@@ -219,6 +227,48 @@ _DETECT_JS = (
     "function _detDismiss(){sessionStorage.setItem('_detX','1');"
     "document.getElementById('_detbar').style.display='none';}"
     "setInterval(_detTick,10000);_detTick();")
+
+
+def _md_html(text):
+    """Minimal, safe Markdown -> HTML (offline, no dep) for changelog + summaries.
+    HTML-escapes first, then headings / **bold** / `code` / - and 1. lists / paras."""
+    import re  # noqa: PLC0415
+
+    def inline(s):
+        s = html.escape(s)
+        s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+        return re.sub(r"`([^`]+?)`", r"<code>\1</code>", s)
+
+    out, list_tag = [], None
+
+    def close():
+        nonlocal list_tag
+        if list_tag:
+            out.append(f"</{list_tag}>")
+            list_tag = None
+
+    for ln in (text or "").split("\n"):
+        h = re.match(r"^(#{1,6})\s+(.*)$", ln)
+        ul = re.match(r"^\s*[-*]\s+(.*)$", ln)
+        ol = re.match(r"^\s*\d+[.)]\s+(.*)$", ln)
+        if h:
+            close()
+            lvl = len(h.group(1))
+            out.append(f"<h{lvl}>{inline(h.group(2))}</h{lvl}>")
+        elif ul or ol:
+            tag = "ul" if ul else "ol"
+            if list_tag != tag:
+                close()
+                out.append(f"<{tag}>")
+                list_tag = tag
+            out.append(f"<li>{inline((ul or ol).group(1))}</li>")
+        elif not ln.strip():
+            close()
+        else:
+            close()
+            out.append(f"<p>{inline(ln)}</p>")
+    close()
+    return "\n".join(out)
 
 
 def _shell(title, body, script="", back=False):
@@ -500,7 +550,7 @@ def _result_page(title, summary, transcripts):
     body = (
         f"<h1>{html.escape(title)}</h1>"
         f"<div class=card><h2 style='margin-top:0'>摘要</h2>"
-        f"<pre class=sum>{html.escape(summary)}</pre></div>"
+        f"<div class=md>{_md_html(summary)}</div></div>"
         f"<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
         f"<table class=tx><tr><th>軌</th><th>內容</th></tr>{lines}</table></div>")
     return _shell(html.escape(title), body, back=True)
@@ -1243,7 +1293,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         for r in transcripts) or "<tr><td colspan=3 class=muted>尚無逐字稿</td></tr>"
     sums = "".join(
         f"<h3>{html.escape(s['kind'])}</h3>"
-        f"<pre class=sum>{html.escape(s['text'])}</pre>"
+        f"<div class=md>{_md_html(s['text'])}</div>"
         for s in summaries)
     players = "".join(
         f"<div style='margin:6px 0'><span class='badge'>{_TRACK_LABEL.get(t, t)}</span> "
@@ -1300,13 +1350,20 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         "<table class=tx><tr><th>時間</th><th>說話者</th><th>內容</th></tr>"
         f"{rows}</table></div>")
     script = (
+        "function _mdEsc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
+        "function _mdHtml(t){const L=(t||'').split('\\n');let o=[],lt=null;"
+        "const cl=()=>{if(lt){o.push('</'+lt+'>');lt=null;}};"
+        "const il=s=>_mdEsc(s).replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/`([^`]+?)`/g,'<code>$1</code>');"
+        "for(const ln of L){const h=ln.match(/^(#{1,6})\\s+(.*)$/),u=ln.match(/^\\s*[-*]\\s+(.*)$/),ol=ln.match(/^\\s*\\d+[.)]\\s+(.*)$/);"
+        "if(h){cl();const n=h[1].length;o.push('<h'+n+'>'+il(h[2])+'</h'+n+'>');}"
+        "else if(u||ol){const tg=u?'ul':'ol';if(lt!==tg){cl();o.push('<'+tg+'>');lt=tg;}o.push('<li>'+il((u||ol)[1])+'</li>');}"
+        "else if(!ln.trim()){cl();}else{cl();o.push('<p>'+il(ln)+'</p>');}}cl();return o.join('');}"
         "document.getElementById('go').onclick=async()=>{"
         "const k=document.getElementById('kind').value;"
         "const o=document.getElementById('out');o.textContent='產生中…';"
         f"const r=await fetch('/meetings/{mid}/summary',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k})});"
-        "const j=await r.json();const p=document.createElement('pre');"
-        "p.className='sum';p.textContent=j.text;o.innerHTML='';o.appendChild(p);"
+        "const j=await r.json();o.innerHTML='<div class=md>'+_mdHtml(j.text)+'</div>';"
         "if(j.title)document.getElementById('mtitle').textContent=j.title;};"
         "document.getElementById('fin').onclick=async()=>{"
         f"await fetch('/meetings/{mid}/finalize',{{method:'POST'}});"
@@ -1557,7 +1614,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         import updater
         ver = updater.current_version(here)
         body = (f"<h1>📝 變更紀錄 <span class=muted>v{html.escape(ver)}</span></h1>"
-                f"<div class=card><pre class=sum>{html.escape(md)}</pre></div>")
+                f"<div class=card><div class=md>{_md_html(md)}</div></div>")
         return _shell("變更紀錄", body, back=True)
 
     @app.get("/models/status")
