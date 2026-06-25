@@ -1409,7 +1409,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
 def create_app(store, *, summary_backend, asr_backend=None,
                live_manager=None, live_interim_backend=None, model_names=None,
                on_model_change=None,
-               summary_model="mlx-lm", live_silence_ms=400, live_min_speech_ms=150,
+               summary_model="mlx-lm", live_silence_ms=500, live_min_speech_ms=150,
                live_interim_s=0.6, live_max_utt_s=15.0, live_rms_threshold=500,
                live_max_lag_s=4.0):
     app = FastAPI()
@@ -2185,7 +2185,8 @@ if __name__ == "__main__":  # pragma: no cover
               file=sys.stderr)
         live_model = "mlx-community/whisper-small-mlx-q4"
     live_interim_model = os.environ.get("LIVE_INTERIM_MODEL", rec["interim"])
-    live_silence = int(os.environ.get("LIVE_SILENCE_MS", "400"))
+    live_silence = int(os.environ.get("LIVE_SILENCE_MS", "500"))  # 500: less aggressive
+    # split than 400 (measured: 350->4 frags, 450/500->1, 800->0 but +400ms lag)
     live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "150"))  # keep short words
     live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "0.6"))
     live_rms = int(os.environ.get("LIVE_RMS", "500"))
