@@ -47,6 +47,30 @@ def test_run_upload_job_records_error(tmp_path, monkeypatch):
     assert jobs[mid]["state"] == "error" and "boom" in jobs[mid]["msg"]
 
 
+def test_upload_pcm_anchored_at_created_at_not_now(tmp_path, monkeypatch):
+    # The decode runs minutes after create (transcribe first). The segment must
+    # anchor at the meeting's created_at, NOT time.time() — else _assemble_track
+    # prepends those minutes as silence and the audio won't line up / "won't play".
+    import shutil
+    import subprocess
+
+    import app
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "m.db")
+    created = 1000.0
+    mid = store.create_meeting("m", created, "zh-TW")
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/ffmpeg")
+
+    def fake_run(cmd, **k):
+        open(cmd[-1], "wb").write(b"\x00\x00")  # cmd[-1] = pcm out path
+        return type("R", (), {"returncode": 0})()
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(app.time, "time", lambda: created + 9999)  # decode finishes late
+    app._save_upload_pcm("x.m4a", mid, store)
+    seg = store.list_segments(mid)[0]
+    assert seg["started_at"] == created   # offset 0 -> no silence prefix
+
+
 def test_merge_nearby_route(tmp_path):
     c, store = make_client(tmp_path)
     store.create_meeting("A", 1000.0, "zh-TW")

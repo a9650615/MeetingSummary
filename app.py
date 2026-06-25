@@ -1292,8 +1292,15 @@ def _save_upload_pcm(src_path, mid, store):
     except Exception as e:
         print(f"upload pcm decode failed: {e}", file=sys.stderr)
         return
+    # Anchor at the meeting's created_at, NOT time.time(): an upload is a single
+    # file that starts at offset 0. _assemble_track pads (started_at - created_at)
+    # of silence, and decode runs minutes after create (whole transcribe first),
+    # so time.time() would prepend minutes of silence and shove the audio out of
+    # sync with the 0-based transcript timestamps (= "uploaded audio won't play").
+    m = store.get_meeting(mid)
+    base = m["created_at"] if m else time.time()
     store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=out_dir,
-                      started_at=time.time(), duration_s=0, origin="recorded")
+                      started_at=base, duration_s=0, origin="recorded")
 
 
 _TRACK_LABEL = {"system": "對方", "mic": "我", "mixed": "混合"}
