@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.1.29
+- **上傳音檔改非同步**：上傳後不再卡著 HTTP 連線等整個 transcribe＋summary（數分鐘、瀏覽器空轉、還會被 supervisor 當成 hang 殺掉）。改成存檔→建會議→**背景執行緒**跑辨識＋摘要＋自動標題，POST 立即 303 轉址到該會議頁。會議頁沿用 re-transcribe 既有的進度輪詢（重整可續、完成自動刷新）。背景工作直接辨識原始檔（mlx-whisper 吃 m4a/wav/mp3），不依賴 best-effort 的 ffmpeg PCM 解碼（解碼僅供回放）。移除已無用的同步結果頁。
+
 ## 0.1.28
 - **修正 Qwen3-ASR (mlx) 把 `STTOutput(text='', segments=[...])` 整串存進逐字稿**：靜音段的 `STTOutput.text` 是合法的空字串，但舊的取值 `getattr(r,'text',None) or str(r)` 遇到空字串會 falsy → 退而 `str(r)` 變成整個物件的 repr。改成空字串照樣回空（下游正常丟棄）。對受影響的場次按「重新語音辨識」即可清掉。
 

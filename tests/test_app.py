@@ -11,6 +11,42 @@ def make_client(tmp_path, summary_backend=None, asr_backend=None):
     return TestClient(app), store
 
 
+def test_run_upload_job_async_pipeline(tmp_path, monkeypatch):
+    # Upload is now async: the bg job transcribes -> summarizes -> finalizes and
+    # records progress in jobs[mid] (the dict the meeting page polls).
+    import app
+    import asr
+    store = Store(tmp_path / "m.db")
+    monkeypatch.setattr(asr, "transcribe", lambda *a, **k: [
+        {"profile": "accurate", "track": "mic", "start_ms": 0,
+         "end_ms": 1000, "text": "討論預算"}])
+    monkeypatch.setattr(app, "_save_upload_pcm", lambda *a, **k: None)  # skip ffmpeg
+    mid = store.create_meeting("實測", 1.0, "zh-TW")
+    jobs = {}
+    app._run_upload_job(store, mid, "x.m4a", asr_backend=None,
+                        summary_backend=lambda p: "會議摘要：談預算",
+                        summary_model="mlx-lm", kind="minutes", title="實測",
+                        jobs=jobs)
+    assert jobs[mid]["state"] == "done"
+    assert store.list_transcripts(mid)[0]["text"] == "討論預算"
+    assert store.list_summaries(mid)                      # a summary landed
+    assert store.get_meeting(mid)["status"] == "finalized"
+
+
+def test_run_upload_job_records_error(tmp_path, monkeypatch):
+    import app
+    import asr
+    store = Store(tmp_path / "m.db")
+    monkeypatch.setattr(asr, "transcribe",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    mid = store.create_meeting("實測", 1.0, "zh-TW")
+    jobs = {}
+    app._run_upload_job(store, mid, "x.m4a", asr_backend=None,
+                        summary_backend=lambda p: "x", summary_model="mlx-lm",
+                        kind="minutes", title="實測", jobs=jobs)
+    assert jobs[mid]["state"] == "error" and "boom" in jobs[mid]["msg"]
+
+
 def test_merge_nearby_route(tmp_path):
     c, store = make_client(tmp_path)
     store.create_meeting("A", 1000.0, "zh-TW")

@@ -14,7 +14,8 @@ from urllib.parse import quote
 
 from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
                      WebSocketDisconnect)
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import (FileResponse, HTMLResponse, RedirectResponse,
+                               Response)
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -326,7 +327,7 @@ _INDEX = _shell("MeetingSummary", """
       <option value=actions>行動項目 actions</option></select></label>
     <button class="btn primary" type=submit>上傳並產生摘要</button>
   </form>
-  <p class=hint style="margin:.8em 0 0">上傳後會跑 transcribe + summary，第一次會下載模型，請稍候。</p>
+  <p class=hint style="margin:.8em 0 0">上傳後直接跳到該會議頁，辨識 + 摘要在背景進行（頁面會即時顯示進度、完成自動刷新）。第一次會下載模型。</p>
 </div>
 <h2>會議紀錄</h2>
 <div class=card>
@@ -542,20 +543,6 @@ def _models_page():
     load();
     """
     return _shell("設定", body, script=script, back=True)
-
-
-def _result_page(title, summary, transcripts):
-    lines = "".join(
-        f"<tr><td class=who>{html.escape(str(r['track']))}</td>"
-        f"<td>{html.escape(r['text'])}</td></tr>"
-        for r in transcripts)
-    body = (
-        f"<h1>{html.escape(title)}</h1>"
-        f"<div class=card><h2 style='margin-top:0'>摘要</h2>"
-        f"<div class=md>{_md_html(summary)}</div></div>"
-        f"<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
-        f"<table class=tx><tr><th>軌</th><th>內容</th></tr>{lines}</table></div>")
-    return _shell(html.escape(title), body, back=True)
 
 
 # Live page: browser mic -> 16 kHz Int16 PCM over websocket -> server ASR.
@@ -1252,6 +1239,36 @@ def _run_transcribe_job(store, mid, backend, jobs):
             elif ev["type"] == "done":
                 jobs[mid] = {"state": "done", "done": ev["transcripts"],
                              "total": jobs[mid].get("total", 0)}
+    except Exception as e:
+        jobs[mid] = {"state": "error", "msg": str(e)}
+
+
+def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
+                    summary_model, kind, title, jobs):
+    """Background upload pipeline (mirrors run_pipeline, off the request thread):
+    transcribe the uploaded file -> summarize -> auto-title -> finalize, writing
+    coarse progress into jobs[mid] (same shape the detail page already polls, so
+    refresh resumes). Transcribes the original file directly (mlx-whisper loads
+    m4a/wav/mp3) so it does NOT depend on the best-effort ffmpeg PCM decode."""
+    jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": "辨識中…"}
+    try:
+        segs = asr.transcribe(audio_path, profile="accurate", track="mic",
+                              backend=asr_backend)
+        for s in segs:
+            store.add_transcript(mid, s["profile"], s["track"], s["start_ms"],
+                                 s["end_ms"], s["track"], s["text"])
+        jobs[mid].update(done=len(segs), total=len(segs), text="產生摘要中…")
+        meeting = store.get_meeting(mid)
+        text = _transcript_text(store.list_transcripts(mid))
+        out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend)
+        store.add_summary(mid, kind, meeting["lang"], out, summary_model, time.time())
+        if _is_default_title(title):
+            nt = _auto_title(out, summary_backend)
+            if nt:
+                store.update_title(mid, nt)
+        _save_upload_pcm(audio_path, mid, store)  # best-effort, for playback only
+        store.finalize_meeting(mid)
+        jobs[mid] = {"state": "done", "done": len(segs), "total": len(segs)}
     except Exception as e:
         jobs[mid] = {"state": "error", "msg": str(e)}
 
@@ -2103,30 +2120,25 @@ def create_app(store, *, summary_backend, asr_backend=None,
         _touch()
         if asr_backend is None:
             raise HTTPException(503, "no ASR backend configured")
-        from pipeline import run_pipeline
-
         os.makedirs("data/uploads", exist_ok=True)
         path = os.path.join("data/uploads", audio.filename)
         with open(path, "wb") as f:
             f.write(await audio.read())
-        # Heavy (minutes of transcribe+summary). Run off the event loop so /health
-        # stays responsive — otherwise the supervisor sees a hang and kills it.
-        result = await run_in_threadpool(
-            run_pipeline, path, store=store, title=title, lang=lang,
-            kind=kind, asr_backend=asr_backend,
-            summary_backend=summary_backend, summary_model=summary_model)
-        mid = result["meeting_id"]
-        # Auto-title from the summary unless the user typed a non-default title.
-        if _is_default_title(title):
-            nt = await run_in_threadpool(_auto_title, result["summary"], summary_backend)
-            if nt:
-                store.update_title(mid, nt)
-                title = nt
-        # Decode the upload to data/<mid>/mic.pcm (16k mono) so playback uses the
-        # same path as live recordings (player + click-to-seek work). Best-effort.
-        await run_in_threadpool(_save_upload_pcm, path, mid, store)
-        return _result_page(title, result["summary"],
-                            _rows(store.list_transcripts(mid)))
+        mid = store.create_meeting(title, time.time(), lang)
+        # Async: transcribe+summary is minutes of work. Kick it to a background
+        # thread and redirect to the meeting page, which polls the same progress
+        # job re-transcribe uses (refresh-safe) and reloads when done. The POST
+        # returns at once instead of holding the connection (and tripping the
+        # supervisor's hang check) for the whole job.
+        import threading
+        transcribe_jobs[mid] = {"state": "running", "done": 0, "total": 0,
+                                "text": "辨識中…"}
+        threading.Thread(
+            target=_run_upload_job,
+            args=(store, mid, path, asr_backend, summary_backend, summary_model,
+                  kind, title, transcribe_jobs),
+            daemon=True).start()
+        return RedirectResponse(f"/m/{mid}", status_code=303)
 
     @app.post("/meetings/{mid}/summary")
     def summarize_meeting(mid: int, body: SummaryIn):
