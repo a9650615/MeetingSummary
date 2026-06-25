@@ -23,10 +23,14 @@ def _degenerate(text):
 
 
 def transcribe(audio_path, *, profile, track, backend):
+    import live  # noqa: PLC0415 — reuse the live path's hallucination/filler blocklist
     out = []
     for seg in backend(audio_path):
         text = seg["text"].strip()
-        if not text or _degenerate(text):   # repetition loop -> skip the segment
+        # drop repetition loops + whisper silence-hallucinations (優優獨播劇場 / 謝謝觀看 /
+        # YouTube outros). NOT bare fillers ("ok"/"嗯") — in a full re-transcribe those
+        # can be real short utterances; only the known hallucination phrases are dropped.
+        if not text or _degenerate(text) or live._is_hallucination(text):
             continue
         text = _collapse_repeats(text)
         out.append({

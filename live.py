@@ -56,6 +56,9 @@ _HALLUCINATION = [
     "subscribe to my channel", "see you next time", "see you in the next video",
     "謝謝觀看", "謝謝大家的觀看", "請不吝點贊", "請訂閱", "點贊訂閱", "下次再見",
     "字幕由", "感謝您的觀看", "感謝觀看",
+    # whisper-zh silence hallucinations (TV/stream intros it learned from captions)
+    "優優獨播劇場", "yoyo television series exclusive", "yoyo tv", "獨播劇場",
+    "明鏡與點點欄目", "請不吝點贊 訂閱 轉發 打賞", "by 索绪尔", "中文字幕志愿者",
 ]
 
 

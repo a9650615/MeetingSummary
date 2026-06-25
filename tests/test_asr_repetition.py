@@ -18,3 +18,11 @@ def test_transcribe_drops_loop_segment():
             {"start": 1, "end": 2, "text": "正常內容可以保留"}]
     out = transcribe("x", profile="accurate", track="system", backend=lambda p: segs)
     assert len(out) == 1 and out[0]["text"] == "正常內容可以保留"
+
+
+def test_transcribe_drops_whisper_silence_hallucinations():
+    segs = [{"start": 0, "end": 1, "text": "優優獨播劇場——YoYo Television Series Exclusive"},
+            {"start": 1, "end": 2, "text": "謝謝觀看"},      # filler hallucination
+            {"start": 2, "end": 3, "text": "今天討論專案進度與時程"}]  # real -> kept
+    out = transcribe("x", profile="accurate", track="system", backend=lambda p: segs)
+    assert [o["text"] for o in out] == ["今天討論專案進度與時程"]
