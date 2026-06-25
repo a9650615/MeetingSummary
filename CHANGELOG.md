@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.1.31
+- **修正 femelo 安裝出現 `cannot import name '_py_qwen3_asr_cpp'`**：`py-qwen3-asr-cpp` 在 PyPI 沒有對應 (python, arm64) 的 wheel，一律是原始碼編譯（scikit-build/cmake，需 cmake + C/C++ 工具鏈）。缺工具鏈時會裝進 python 檔案卻沒編出原生模組 `.so`，且一旦半套安裝卡住，之後 `pip install` 會視為「已滿足」而不再重編，無法自癒。修正：femelo 路徑現在(1) 驗證**真正的** model import；(2) 失敗時自動 `brew install cmake`、檢查 Xcode CLT；(3) **先卸載再 `--force-reinstall --no-cache-dir` 乾淨重編**；(4) 仍失敗則給明確指引（裝 `xcode-select --install` + cmake）。先前只有 chatllm 會自動裝 cmake，femelo 沒有。
+
 ## 0.1.30
 - **修正上傳音檔可辨識卻「無法播放」**：上傳的單一檔案應從 0 秒開始，但 PCM 解碼段是用「解碼完成時間」(`time.time()`) 當 `started_at` 註冊的；解碼是在整段 transcribe 跑完後才做（可能數分鐘），導致 `_assemble_track` 在音訊前面墊了數分鐘靜音（實測一場墊了 4.6 分鐘），播放像「沒聲音」、且與 0 起算的逐字稿時間軸對不上。改成錨定在會議的 `created_at`（偏移 0）。
 

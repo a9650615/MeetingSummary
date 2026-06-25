@@ -41,10 +41,34 @@ case "${1:-}" in
     echo "femelo 使用 $("$PY" --version 2>&1)"
     [ -d .venv-qwen314 ] || "$PY" -m venv .venv-qwen314
     .venv-qwen314/bin/pip install -q --upgrade pip
-    .venv-qwen314/bin/python -c "import py_qwen3_asr_cpp" 2>/dev/null \
-      || .venv-qwen314/bin/pip install py-qwen3-asr-cpp \
-      || .venv-qwen314/bin/pip install "git+https://github.com/femelo/py-qwen3-asr-cpp"
-    .venv-qwen314/bin/python -c "from py_qwen3_asr_cpp.model import Qwen3ASRModel; print('femelo OK')"
+
+    # py-qwen3-asr-cpp publishes NO wheels for our (python, arm64) combos, so it's
+    # ALWAYS a source build (scikit-build/cmake -> needs cmake + a C/C++ toolchain).
+    # Without them the build installs the python files but NOT the native
+    # _py_qwen3_asr_cpp.*.so -> "cannot import name '_py_qwen3_asr_cpp'". Verify the
+    # REAL import (not just `import py_qwen3_asr_cpp`, which a broken pkg passes
+    # half-way), and on failure force a CLEAN rebuild — a half-installed pkg makes a
+    # plain `pip install` a no-op ('already satisfied'), so it can never self-heal.
+    _femelo_ok() {
+      .venv-qwen314/bin/python -c "from py_qwen3_asr_cpp.model import Qwen3ASRModel" 2>/dev/null
+    }
+    if ! _femelo_ok; then
+      command -v cmake >/dev/null || { echo "找不到 cmake，嘗試 brew 安裝…"; _brew cmake; }
+      command -v cmake >/dev/null || { echo "need cmake (brew install cmake)"; exit 1; }
+      xcode-select -p >/dev/null 2>&1 \
+        || echo "警告: 未偵測到 Xcode Command Line Tools，原生模組編譯可能失敗 (xcode-select --install)"
+      .venv-qwen314/bin/pip uninstall -y py-qwen3-asr-cpp >/dev/null 2>&1 || true  # drop any broken half-install
+      echo "編譯 py-qwen3-asr-cpp (原始碼)…"
+      .venv-qwen314/bin/pip install --force-reinstall --no-cache-dir py-qwen3-asr-cpp \
+        || .venv-qwen314/bin/pip install --force-reinstall --no-cache-dir \
+             "git+https://github.com/femelo/py-qwen3-asr-cpp"
+    fi
+    if _femelo_ok; then
+      echo "femelo OK"
+    else
+      echo "femelo 安裝失敗: 原生模組 _py_qwen3_asr_cpp 沒編出來。請確認已裝 Xcode Command Line Tools (xcode-select --install) 與 cmake (brew install cmake) 後重試。" >&2
+      exit 1
+    fi
     ;;
   chatllm)
     if [ ! -f chatllm.cpp/bindings/libchatllm.dylib ]; then
