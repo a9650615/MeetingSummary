@@ -56,9 +56,15 @@ _HALLUCINATION = [
     "subscribe to my channel", "see you next time", "see you in the next video",
     "謝謝觀看", "謝謝大家的觀看", "請不吝點贊", "請訂閱", "點贊訂閱", "下次再見",
     "字幕由", "感謝您的觀看", "感謝觀看",
-    # whisper-zh silence hallucinations (TV/stream intros it learned from captions)
-    "優優獨播劇場", "yoyo television series exclusive", "yoyo tv", "獨播劇場",
-    "明鏡與點點欄目", "請不吝點贊 訂閱 轉發 打賞", "by 索绪尔", "中文字幕志愿者",
+]
+
+# Never-legitimate whisper-zh silence hallucinations (TV/stream intros learned from
+# captioned video). Dropped on plain substring — NO coverage test — because they're
+# garbage even when padded with extra hallucinated words (優悠獨播劇場——YoYo Television…).
+_HALLUCINATION_STRONG = [
+    "獨播劇場", "独播剧场", "yoyo television", "yoyo tv",
+    "明鏡與點點", "明镜与点点", "中文字幕志愿者", "by 索绪尔", "索绪尔",
+    "請不吝點贊 訂閱 轉發 打賞", "请不吝点赞",
 ]
 
 
@@ -74,6 +80,8 @@ def _is_hallucination(text):
     t = _norm(text)
     if not t:
         return False
+    if any(p in t for p in _HALLUCINATION_STRONG):  # never legit -> drop on substring
+        return True
     for p in _HALLUCINATION:
         if p in t and len(p) >= 0.6 * len(t):  # phrase dominates the segment
             return True

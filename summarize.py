@@ -21,11 +21,20 @@ _INSTRUCTION = {
 # never said. Hard rule up front + explicit fallbacks cut most of it.
 _GUARD = ("嚴格規則:只能根據下方逐字稿的內容,絕對不可杜撰任何人名、數字、日期、期限或"
           "未提及的事項。逐字稿沒提到負責人就寫「未指定」,沒提到期限就寫「未定」。"
-          "寧可少寫,也不要編造。\n")
+          "忽略明顯與會議無關、亂碼、或像影片片頭/字幕台詞的內容(例如『優優獨播劇場』"
+          "之類辨識雜訊),不要納入摘要。寧可少寫,也不要編造。\n")
 
 
 def build_prompt(text, *, kind, lang):
     return f"{_GUARD}{_INSTRUCTION[kind]}\n輸出語言:{lang}\n\n逐字稿:\n{text}"
+
+
+def _post(out, lang):
+    """LLM often emits 簡體 even for a zh-TW meeting -> normalize to 繁體(台灣)."""
+    if (lang or "").lower().startswith("zh"):
+        import zhtw  # noqa: PLC0415
+        return zhtw.to_tw(out)
+    return out
 
 
 def _chunk(text, max_chars):
@@ -43,7 +52,7 @@ def _chunk(text, max_chars):
 
 def summarize(text, *, kind, lang, backend, max_chars=24000):
     if len(text) <= max_chars:
-        return backend(build_prompt(text, kind=kind, lang=lang))
+        return _post(backend(build_prompt(text, kind=kind, lang=lang)), lang)
     # map: summarize each chunk; reduce: summarize the joined chunk summaries.
     partials = [
         backend(build_prompt(c, kind=kind, lang=lang))

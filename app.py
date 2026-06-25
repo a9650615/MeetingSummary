@@ -735,7 +735,12 @@ def _src_labels(src):
 
 
 def _transcript_text(rows):
-    return "\n".join(f"{r['speaker']}: {r['text']}" for r in rows)
+    # Skip whisper silence-hallucination lines so the summary can't echo them
+    # (e.g. 優優獨播劇場). Existing meetings keep the lines in the transcript view;
+    # only the text FED TO the summarizer is cleaned.
+    import live  # noqa: PLC0415
+    return "\n".join(f"{r['speaker']}: {r['text']}" for r in rows
+                     if not live._is_hallucination(r["text"]))
 
 
 def _snippet(text, q, span=44):
