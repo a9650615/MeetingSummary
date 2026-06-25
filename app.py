@@ -542,7 +542,8 @@ _LIVE_BODY = """
     <label class=fld>即時模型
       <select id=model>
         <option value="qwen3-asr-0.6b-q4-k-m">Qwen3-ASR 0.6B(.cpp·Metal·預設)</option>
-        <option value="qwen3-asr-1.7b">Qwen3-ASR 1.7B(chatllm·Metal·最準)</option>
+        <option value="mlx-community/Qwen3-ASR-1.7B-8bit">Qwen3-ASR 1.7B(mlx·Metal·準·快)</option>
+        <option value="qwen3-asr-1.7b">Qwen3-ASR 1.7B(chatllm·Metal·慢·備用)</option>
         <option value="mlx-community/whisper-small-mlx-q4">whisper small-q4(快·省)</option>
         <option value="mlx-community/whisper-large-v3-turbo-q4">whisper turbo-q4(較準)</option>
         <option value="mlx-community/whisper-large-v3-turbo">whisper turbo(最準·較吃)</option>
@@ -1016,8 +1017,9 @@ _SUPPORTED = [
     {"id": "mlx-community/Qwen2.5-3B-Instruct-4bit", "label": "Qwen2.5-3B（摘要）", "kind": "hf"},
     {"id": "Qwen/Qwen3-ASR-0.6B", "label": "Qwen3-ASR 0.6B（transformers）", "kind": "hf"},
     {"id": "Qwen/Qwen3-ASR-1.7B", "label": "Qwen3-ASR 1.7B（transformers·最準·慢）", "kind": "hf"},
+    {"id": "mlx-community/Qwen3-ASR-1.7B-8bit", "label": "Qwen3-ASR 1.7B（mlx·Metal·準·快）", "kind": "hf"},
     {"id": "qwen3-asr-0.6b-q4-k-m", "label": "Qwen3-ASR .cpp 0.6B（femelo·Metal·快）", "kind": "femelo"},
-    {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR .cpp 1.7B（chatllm·Metal·最準）", "kind": "chatllm"},
+    {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR .cpp 1.7B（chatllm·Metal·慢·備用）", "kind": "chatllm"},
     # 說話者分群模型(sherpa pyannote-3-0 seg + 3dspeaker emb)由 diarize.py 首次分群時
     # 自動下載到 models/，不在此清單(community-1 onnx 與 sherpa 不相容,缺 sample_rate metadata)。
 ]
@@ -1282,8 +1284,9 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         "<option value='mlx-community/whisper-large-v3-turbo-q4'>turbo-q4(準·省)</option>"
         "<option value='mlx-community/whisper-large-v3-mlx'>large-v3(最準·吃)</option>"
         "<option value='mlx-community/whisper-small-mlx-q4'>small-q4(快)</option>"
+        "<option value='mlx-community/Qwen3-ASR-1.7B-8bit'>Qwen3-ASR 1.7B(mlx·Metal·準·快)</option>"
         "<option value='qwen3-asr-0.6b-q4-k-m'>Qwen3-ASR 0.6B(.cpp·Metal·快)</option>"
-        "<option value='qwen3-asr-1.7b'>Qwen3-ASR 1.7B(chatllm·Metal·最準)</option>"
+        "<option value='qwen3-asr-1.7b'>Qwen3-ASR 1.7B(chatllm·Metal·慢·備用)</option>"
         "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B(transformers·慢)</option>"
         "<option value='Qwen/Qwen3-ASR-1.7B'>Qwen3-ASR 1.7B(transformers·很慢)</option>"
         "</select>"

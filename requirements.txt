@@ -9,7 +9,7 @@ uvicorn[standard]
 python-multipart   # /ingest file upload form
 
 # Heavy runtime — Apple Silicon only, install manually on the M3:
-#   pip install mlx-whisper mlx-lm
+#   pip install mlx-whisper mlx-lm mlx-audio   # mlx-audio = MLX-native Qwen3-ASR (Metal)
 # Not pinned here so CI / non-Mac dev stays installable.
 #
 # Optional accurate/batch ASR (best zh; offline transformers, slow on Mac, ~1.2GB):

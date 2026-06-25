@@ -3,7 +3,7 @@ import backends
 
 def test_route_qwen3_vs_whisper():
     assert backends.route("Qwen/Qwen3-ASR-0.6B") == "qwen3"
-    assert backends.route("mlx-community/qwen3-asr-something") == "qwen3"
+    assert backends.route("mlx-community/Qwen3-ASR-1.7B-8bit") == "qwen3mlx"  # MLX-native (mlx-audio)
     assert backends.route("qwen3-asr-0.6b-q4-k-m") == "qwen3cpp"  # femelo GGUF sidecar
     assert backends.route("qwen3-asr-1.7b") == "chatllm"          # chatllm.cpp 1.7B
     assert backends.route("Qwen/Qwen3-ASR-1.7B") == "qwen3"       # transformers, not chatllm

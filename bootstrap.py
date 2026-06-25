@@ -87,7 +87,8 @@ def setup():
         if _is_apple_silicon_hw() and subprocess.run(
                 [PY, "-c", "import mlx_whisper"], cwd=HERE, capture_output=True).returncode != 0:
             state["step"] = "安裝 mlx 加速(可選,失敗會略過)…"
-            _pip(["install", "--no-input", "mlx-whisper", "mlx-lm"], log=True)
+            # mlx-audio = MLX-native Qwen3-ASR (Metal, ~4x faster than the chatllm GGUF)
+            _pip(["install", "--no-input", "mlx-whisper", "mlx-lm", "mlx-audio"], log=True)
         if not os.path.exists(os.path.join(HERE, "micbusy")):
             subprocess.run(["swiftc", "micbusy.swift", "-o", "micbusy",
                             "-framework", "CoreAudio"], cwd=HERE, capture_output=True)
