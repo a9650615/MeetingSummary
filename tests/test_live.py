@@ -82,6 +82,24 @@ def test_twopass_emits_interim_while_speaking():
     assert "interim" in kinds and "final" not in kinds
 
 
+def test_interim_cadence_adapts_to_compute_load():
+    # next interim interval = compute_time / duty, clamped — so a slow model backs
+    # off and a fast one runs more often, holding ASR duty cycle ~= target.
+    s = TwoPassSession(backend=lambda a: [], interim_backend=lambda a: [],
+                       interim_s=0.6, interim_duty=0.75,
+                       interim_min_s=0.4, interim_max_s=3.0)
+    base = s._interim_dyn
+    s._adapt_interim(0.2)          # first call = cold-load warmup -> ignored
+    assert s._interim_dyn == base
+    s._adapt_interim(0.2)          # 0.2/0.75=0.27s -> below min -> clamp up
+    assert s._interim_dyn == int(0.4 * 16000) * 2
+    s._adapt_interim(1.5)          # 1.5/0.75=2.0s -> in range
+    assert s._interim_dyn == int(2.0 * 16000) * 2
+    fast = s._interim_dyn
+    s._adapt_interim(5.0)          # 5/0.75=6.7s -> clamp to max (slow model backs off)
+    assert s._interim_dyn == int(3.0 * 16000) * 2 > fast
+
+
 def test_twopass_skips_interim_when_not_wanted():
     # want_interim=False (we're behind) -> no interim ASR, finals still happen.
     calls = []

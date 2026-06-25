@@ -8,6 +8,8 @@ Chunking is pluggable:
 
 Each chunk is transcribed independently (no cross-chunk context) — live is a
 preview; the accurate re-pass is the trusted transcript (spec M1)."""
+import time
+
 import numpy as np
 
 import zhtw
@@ -270,7 +272,8 @@ class TwoPassSession:
     def __init__(self, *, backend, interim_backend=None, sample_rate=16000,
                  frame_ms=30, silence_ms=400, max_utt_s=15.0, interim_s=0.6,
                  interim_tail_s=8.0, min_speech_ms=250, rms_threshold=80,
-                 speech_factor=2.0, track="mic", speaker_fn=None, speech_fn=None):
+                 speech_factor=2.0, track="mic", speaker_fn=None, speech_fn=None,
+                 interim_duty=0.75, interim_min_s=0.4, interim_max_s=3.0, clock=None):
         self.final_backend = backend
         self.interim_backend = interim_backend
         self.speaker_fn = speaker_fn  # optional audio_bytes -> live speaker label
@@ -285,6 +288,18 @@ class TwoPassSession:
         # interim transcribes only the recent tail so its cost stays flat as the
         # utterance grows — keeps captions snappy ('live enough').
         self.interim_tail_bytes = int(interim_tail_s * sample_rate) * 2
+        # Adaptive cadence: hold the interim ASR DUTY CYCLE (compute_time /
+        # realtime) near interim_duty — there's no non-sudo GPU% on macOS, but
+        # this fraction IS the GPU-bound MLX pipeline's effective load. After each
+        # interim we set the next interval = last_compute / duty, so a fast model
+        # transcribes more often (uses spare compute) and a slow one (1.7B) backs
+        # off automatically instead of falling behind. Bounded both ways.
+        self.interim_duty = interim_duty
+        self.interim_min_bytes = int(interim_min_s * sample_rate) * 2
+        self.interim_max_bytes = int(interim_max_s * sample_rate) * 2
+        self._interim_dyn = self.interim_bytes   # current threshold (adapts)
+        self._interim_warm = True                # ignore 1st call (cold model load)
+        self._clock = clock or time.monotonic
         self.min_floor = rms_threshold        # absolute noise-floor minimum
         self.speech_factor = speech_factor    # speech if rms >= noise * factor
         self._noise = float(rms_threshold)     # adaptive noise-floor estimate
@@ -367,13 +382,26 @@ class TwoPassSession:
             events.append(self._finalize())
         # interim only once there's real sustained speech (no work on blips/silence)
         if (want_interim and self.interim_backend and self._enough_speech()
-                and len(self._utt) - self._last_interim_len >= self.interim_bytes):
+                and len(self._utt) - self._last_interim_len >= self._interim_dyn):
             self._last_interim_len = len(self._utt)
             tail = bytes(self._utt[-self.interim_tail_bytes:])
+            t0 = self._clock()
             text = self._text(self.interim_backend, tail)
+            self._adapt_interim(self._clock() - t0)
             if text:
                 events.append({"kind": "interim", "text": text, "track": self.track})
         return [e for e in events if e]
+
+    def _adapt_interim(self, compute_s):
+        # Next interim fires after (compute / duty) seconds of new audio so the
+        # fraction of realtime spent on interim ASR stays ~= interim_duty. Skip
+        # the first measurement: the cold model-load call inflates it.
+        if self._interim_warm:
+            self._interim_warm = False
+            return
+        b = int(max(0.0, compute_s) / self.interim_duty * self.sr) * 2
+        self._interim_dyn = max(self.interim_min_bytes,
+                                min(self.interim_max_bytes, b))
 
     def flush(self):
         if self._has_speech:

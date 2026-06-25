@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.1.27
+- **live interim 節奏依算力自動調整（鎖定 duty cycle ~75%）**：macOS 拿不到非 sudo 的 GPU 使用率，但 interim 重辨識的 RTF（compute / 即時）就是 GPU-bound MLX pipeline 的有效負載。每次 interim 計時後，把下次間隔設為 `compute / 目標duty`（夾在 0.4~3.0s）：快模型自動更頻繁（吃滿閒置算力）、慢模型（1.7B）自動拉長間隔不再積壓拖垮 live。沿用 `AdaptiveBackend` 的同套 RTF 訊號。目標 duty 預設 0.75，可用 `LIVE_INTERIM_DUTY` 調。
+
 ## 0.1.26
 - **錄音時降低會議偵測輪詢頻率**：每頁的 `/detect` 輪詢（會跑 `ps` 找會議 app + CoreAudio 查麥克風）在「錄音中」根本沒用（偵測橫幅只在「未錄音」時提示開始錄音），卻仍每 10 秒打一次。改成自我排程：未錄音維持 10 秒、錄音中拉長到 30 秒，省下 live 進行時無謂的系統呼叫。註：live 的真正算力在 interim 重辨識（每 0.6 秒重跑 8 秒尾段），1.7B 才會吃不消；VAD 偵測本身極輕、非瓶頸。
 

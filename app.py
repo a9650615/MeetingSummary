@@ -1473,7 +1473,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                on_model_change=None,
                summary_model="mlx-lm", live_silence_ms=500, live_min_speech_ms=150,
                live_interim_s=0.6, live_max_utt_s=15.0, live_rms_threshold=500,
-               live_max_lag_s=4.0):
+               live_max_lag_s=4.0, live_interim_duty=0.75):
     app = FastAPI()
     transcribe_jobs = {}  # mid -> progress dict; survives page refresh (in-memory)
 
@@ -1805,6 +1805,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             sample_rate=16000, silence_ms=sil,
             min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
             max_utt_s=maxu, rms_threshold=live_rms_threshold,
+            interim_duty=live_interim_duty,
             track=lbl[0], speech_fn=_mk_speech_fn()) for tag, lbl in tracks.items()}
         buffers = {tag: bytearray() for tag in tracks}
 
@@ -2251,6 +2252,8 @@ if __name__ == "__main__":  # pragma: no cover
     # split than 400 (measured: 350->4 frags, 450/500->1, 800->0 but +400ms lag)
     live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "150"))  # keep short words
     live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "0.6"))
+    # target interim ASR duty cycle (compute/realtime); cadence auto-adapts to hold it
+    live_interim_duty = float(os.environ.get("LIVE_INTERIM_DUTY", "0.75"))
     live_rms = int(os.environ.get("LIVE_RMS", "500"))
     live_fallback = os.environ.get("LIVE_FALLBACK", ",".join(rec["fallback"]))
     live_rtf_budget = float(os.environ.get("LIVE_RTF_BUDGET", "0.8"))
@@ -2298,6 +2301,7 @@ if __name__ == "__main__":  # pragma: no cover
         live_silence_ms=live_silence,
         live_min_speech_ms=live_min_speech,
         live_interim_s=live_interim_s,
+        live_interim_duty=live_interim_duty,
         live_rms_threshold=live_rms,
         live_max_lag_s=live_max_lag,
         summary_model=llm_model,
