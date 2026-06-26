@@ -182,8 +182,11 @@ def test_speaker_sample_wav(tmp_path):
 def test_speaker_suggestions_route(tmp_path):
     import struct
     c, store = make_client(tmp_path)
+    mid = store.create_meeting(title="m", created_at=0.0, lang="zh-TW")
     store.add_speaker("A", struct.pack("2f", 1.0, 0.0))
     store.add_speaker("B", struct.pack("2f", 0.95, 0.31))  # near-duplicate voice
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "A", "hi")  # playable samples
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "B", "yo")
     pairs = c.get("/speakers/suggestions").json()["pairs"]
     assert pairs and pairs[0]["a"] == "A" and pairs[0]["b"] == "B" and pairs[0]["sim"] > 0.8
 
@@ -377,3 +380,21 @@ def test_meeting_page_renders_without_auto_summary(tmp_path):
     assert r.status_code == 200
     assert "測試內容" in r.text and "產生摘要" in r.text
     assert store.list_summaries(mid) == []  # viewing must NOT trigger summary
+
+
+def test_suggestions_skip_speakers_without_audio_sample(tmp_path):
+    # "沒有語音就不應該拿來比較" — a voiceprint with no playable sample (no >800ms
+    # utterance) must not appear in merge suggestions, even if its centroid matches.
+    import numpy as np
+    client, store = make_client(tmp_path)
+    mid = store.create_meeting(title="m", created_at=0.0, lang="zh-TW")
+    v = np.array([1, 0, 0], dtype=np.float32).tobytes()  # identical -> cos sim 1.0
+    for nm in ("Alice", "Bob", "Ghost"):
+        store.add_speaker(nm, v)
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "Alice", "hi")
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "Bob", "yo")
+    store.add_transcript(mid, "accurate", "mic", 0, 300, "Ghost", "x")  # <800ms = no sample
+    pairs = client.get("/speakers/suggestions").json()["pairs"]
+    names = {n for p in pairs for n in (p["a"], p["b"])}
+    assert "Ghost" not in names
+    assert {"Alice", "Bob"} <= names

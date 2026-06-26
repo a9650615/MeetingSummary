@@ -2750,7 +2750,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def speaker_suggestions():
         import diarize as diar
         thr = float(store.get_setting("merge_suggest_threshold", "0.5"))
-        return {"pairs": diar.similar_speaker_pairs(store.list_speakers(), thr)}
+        # Only suggest merging speakers you can actually 試聽 — a voiceprint with no
+        # playable sample (>800ms utterance) can't be verified by ear, so comparing
+        # it is useless ("沒有語音就不應該拿來比較是不是同一人").
+        sampled = {s["name"] for s in store.speakers_with_stats() if s["has_sample"]}
+        rows = [r for r in store.list_speakers() if r["name"] in sampled]
+        return {"pairs": diar.similar_speaker_pairs(rows, thr)}
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
                  "denoise": "0"}
