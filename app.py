@@ -1988,6 +1988,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
         live_manager.set_model(body.live)  # hot reload — no restart
         if on_model_change:
             on_model_change(body.live)
+        import backends as _bk  # noqa: PLC0415
+        if _bk.route(body.live) == "ane":  # pre-warm the helper (~13s load) off-thread
+            import threading
+            threading.Thread(
+                target=lambda: _bk.ane_live_backend()(b"\x00" * 32000), daemon=True).start()
         return {"live": live_manager.requested}
 
     @app.get("/models/manage", response_class=HTMLResponse)
@@ -2198,8 +2203,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 print(f"silero vad unavailable, using energy: {e}", file=sys.stderr)
                 return None
 
+        # ANE live (省電): skip the MLX whisper-small interim entirely — that's the
+        # GPU draw during live. Final-only on the Neural Engine = minimal GPU.
+        import backends as _bk  # noqa: PLC0415
+        ane_live = _bk.route(live_manager.current) == "ane"
+        interim_be = None if ane_live else live_interim_backend
         sessions = {tag: TwoPassSession(
-            backend=live_manager, interim_backend=live_interim_backend,
+            backend=live_manager, interim_backend=interim_be,
             sample_rate=16000, silence_ms=sil,
             min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
             max_utt_s=maxu, rms_threshold=live_rms_threshold,

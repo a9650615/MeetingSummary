@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.4.3
+- **修正 live ANE「辨識不出東西」+ GPU 還在跑**：(1) ANE helper 首次載入模型約 13 秒，短錄音來不及產生 final（看起來沒辨識）。選「Qwen3-ASR(ANE)」當下就**背景預載**(pre-warm)，錄音時已就緒。(2) ANE-live 時**跳過 MLX whisper-small 的 interim 預覽** — 那才是 live 期間真正吃 GPU 的東西；改成只在斷句時用 ANE 出 final → GPU 大幅下降。代價:ANE-live 沒有逐字即時預覽，每句講完才顯示(換省電)。
+
 ## 0.4.2
 - **修正「ANE 還在用 GPU、沒省電」**：speech-swift 的 CoreML **encoder 預設 `.all`** → CoreML 實際把它排在 **GPU**(所以開了 ANE GPU 還在跑)。改成設環境變數 `SPEECH_COREML_COMPUTE_UNITS=ane` 強制 encoder＋decoder 都走 **Neural Engine**(批次 ANE 與 live helper 子行程都設,執行時讀取、免重編)。首次會為 ANE 重新編譯一次 CoreML(之後快取)。註:mel 前處理等 MLX 膠水仍會用到少量 GPU;live 的 interim 預覽仍走輕量 MLX whisper-small(GPU 負擔小)— 要完全離 GPU 可把 interim 也導到 ANE 或關掉,再說。
 
