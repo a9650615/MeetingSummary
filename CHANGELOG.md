@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.3.1
+- **ANE 省電辨識納入自動流程**：開關開啟後（M 系列），不只手動下拉選 ANE — **上傳音檔的自動辨識**、以及**未指定模型的「重新語音辨識」** 都改走 Neural Engine（離 GPU、省電）。新增 `_default_asr()` 統一決定自動/預設用哪個 backend；上傳 (`/ingest`) 與兩條 transcribe 路由共用。關閉開關則回到原本 MLX 預設。
+
 ## 0.3.0
 - **實驗性：ANE 省電辨識（Apple Neural Engine·M 系列）**：重新辨識可改跑在 Neural Engine，**完全離開 GPU → 省電、不發熱**（先前 ASR 跑 GPU 會過熱）。
   - 新增 `ane` ASR backend：透過 homebrew `speech` CLI（Qwen3-ASR CoreML）。把音訊切成 30s 窗丟進暫存資料夾、`transcribe-batch` 一次跑完（模型只載一次），實測 **RTF 0.039**，輸出自動轉繁體。zh-TW 逐字稿與現有 MLX 路徑幾乎一致（CoreML INT8 量化，WER 略高於 MLX 8-bit，但內容感受不大）。

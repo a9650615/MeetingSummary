@@ -2397,6 +2397,16 @@ def create_app(store, *, summary_backend, asr_backend=None,
             "summaries": _rows(store.list_summaries(mid)),
         }
 
+    def _default_asr():
+        # The auto/default ASR backend. When the ANE 省電 toggle is on (Apple
+        # Silicon), the automatic pipeline (upload + default re-transcribe) also
+        # runs on the Neural Engine — off the GPU — not just manual dropdown picks.
+        if (asr_backend is not None and _ane_available()
+                and store.get_setting("ane", "0") == "1"):
+            import backends
+            return backends.make_batch_backend("ane-qwen3-0.6b")
+        return asr_backend
+
     @app.post("/meetings/{mid}/transcribe")
     def transcribe_meeting(mid: int, body: TranscribeIn = TranscribeIn()):
         # Re-run accurate ASR over the saved audio, optionally with a chosen model.
@@ -2406,9 +2416,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if body.model:
             import backends
             backend = backends.make_batch_backend(body.model, body.language)
-        elif asr_backend is not None:
-            backend = asr_backend
         else:
+            backend = _default_asr()
+        if backend is None:
             raise HTTPException(503, "no ASR backend configured")
         store.clear_transcripts(mid)  # full replace (incl live) -> one coherent set
         base = store.get_meeting(mid)["created_at"]
@@ -2439,9 +2449,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if body.model:
             import backends
             backend = backends.make_batch_backend(body.model, body.language)
-        elif asr_backend is not None:
-            backend = asr_backend
         else:
+            backend = _default_asr()
+        if backend is None:
             raise HTTPException(503, "no ASR backend configured")
         store.clear_transcripts(mid)  # full replace (incl live) -> one coherent set
         import threading
@@ -2475,7 +2485,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                                 "text": "辨識中…"}
         threading.Thread(
             target=_run_upload_job,
-            args=(store, mid, path, asr_backend, summary_backend, summary_model,
+            args=(store, mid, path, _default_asr(), summary_backend, summary_model,
                   kind, title, transcribe_jobs),
             daemon=True).start()
         return RedirectResponse(f"/m/{mid}", status_code=303)

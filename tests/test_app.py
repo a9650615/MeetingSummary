@@ -195,6 +195,26 @@ def test_persist_speakers_toggle_route(tmp_path):
     assert store.get_setting("persist_speakers") == "0"
 
 
+def test_auto_pipeline_uses_ane_when_toggled(tmp_path, monkeypatch):
+    # ANE toggle on -> the default/auto ASR (no explicit model) routes to the ANE
+    # backend, not just manual dropdown picks.
+    import app
+    import backends
+    calls = []
+    monkeypatch.setattr(app, "_ane_available", lambda: True)
+    monkeypatch.setattr(backends, "make_batch_backend",
+                        lambda model, language=None: calls.append(model) or (lambda p: []))
+    c, store = make_client(tmp_path, asr_backend=lambda p: [])
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    store.set_setting("ane", "1")
+    c.post(f"/meetings/{mid}/transcribe", json={})         # no model -> _default_asr
+    assert "ane-qwen3-0.6b" in calls
+    calls.clear()
+    store.set_setting("ane", "0")
+    c.post(f"/meetings/{mid}/transcribe", json={})         # toggle off -> configured default
+    assert "ane-qwen3-0.6b" not in calls
+
+
 def test_merge_nearby_route(tmp_path):
     c, store = make_client(tmp_path)
     store.create_meeting("A", 1000.0, "zh-TW")
