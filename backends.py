@@ -464,6 +464,74 @@ _ANE_IDS = {
 }
 
 
+_ANE_HELP = {"proc": None, "lock": None}
+
+
+def ane_helper_bin():
+    """Path to the prebuilt Swift ANE live helper, or None. Env QWEN3_ANE_BIN
+    overrides (the .app bundles it elsewhere); else the repo build output."""
+    import os  # noqa: PLC0415
+    p = os.environ.get("QWEN3_ANE_BIN")
+    if p and os.path.exists(p):
+        return p
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.join(here, "swift", "qwen3-ane", ".build", "release", "qwen3-ane")
+    return cand if os.path.exists(cand) else None
+
+
+def ane_live_backend():
+    """Persistent ANE ASR as a live backend. Spawns the Swift helper ONCE (Qwen3-ASR
+    CoreML on the Neural Engine — model loaded once, then warm/fast), and serves each
+    live window over its stdin/stdout protocol: [4-byte BE len][int16-LE 16k PCM] ->
+    JSON {"text":...}. One process, lock-serialized (live runs in a threadpool, dual
+    tracks call concurrently). callable(pcm_bytes) -> [{start,end,text}]."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import struct  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import threading  # noqa: PLC0415
+    if _ANE_HELP["lock"] is None:
+        _ANE_HELP["lock"] = threading.Lock()
+
+    def _ensure():
+        p = _ANE_HELP["proc"]
+        if p is not None and p.poll() is None:
+            return p
+        b = ane_helper_bin()
+        if b is None:
+            raise RuntimeError("qwen3-ane helper not built (build_qwen3_ane.sh)")
+        p = subprocess.Popen([b], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, bufsize=0)
+        for line in p.stderr:  # block until model loaded (first time ~tens of seconds)
+            if b"READY" in line:
+                break
+            if b"failed" in line.lower():
+                p.kill()
+                raise RuntimeError("qwen3-ane load failed: " + line.decode("utf8", "ignore"))
+        threading.Thread(target=lambda: [None for _ in p.stderr], daemon=True).start()  # drain
+        _ANE_HELP["proc"] = p
+        return p
+
+    def _run(audio):
+        import numpy as np  # noqa: PLC0415
+        if isinstance(audio, str):
+            audio = open(audio, "rb").read() if audio.endswith(".pcm") else b""
+        pcm = bytes(audio)
+        if len(pcm) < 640:  # <0.02s -> skip
+            return []
+        with _ANE_HELP["lock"]:
+            p = _ensure()
+            p.stdin.write(struct.pack(">I", len(pcm)) + pcm)
+            p.stdin.flush()
+            line = p.stdout.readline()
+        try:
+            text = (json.loads(line.decode("utf8", "ignore")).get("text") or "").strip()
+        except Exception:
+            text = ""
+        return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
+    return _run
+
+
 def make_batch_backend(model, language=None):
     """Batch/accurate: route to Qwen3-ASR .cpp (fast, Metal, word-aligned) or
     transformers Qwen3-ASR or whisper-MLX. callable(audio_path) -> segments.
