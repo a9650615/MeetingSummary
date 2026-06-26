@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.4.1
+- **修正啟動畫面卡在「啟動中」(其實已啟動)**：bootstrap 啟動splash 原本要先從 `/_setup` 收到 `done=true` 才去檢查 `/health` 重載;但 setup 完成後 bootstrap server 關閉、交棒給真正的伺服器，此時 `/_setup` 失敗 → `_done` 永遠不為真 → 卡在「啟動中」雖然伺服器已起來。改成**每次輪詢先探 `/health`**，真伺服器一接手回 JSON 就重載(交棒競態修掉)。
+
 ## 0.4.0
 - **Live 即時辨識支援 ANE（省電、離 GPU）**：新增常駐 Swift helper `qwen3-ane`（speech-swift Qwen3-ASR CoreML）— 載入一次模型在 Neural Engine，伺服器把每個 live 視窗經 stdin/stdout 餵給它（實測載一次後 warm ~RTF 0.15）。Live 模型下拉在「M 系列 + 已安裝 helper + ANE 開關」時多出「Qwen3-ASR(ANE·省電)」，選了即走 ANE、不燒 GPU。
   - **預編譯發佈**：release CI 編好 helper（含 `mlx.metallib`，runner 有 Xcode metal toolchain）並附上 `qwen3-ane-arm64.tar.gz`；「設定 → 加速 runtime」的 `qwen3-ane` 一鍵下載安裝（免 Xcode），下載不到才退回本機編譯（需 Xcode）。binary + metallib 可攜（僅依系統 framework）。

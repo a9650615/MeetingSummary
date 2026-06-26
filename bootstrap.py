@@ -110,18 +110,21 @@ _PAGE = ("<!doctype html><meta charset=utf-8><title>準備中</title>"
          "<div style='height:100%;width:40%;background:#5b54e6;animation:i 1.2s linear infinite'></div></div>"
          "<pre id=l style='color:#888;font-size:12px;white-space:pre-wrap;margin-top:14px'></pre>"
          "<style>@keyframes i{0%{margin-left:-40%}100%{margin-left:100%}}</style>"
-         "<script>let _done=false;const S=document.getElementById('s'),L=document.getElementById('l');"
+         "<script>const S=document.getElementById('s'),L=document.getElementById('l');"
          "setInterval(async()=>{"
-         "if(!_done){try{let r=await(await fetch('/_setup')).json();"
+         # ALWAYS probe /health first: the moment the real server has taken over the
+         # port (handoff complete) it answers JSON -> reload. The bootstrap server
+         # serves HTML for /health (.json() throws), so this only fires post-handoff.
+         # (Don't gate this on having seen /_setup's done flag — once the bootstrap
+         # server is shut down, /_setup fails and we'd never get here = stuck on 啟動中.)
+         "try{let j=await(await fetch('/health')).json();if(j&&j.status==='ok'){location.reload();return;}}catch(e){}"
+         # still booting -> show setup progress (best-effort; fails after handoff).
+         "try{let r=await(await fetch('/_setup')).json();"
          "if(r.error){S.innerHTML='<b style=color:#e5484d>啟動失敗</b>';"
          "document.getElementById('bar').style.display='none';"
          "L.style.color='#e5484d';L.textContent=r.error;return;}"
-         "S.textContent=r.step;L.textContent=r.line||'';if(r.done)_done=true;"
-         "}catch(e){}return;}"
-         # done -> wait for the REAL server to actually answer /health (JSON) before
-         # reloading, so we never reload into the dead port during handoff.
-         "S.textContent='啟動服務中…';"
-         "try{let j=await(await fetch('/health')).json();if(j&&j.status==='ok')location.reload();}catch(e){}"
+         "S.textContent=r.done?'啟動服務中…':r.step;L.textContent=r.line||'';"
+         "}catch(e){S.textContent='啟動服務中…';}"
          "},800)</script>")
 
 
