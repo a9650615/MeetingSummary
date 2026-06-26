@@ -32,14 +32,17 @@ _STYLE = """
 :root{--bg:#eef1f6;--surface:#fff;--surface2:#f7f8fb;--ink:#11141a;--muted:#6b7384;
  --line:#e4e7ef;--accent:#5b54e6;--accent2:#7c75ff;--accentsoft:#ecebfd;
  --me:#1565c0;--other:#2e7d32;--danger:#e5484d;--ok:#1e9e57;
- --radius:16px;--radius-sm:10px;
- --shadow:0 1px 2px rgba(16,24,40,.05),0 10px 30px -12px rgba(16,24,40,.18);
+ --radius:18px;--radius-sm:11px;--radius-lg:26px;
+ --ease:cubic-bezier(.32,.72,0,1);
+ --shadow:0 .5px 1.5px rgba(16,24,40,.05),0 8px 26px -14px rgba(16,24,40,.22);
+ --shadow-lg:0 1px 2px rgba(16,24,40,.06),0 24px 60px -24px rgba(16,24,40,.3);
  --capbg:#0d1017;--capink:#f3f5fa}
 :root[data-theme=dark]{
  --bg:#0c0e13;--surface:#15181f;--surface2:#1b1f28;--ink:#e9edf4;--muted:#8b93a4;
  --line:#262b36;--accent:#8b85ff;--accent2:#a39dff;--accentsoft:#23223a;
  --me:#6db3ff;--other:#74d99a;--danger:#ff6b6f;
- --shadow:0 1px 2px rgba(0,0,0,.4),0 14px 34px -14px rgba(0,0,0,.6);
+ --shadow:0 .5px 1.5px rgba(0,0,0,.5),0 10px 30px -16px rgba(0,0,0,.7);
+ --shadow-lg:0 1px 2px rgba(0,0,0,.5),0 26px 64px -26px rgba(0,0,0,.8);
  --capbg:#05070b;--capink:#f3f5fa}
 body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
  font:15px/1.62 -apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Segoe UI",Roboto,sans-serif}
@@ -50,11 +53,11 @@ header.top{display:flex;align-items:center;gap:12px;margin:6px 0 22px;position:s
 .brand{font-weight:800;font-size:17px;letter-spacing:-.01em}
 .brand .dot{color:var(--accent)}
 .spacer{flex:1}
-h1{font-size:26px;font-weight:820;letter-spacing:-.025em;margin:.1em 0 .7em}
-h2{font-size:15px;font-weight:750;margin:26px 0 12px;letter-spacing:-.01em}
-h3{font-size:13px;font-weight:750;margin:14px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+h1{font-size:30px;font-weight:800;letter-spacing:-.03em;margin:.1em 0 .6em;line-height:1.15}
+h2{font-size:17px;font-weight:760;margin:28px 0 13px;letter-spacing:-.02em}
+h3{font-size:12px;font-weight:760;margin:14px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
- box-shadow:var(--shadow);padding:20px 22px;margin:14px 0}
+ box-shadow:var(--shadow);padding:22px 24px;margin:16px 0}
 .muted{color:var(--muted)}.small{font-size:13px}
 .row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
 .row label.chk{align-self:center}
@@ -77,11 +80,12 @@ input[type=file]::file-selector-button{font:inherit;font-weight:650;margin-right
  padding:.42em .9em;border:1px solid var(--line);border-radius:8px;background:var(--surface);
  color:var(--ink);cursor:pointer;transition:.13s}
 input[type=file]::file-selector-button:hover{border-color:var(--accent);color:var(--accent)}
-.btn{font:inherit;font-weight:650;padding:.58em 1.05em;border-radius:var(--radius-sm);
+.btn{font:inherit;font-weight:600;padding:.55em 1.05em;border-radius:var(--radius-sm);
  border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;
- transition:.13s;display:inline-block;line-height:1.2}
+ transition:transform .2s var(--ease),border-color .15s,color .15s,filter .15s,box-shadow .15s,background .15s;
+ display:inline-block;line-height:1.25}
 .btn:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
-.btn:active{transform:translateY(0)}
+.btn:active{transform:scale(.96)}
 .btn:disabled{opacity:.45;cursor:not-allowed;transform:none;border-color:var(--line);color:var(--muted)}
 .btn.primary{background:linear-gradient(180deg,var(--accent2),var(--accent));border-color:transparent;
  color:#fff;box-shadow:0 6px 16px -6px var(--accent)}
@@ -134,7 +138,9 @@ ul.meetings.picking .mact{display:none}
 .caption{font-size:clamp(22px,4.2vw,34px);font-weight:800;line-height:1.34;background:var(--capbg);
  color:var(--capink);border-radius:var(--radius);padding:20px 24px;min-height:1.4em;margin:16px 0 8px;
  box-shadow:inset 0 0 0 1px rgba(255,255,255,.05)}
+.caption:empty{display:none}  /* no ugly black bar before the first caption */
 .liveline{color:var(--muted);font-size:17px;min-height:1.5em;margin:6px 2px 14px}
+.liveline:empty{display:none}
 .tline{padding:9px 2px;border-bottom:1px solid var(--line);display:flex;gap:12px}
 .tline:last-child{border:0}
 .tline .ts{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap;padding-top:3px}
@@ -311,52 +317,75 @@ _PROG_JS = (
     "window._jobsTick=tick;tick();})();")
 
 
-# Global quick-record: a floating button on every page (except /live, which has
-# the full controls) that starts a MIC recording in place — so you can capture
-# from anywhere, not just the live page. Self-contained (own ws/AudioContext);
-# system-audio/model/diarize control still lives on /live. No bare // comments
-# (this script ships in the shell, scanned by the single-line-script guard).
+# Global quick-record: a floating button on every page (except /live). Click opens
+# a small options panel (source / live model / record-only); then it captures in
+# place (mic, system, or dual — same 16k box-averaged PCM + tag-byte protocol as
+# /live) over its own ws. Self-contained. No bare // comments (ships in the shell,
+# scanned by the single-line-script guard).
 _REC_JS = (
     "(function(){if(location.pathname==='/live')return;"
-    "let gws=null,gctx=null,gnode=null,gstream=null,t0=0,timer=null;"
+    "let gws=null,gctx=null,nodes=[],streams=[],t0=0,timer=null,open=false;"
     "const fab=document.createElement('div');fab.id='_recfab';"
-    "fab.style.cssText='position:fixed;right:18px;bottom:18px;z-index:300';"
-    "document.body.appendChild(fab);"
+    "fab.style.cssText='position:fixed;right:18px;bottom:18px;z-index:300;display:flex;"
+    "flex-direction:column;align-items:flex-end;gap:8px';document.body.appendChild(fab);"
     "function fmt(s){s=Math.floor(s);return (s/60|0)+':'+('0'+s%60).slice(-2);}"
-    "const RB='border-radius:24px;padding:.6em 1em;box-shadow:0 6px 18px -6px rgba(0,0,0,.5)';"
+    "const RB='border-radius:24px;padding:.6em 1.1em;box-shadow:0 10px 26px -10px rgba(0,0,0,.55)';"
     "const RED='background:#c0392b;border-color:#c0392b;color:#fff;font-weight:700;';"
-    "function render(rec,elsewhere){"
-    "if(rec){fab.innerHTML=`<button class=btn id=_rs style=\"${RED}${RB}\">■ 停止 <span id=_rt>0:00</span></button>`;"
-    "document.getElementById('_rs').onclick=stop;}"
-    "else if(elsewhere){fab.innerHTML=`<a class=btn href=/live style=\"${RED}${RB}\">● 錄音中（前往）</a>`;}"
-    "else{fab.innerHTML=`<button class=btn id=_rstart style=\"${RB}\">● 快速錄音</button>`;"
-    "document.getElementById('_rstart').onclick=start;}}"
-    "async function start(){"
-    "try{gstream=await navigator.mediaDevices.getUserMedia({audio:true});}"
-    "catch(e){alert('無法取得麥克風');return;}"
+    "function panel(){return `<div style=\"background:var(--surface);border:1px solid var(--line);"
+    "border-radius:18px;box-shadow:var(--shadow-lg);padding:14px;width:236px;display:flex;"
+    "flex-direction:column;gap:11px\"><div style=\"font-weight:760;font-size:14px\">快速錄音</div>"
+    "<label class=fld>來源<select id=_rsrc><option value=mic>麥克風(我)</option>"
+    "<option value=system>系統音(對方)</option><option value=dual>兩者</option></select></label>"
+    "<label class=fld>即時模型<select id=_rmodel>"
+    "<option value=\"qwen3-asr-0.6b-q4-k-m\">Qwen3-ASR 0.6B(快)</option>"
+    "<option value=\"mlx-community/whisper-small-mlx-q4\">whisper small(省)</option>"
+    "<option value=\"mlx-community/whisper-large-v3-turbo-q4\">whisper turbo(準)</option></select></label>"
+    "<label class=chk><input type=checkbox id=_rro> 🪫 純錄音(不即時辨識)</label>"
+    "<button class=\"btn primary\" id=_rgo style=\"width:100%\">● 開始錄音</button></div>`;}"
+    "function renderIdle(elsewhere){fab.innerHTML=(open?panel():'')+"
+    "(elsewhere?`<a class=btn href=/live style=\"${RED}${RB}\">● 錄音中（前往）</a>`"
+    ":`<button class=btn id=_rtoggle style=\"${RB}\">● 快速錄音</button>`);"
+    "const tg=document.getElementById('_rtoggle');if(tg)tg.onclick=()=>{open=!open;renderIdle(false);};"
+    "const go=document.getElementById('_rgo');if(go)go.onclick=begin;}"
+    "function renderRec(){open=false;fab.innerHTML=`<button class=btn id=_rstop style=\"${RED}${RB}\">"
+    "■ 停止 <span id=_rt>0:00</span></button>`;document.getElementById('_rstop').onclick=stop;}"
+    "async function begin(){const src=document.getElementById('_rsrc').value;"
+    "const model=document.getElementById('_rmodel').value,ro=document.getElementById('_rro').checked;"
+    "try{if(src==='mic')streams=[await navigator.mediaDevices.getUserMedia({audio:true})];"
+    "else if(src==='system'){const s=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});"
+    "s.getVideoTracks().forEach(t=>t.stop());"
+    "if(!s.getAudioTracks().length){alert('未取得系統音(分享時要勾「分享音訊」)');return;}streams=[s];}"
+    "else{const mic=await navigator.mediaDevices.getUserMedia({audio:true});"
+    "const sys=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});"
+    "sys.getVideoTracks().forEach(t=>t.stop());streams=[mic,sys];}}"
+    "catch(e){alert('無法取得音訊：'+e.message);return;}"
+    "try{await fetch('/models',{method:'POST',headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({live:model})});}catch(e){}"
     "try{gctx=new AudioContext({sampleRate:16000});}catch(e){gctx=new AudioContext();}"
-    "const ratio=gctx.sampleRate/16000;"
-    "gws=new WebSocket(`ws://${location.host}/ws/live?src=mic`);gws.binaryType='arraybuffer';"
-    "gws.onmessage=e=>{};"
-    "gws.onopen=()=>{gnode=gctx.createScriptProcessor(4096,1,1);"
-    "gctx.createMediaStreamSource(gstream).connect(gnode);"
-    "const g=gctx.createGain();g.gain.value=0;gnode.connect(g);g.connect(gctx.destination);"
-    "gnode.onaudioprocess=ev=>{if(!gws||gws.readyState!==1)return;"
+    "const ratio=gctx.sampleRate/16000,dual=(src==='dual');"
+    "gws=new WebSocket(`ws://${location.host}/ws/live?src=${src}${ro?'&record_only=1':''}`);"
+    "gws.binaryType='arraybuffer';"
+    "gws.onopen=()=>{const g=gctx.createGain();g.gain.value=0;g.connect(gctx.destination);"
+    "streams.forEach((st,i)=>{const node=gctx.createScriptProcessor(4096,1,1);"
+    "gctx.createMediaStreamSource(st).connect(node);node.connect(g);const tag=dual?i:null;"
+    "node.onaudioprocess=ev=>{if(!gws||gws.readyState!==1)return;"
     "const inp=ev.inputBuffer.getChannelData(0),outLen=Math.floor(inp.length/ratio),pcm=new Int16Array(outLen);"
-    "for(let i=0;i<outLen;i++){const a=Math.floor(i*ratio),b=Math.floor((i+1)*ratio);let s=0,n=0;"
-    "for(let j=a;j<b&&j<inp.length;j++){s+=inp[j];n++;}"
-    "const v=Math.max(-1,Math.min(1,n?s/n:0));pcm[i]=v*32767;}gws.send(pcm.buffer);};"
-    "t0=Date.now();render(true,false);"
+    "for(let k=0;k<outLen;k++){const a=Math.floor(k*ratio),b=Math.floor((k+1)*ratio);let sm=0,n=0;"
+    "for(let j=a;j<b&&j<inp.length;j++){sm+=inp[j];n++;}"
+    "const v=Math.max(-1,Math.min(1,n?sm/n:0));pcm[k]=v*32767;}"
+    "if(tag===null)gws.send(pcm.buffer);"
+    "else{const bb=new Uint8Array(1+pcm.byteLength);bb[0]=tag;bb.set(new Uint8Array(pcm.buffer),1);gws.send(bb.buffer);}};"
+    "nodes.push(node);});t0=Date.now();renderRec();"
     "timer=setInterval(()=>{const el=document.getElementById('_rt');if(el)el.textContent=fmt((Date.now()-t0)/1000);},1000);};"
     "gws.onclose=()=>cleanup();gws.onerror=()=>cleanup();}"
     "function stop(){if(gws){try{gws.close();}catch(e){}}cleanup();}"
     "function cleanup(){clearInterval(timer);timer=null;"
-    "if(gnode){gnode.onaudioprocess=null;try{gnode.disconnect();}catch(e){}gnode=null;}"
-    "if(gstream){gstream.getTracks().forEach(t=>t.stop());gstream=null;}"
+    "nodes.forEach(n=>{n.onaudioprocess=null;try{n.disconnect();}catch(e){}});nodes=[];"
+    "streams.forEach(s=>s.getTracks().forEach(t=>t.stop()));streams=[];"
     "if(gctx){try{gctx.close();}catch(e){}gctx=null;}gws=null;refresh();}"
-    "async function refresh(){if(gws){render(true,false);return;}"
-    "try{const d=await(await fetch('/detect')).json();render(false,!!d.recording);}catch(e){render(false,false);}}"
-    "refresh();setInterval(()=>{if(!gws)refresh();},10000);})();")
+    "async function refresh(){if(gws){renderRec();return;}"
+    "try{const d=await(await fetch('/detect')).json();renderIdle(!!d.recording);}catch(e){renderIdle(false);}}"
+    "refresh();setInterval(()=>{if(!gws&&!open)refresh();},10000);})();")
 
 
 def _md_html(text):
