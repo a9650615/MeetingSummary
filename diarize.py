@@ -194,6 +194,63 @@ def cluster_embeddings(pcm_path, segments, *, sample_rate=16000, max_secs=12,
     return out
 
 
+def _diar_worker(q, pcm_path, num_speakers, seg_model, emb_model, enroll):
+    """Child-process entry: do ALL the GIL-holding sherpa work here, stream
+    progress/result back over the queue."""
+    try:
+        segs = diarize_pcm(pcm_path, num_speakers=num_speakers, seg_model=seg_model,
+                           emb_model=emb_model, on_progress=lambda d, t: q.put(("p", d, t)))
+        embs = None
+        if enroll:
+            q.put(("phase", "enroll"))
+            try:
+                embs = cluster_embeddings(pcm_path, segs)
+            except Exception as e:  # enroll is best-effort
+                q.put(("warn", f"enroll skipped: {e}"))
+        q.put(("done", segs, embs))
+    except Exception as e:
+        q.put(("err", repr(e)))
+
+
+def diarize_with_progress(pcm_path, *, num_speakers=-1, seg_model=None, emb_model=None,
+                          enroll=False, on_progress=None, on_phase=None):
+    """Diarize in a SUBPROCESS. sherpa's OfflineSpeakerDiarization.process() does
+    NOT release the GIL, so running it in a thread freezes the whole interpreter
+    (incl. the asyncio event loop -> the server can't serve other pages while
+    diarizing). A child process has its own GIL; the parent only blocks on
+    queue.get() (which releases the GIL), so the event loop stays responsive.
+    Returns (segments, embeddings|None). ponytail: spawn-per-call, trivial vs a
+    minutes-long diarization."""
+    import multiprocessing as mp  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    p = ctx.Process(target=_diar_worker, daemon=True,
+                    args=(q, pcm_path, num_speakers, seg_model, emb_model, enroll))
+    p.start()
+    segs, embs = None, None
+    try:
+        while True:
+            msg = q.get()
+            tag = msg[0]
+            if tag == "p" and on_progress:
+                on_progress(msg[1], msg[2])
+            elif tag == "phase" and on_phase:
+                on_phase(msg[1])
+            elif tag == "warn":
+                print(f"diarize: {msg[1]}", file=sys.stderr)
+            elif tag == "done":
+                segs, embs = msg[1], msg[2]
+                break
+            elif tag == "err":
+                raise RuntimeError(msg[1])
+    finally:
+        p.join(timeout=10)
+        if p.is_alive():
+            p.terminate()
+    return segs, embs
+
+
 def match_speaker(emb, known, threshold=0.62):
     """known = [(id, centroid_np)]. Best cosine match >= threshold -> (id, sim),
     else (None, best_sim). Conservative threshold: prefer a new speaker over a

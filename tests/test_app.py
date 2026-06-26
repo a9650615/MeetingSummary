@@ -81,13 +81,12 @@ def test_run_diarize_job_reports_progress_then_done(tmp_path, monkeypatch):
     store.add_transcript(mid, "accurate", "mixed", 0, 1000, "對方", "你好")
     monkeypatch.setattr(app, "_meeting_tracks", lambda s, m: ["mixed"])
     monkeypatch.setattr(app, "_assemble_track", lambda s, m, t: b"\x00\x00")
-    progress = []
-
-    def fake_diar(tmp, num_speakers=-1, seg_model=None, emb_model=None, on_progress=None):
+    def fake_diar(tmp, *, num_speakers=-1, seg_model=None, emb_model=None,
+                  enroll=False, on_progress=None, on_phase=None):
         on_progress(1, 2)
         on_progress(2, 2)  # callback drives the progress dict
-        return [{"start": 0.0, "end": 1.0, "speaker": 0}]
-    monkeypatch.setattr(diar, "diarize_pcm", fake_diar)
+        return [{"start": 0.0, "end": 1.0, "speaker": 0}], None  # (segments, embeddings)
+    monkeypatch.setattr(diar, "diarize_with_progress", fake_diar)
     body = app.DiarizeIn(track="all", enroll=False)  # skip cross-meeting voiceprints
     jobs = {}
     app._run_diarize_job(store, mid, body, jobs)

@@ -1349,17 +1349,14 @@ def _run_diarize_job(store, mid, body, jobs):
 
             names = None
             try:
-                segments = diar.diarize_pcm(tmp, num_speakers=body.num_speakers,
-                                            seg_model=body.seg_model,
-                                            emb_model=body.emb_model,
-                                            on_progress=on_prog)
-                if body.enroll:  # cross-meeting voiceprints (best-effort)
-                    try:
-                        jobs[mid].update(text=f"{pre}{label} 建立聲紋…")
-                        embs = diar.cluster_embeddings(tmp, segments)
-                        names = _persistent_names(store, embs, label)
-                    except Exception as e:
-                        print(f"speaker enroll skipped: {e}", file=sys.stderr)
+                # Runs in a subprocess — sherpa's process() holds the GIL and would
+                # otherwise freeze the event loop (no page switches while diarizing).
+                segments, embs = diar.diarize_with_progress(
+                    tmp, num_speakers=body.num_speakers, seg_model=body.seg_model,
+                    emb_model=body.emb_model, enroll=body.enroll, on_progress=on_prog,
+                    on_phase=lambda ph: jobs[mid].update(text=f"{pre}{label} 建立聲紋…"))
+                if embs:
+                    names = _persistent_names(store, embs, label)
             finally:
                 if os.path.exists(tmp):
                     os.remove(tmp)
