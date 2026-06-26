@@ -161,17 +161,27 @@ pre.sum{white-space:pre-wrap;font:inherit;background:var(--surface2);border:1px 
 audio{filter:saturate(.9)}:root[data-theme=dark] audio{filter:invert(.92) hue-rotate(180deg)}
 .card.sticky{position:sticky;top:60px;z-index:20;backdrop-filter:blur(8px);
  background:color-mix(in srgb,var(--surface) 92%,transparent)}
-.progpop{position:fixed;right:18px;bottom:18px;width:300px;max-width:calc(100vw - 36px);
- background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-sm);
- box-shadow:0 10px 30px rgba(0,0,0,.18);padding:12px 14px;z-index:60}
+.progpop{position:fixed;right:18px;bottom:18px;width:330px;max-width:calc(100vw - 36px);
+ display:flex;flex-direction:column;gap:8px;z-index:200}
 .progpop[hidden]{display:none}
-.progpop .pr-top{display:flex;align-items:center;gap:8px}
-.progpop b{font-size:13px;flex:1}.progpop .pr-x{cursor:pointer;color:var(--muted)}
-.progpop .pr-msg{color:var(--muted);font-size:12px;margin-top:3px}
-.progbar{height:6px;background:var(--surface2);border-radius:999px;overflow:hidden;margin-top:9px}
-.progbar i{display:block;height:100%;width:0;background:var(--accent);border-radius:999px;transition:width .3s}
-.progbar.indet{position:relative}.progbar.indet i{width:38%;animation:prind 1.1s infinite ease-in-out}
-@keyframes prind{0%{margin-left:-38%}100%{margin-left:100%}}
+.pghead{font-size:12px;font-weight:750;color:var(--muted)}
+.pgcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-sm);
+ box-shadow:0 12px 32px -8px rgba(0,0,0,.3);padding:11px 13px;animation:pgin .25s ease}
+@keyframes pgin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.pgline{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.pgkind{font-size:11px;font-weight:750;color:#fff;background:var(--accent);
+ border-radius:999px;padding:.12em .62em;flex:none}
+.pgkind.done{background:#3a9d6e}.pgkind.err{background:#d9534f}
+.pgtitle{font-size:13px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pgmeta{font-size:11px;color:var(--muted);margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pgrow{display:flex;align-items:center;gap:9px}
+.pgbar{flex:1;height:9px;background:var(--surface2);border-radius:999px;overflow:hidden}
+.pgbar i{display:block;height:100%;width:0;border-radius:999px;transition:width .4s ease;
+ background:linear-gradient(90deg,var(--accent2),var(--accent))}
+.pgbar.indet i{width:42%;animation:prind 1.15s infinite ease-in-out}
+.pgbar.done i{background:#3a9d6e}
+.pgpct{font-size:13px;font-weight:800;font-variant-numeric:tabular-nums;min-width:38px;text-align:right}
+@keyframes prind{0%{margin-left:-42%}100%{margin-left:100%}}
 """
 
 
@@ -252,6 +262,35 @@ _DETECT_JS = (
     "_detTick();")
 
 
+# Global progress popout: on EVERY page, polls /jobs (all in-flight transcribe/
+# diarize/summary across meetings) and renders a stack of cards with a prominent
+# progress bar + %. Dispatches a 'meetingjobs' window event each tick so pages can
+# react (home paints row chips; the meeting page reloads / renders on completion).
+# window._jobsTick() forces an immediate poll (buttons call it right after start).
+_PROG_JS = (
+    "(function(){let prev=new Set(),timer=null;"
+    "function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
+    "function card(j){const pct=j.total?Math.round(j.done/j.total*100):null;"
+    "const bar=pct!=null?`<div class=pgbar><i style=\"width:${pct}%\"></i></div>"
+    "<span class=pgpct>${pct}%</span>`:`<div class=\"pgbar indet\"><i></i></div>`;"
+    "return `<div class=pgcard><div class=pgline><span class=pgkind>${esc(j.kind)}</span>"
+    "<span class=pgtitle>${esc(j.title||('#'+j.mid))}</span></div>"
+    "<div class=pgmeta>${esc(j.text||'處理中…')}${j.total?(' · '+j.done+'/'+j.total):''}</div>"
+    "<div class=pgrow>${bar}</div></div>`;}"
+    "function render(jobs){const el=document.getElementById('progpop');if(!el)return;"
+    "if(!jobs.length){el.hidden=true;el.innerHTML='';return;}"
+    "el.hidden=false;el.innerHTML=`<div class=pghead>⏳ ${jobs.length} 項處理中</div>`+jobs.map(card).join('');}"
+    "function key(j){return j.mid+'/'+j.kind;}"
+    "function tick(){fetch('/jobs').then(r=>r.json()).then(d=>{const jobs=d.jobs||[];render(jobs);"
+    "const cur=new Set(jobs.map(key));"
+    "const finished=[...prev].filter(k=>!cur.has(k)),started=[...cur].filter(k=>!prev.has(k));"
+    "prev=cur;"
+    "window.dispatchEvent(new CustomEvent('meetingjobs',{detail:{jobs,finished,started}}));"
+    "schedule(jobs.length?1500:4000);}).catch(()=>schedule(4000));}"
+    "function schedule(ms){clearTimeout(timer);timer=setTimeout(tick,ms);}"
+    "window._jobsTick=tick;tick();})();")
+
+
 def _md_html(text):
     """Minimal, safe Markdown -> HTML (offline, no dep) for changelog + summaries.
     HTML-escapes first, then headings / **bold** / `code` / - and 1. lists / paras."""
@@ -324,8 +363,10 @@ def _shell(title, body, script="", back=False):
         "<button class='btn danger' onclick=_quitApp() title='結束服務' "
         "style='padding:.4em .6em'>⏻</button>"
         f"{nav}</header>{body}</div>"
+        "<div id=progpop class=progpop hidden></div>"
         + (f"<script>{script}</script>" if script else "")
         + f"<script>{_DETECT_JS}</script>"
+        + f"<script>{_PROG_JS}</script>"
         + "</body></html>"
     )
 
@@ -412,24 +453,19 @@ function renderTagbar(){fetch('/tags').then(r=>r.json()).then(j=>{
   bar.querySelectorAll('.tgbtn').forEach(s=>s.onclick=()=>{
     TAGFILTER = TAGFILTER===s.dataset.t ? null : s.dataset.t; renderTagbar(); applyView();});});}
 fetch('/meetings').then(r=>r.json()).then(ms=>{ALL=ms;applyView();renderTagbar();paintJobs();});
-let JOBS={}, prevRun=new Set();
+let JOBS={};
 function jobChip(j){const pct=j.total?' '+Math.round(j.done/j.total*100)+'%':'';
   return `<span class="badge live" title="${esc(j.text||'')}" style="margin-left:6px">⏳ ${esc(j.kind)}${pct}</span>`;}
 function paintJobs(){document.querySelectorAll('.mjob').forEach(s=>{
   const j=JOBS[+s.dataset.id];s.innerHTML=j?jobChip(j):'';});
   const n=Object.keys(JOBS).length,h=document.getElementById('jobhdr');
   if(h){h.style.display=n?'inline-block':'none';h.textContent='⏳ '+n+' 場處理中';}}
-function pollJobs(){fetch('/jobs').then(r=>r.json()).then(d=>{
-  const cur={};(d.jobs||[]).forEach(j=>{cur[j.mid]=j;});
-  const curSet=new Set(Object.keys(cur).map(Number));
-  const have=new Set(ALL.map(m=>m.id));
-  let refresh=[...curSet].some(id=>!have.has(id));
-  prevRun.forEach(id=>{if(!curSet.has(id))refresh=true;});
-  JOBS=cur;prevRun=curSet;
-  if(refresh)fetch('/meetings').then(r=>r.json()).then(ms=>{ALL=ms;applyView();renderTagbar();paintJobs();});
+window.addEventListener('meetingjobs',e=>{
+  const cur={};(e.detail.jobs||[]).forEach(j=>{cur[j.mid]=j;});JOBS=cur;
+  if(e.detail.finished.length||e.detail.started.length)
+    fetch('/meetings').then(r=>r.json()).then(ms=>{ALL=ms;applyView();renderTagbar();paintJobs();});
   else paintJobs();
-}).catch(()=>{});}
-setInterval(pollJobs,2500);pollJobs();
+});
 let tmr; const qel=document.getElementById('q');
 qel.oninput=()=>{clearTimeout(tmr);const q=qel.value.trim();
   if(!q){applyView();return;}
@@ -1493,11 +1529,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         "<button class=btn id=retr>重新語音辨識</button>"
         "<span class='muted small' id=remsg></span></div>"
         "<table class=tx><tr><th>時間</th><th>說話者</th><th>內容</th></tr>"
-        f"{rows}</table></div>"
-        "<div id=progpop class=progpop hidden>"
-        "<div class=pr-top><b id=progname>處理中</b><span class=pr-x id=progx>✕</span></div>"
-        "<div class=pr-msg id=progmsg></div>"
-        "<div class=progbar><i id=progfill></i></div></div>")
+        f"{rows}</table></div>")
     script = (
         "function _mdEsc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
         "function _mdHtml(t){const L=(t||'').split('\\n');let o=[],lt=null;"
@@ -1520,61 +1552,28 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         f"const r=await fetch('/meetings/{mid}',{{method:'DELETE'}});"
         "if(r.ok)location.href='/';"
         "else document.getElementById('finmsg').textContent=' 刪除失敗';};"
-        # All async jobs (語音辨識/分群/摘要) report through ONE shared floating
-        # popout (Prog) driven by ONE generic poller (pollJob). Progress is
-        # server-side, so a refresh resumes the running job; pollJob acts (render /
-        # reload) only on a job we started or saw running, never a stale done.
-        "const Prog={"
-        "el(){return document.getElementById('progpop');},"
-        "run(name,msg,done,total){const e=this.el();e.hidden=false;"
-        "document.getElementById('progname').textContent=name;"
-        "document.getElementById('progmsg').textContent=(msg||'處理中…')+(total?' '+(done||0)+'/'+total:'');"
-        "const b=e.querySelector('.progbar'),f=document.getElementById('progfill');"
-        "if(total){b.classList.remove('indet');f.style.width=Math.round((done||0)/total*100)+'%';}"
-        "else{b.classList.add('indet');f.style.width='38%';}},"
-        "done(name,msg){const e=this.el();document.getElementById('progname').textContent=name;"
-        "e.querySelector('.progbar').classList.remove('indet');"
-        "document.getElementById('progfill').style.width='100%';"
-        "document.getElementById('progmsg').textContent=msg||'完成';"
-        "setTimeout(()=>{e.hidden=true;},2600);},"
-        "error(name,msg){const e=this.el();e.hidden=false;"
-        "document.getElementById('progname').textContent=name;"
-        "document.getElementById('progmsg').textContent='失敗: '+(msg||'');},"
-        "hide(){const e=this.el();if(e)e.hidden=true;}};"
-        "document.getElementById('progx').onclick=()=>Prog.hide();"
-        "function pollJob(name,url,opts){opts=opts||{};let timer=null,seen=false;"
-        "function tick(active){if(active)seen=true;"
-        "fetch(url).then(r=>r.json()).then(p=>{"
-        "if(p.state==='running'){seen=true;Prog.run(name,p.text,p.done,p.total);"
-        "if(!timer)timer=setInterval(()=>tick(false),1000);return;}"
-        "if(timer){clearInterval(timer);timer=null;}"
-        "if(p.state==='error'){Prog.error(name,p.msg);return;}"
-        "if(p.state==='done'&&seen){seen=false;"
-        "const m=opts.onDone?opts.onDone(p):null;Prog.done(name,m||'完成');"
-        "if(opts.reload)setTimeout(()=>location.reload(),700);}"
-        "else Prog.hide();});}"
-        "tick(false);return ()=>tick(true);}"
-        f"const tProg=pollJob('語音辨識','/meetings/{mid}/transcribe/progress',"
-        "{reload:true,onDone:p=>'完成 '+(p.done||0)+' 段'});"
+        # Async jobs (辨識/分群/摘要) DISPLAY in the global progress popout (_shell).
+        # Buttons just start the job + force an immediate global poll. The page only
+        # handles side-effects on completion, via the 'meetingjobs' window event:
+        # reload for transcribe/diarize (new rows/labels), render inline for summary.
+        "const _kick=()=>window._jobsTick&&window._jobsTick();"
         "document.getElementById('retr').onclick=()=>{"
         "const mdl=document.getElementById('remodel').value,lng=document.getElementById('relang').value;"
         f"fetch('/meetings/{mid}/transcribe/start',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({model:mdl,language:lng})})"
-        ".then(()=>tProg());};"
-        f"const dProg=pollJob('多人分群','/meetings/{mid}/diarize/progress',"
-        "{reload:true,onDone:p=>'分出 '+(p.speakers||0)+' 位說話者'});"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({model:mdl,language:lng})}).then(_kick);};"
         "document.getElementById('dia').onclick=()=>{const ov=localStorage.getItem('exp_overlap')==='1';"
         f"fetch('/meetings/{mid}/diarize',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all',mark_overlap:ov})})"
-        ".then(()=>dProg());};"
-        f"const sProg=pollJob('產生摘要','/meetings/{mid}/summary/progress',"
-        "{reload:false,onDone:p=>{const o=document.getElementById('out');"
-        "o.innerHTML='<div class=md>'+_mdHtml(p.text)+'</div>';"
-        "if(p.title)document.getElementById('mtitle').textContent=p.title;return '摘要完成';}});"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all',mark_overlap:ov})}).then(_kick);};"
         "document.getElementById('go').onclick=()=>{const k=document.getElementById('kind').value;"
         f"fetch('/meetings/{mid}/summary',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k})})"
-        ".then(()=>sProg());};"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k})}).then(_kick);};"
+        "window.addEventListener('meetingjobs',e=>{for(const k of e.detail.finished){"
+        f"const pp=k.split('/');if(+pp[0]!=={mid})continue;"
+        "if(pp[1]==='摘要'){"
+        f"fetch('/meetings/{mid}/summary/progress').then(r=>r.json()).then(s=>{{"
+        "if(s.state==='done'){document.getElementById('out').innerHTML='<div class=md>'+_mdHtml(s.text)+'</div>';"
+        "if(s.title)document.getElementById('mtitle').textContent=s.title;}});}"
+        "else{setTimeout(()=>location.reload(),700);}}});"
         # Player for a row: its own track, else the single (unified mixed) player.
         "const onlyAudio=document.querySelector('audio[id^=aud-]');"
         "function rowAudio(trk){return document.getElementById('aud-'+trk)||onlyAudio;}"
@@ -2366,8 +2365,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
                          ("摘要", summary_jobs)):
             for mid, j in list(jd.items()):
                 if j.get("state") == "running":
+                    m = store.get_meeting(mid)
                     out.append({"mid": mid, "kind": kind, "done": j.get("done", 0),
-                                "total": j.get("total", 0), "text": j.get("text", "")})
+                                "total": j.get("total", 0), "text": j.get("text", ""),
+                                "title": m["title"] if m else None})
         return {"jobs": out}
 
     return app

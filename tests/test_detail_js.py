@@ -26,8 +26,8 @@ def test_no_line_comments_in_any_script_with_audio():
     for js in re.findall(r"<script>(.*?)</script>", html, re.S):
         cleaned = re.sub(r"\w+://", "", js)
         assert "//" not in cleaned, "bare // comment breaks the single-line script"
-    assert "function pollJob(" in html and "id=progpop" in html
-    assert "summary/progress" in html and "diarize/progress" in html
+    assert "id=progpop" in html and "_jobsTick" in html  # global progress popout
+    assert "addEventListener('meetingjobs'" in html       # page reacts to job events
 
 
 def test_md_html_renders_and_escapes():
