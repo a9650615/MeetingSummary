@@ -10,19 +10,51 @@ _INSTRUCTION = {
                "待辦行動(含負責人與期限)。",
     "bullets": "請將以下會議逐字稿整理成條列式重點。",
     "actions": "請只從以下會議逐字稿擷取三類並分區塊輸出:\n"
-               "【行動項目】每條格式「- [負責人] 事項 (期限,無則寫 待定)」\n"
+               "【行動項目】每條格式「- [負責人,逐字稿沒明說是誰就寫 未指定] 事項 "
+               "(期限,沒提到就寫 未定)」\n"
                "【決議】條列已拍板的決定\n"
                "【待解問題】條列尚未解決或待追蹤的問題\n"
                "某類若無內容寫「無」。除這三區塊外不要加其他敘述。",
 }
 
 
-# Small models invent plausible names/owners/deadlines (e.g. 小明/小紅) that were
-# never said. Hard rule up front + explicit fallbacks cut most of it.
+# Small models invent plausible names/owners/deadlines (e.g. 小明/小紅/小米) that
+# were never said. Hard rule up front + explicit fallbacks cut most of it; the
+# deterministic _ground() pass catches the rest.
 _GUARD = ("嚴格規則:只能根據下方逐字稿的內容,絕對不可杜撰任何人名、數字、日期、期限或"
-          "未提及的事項。逐字稿沒提到負責人就寫「未指定」,沒提到期限就寫「未定」。"
+          "未提及的事項。**逐字稿裡沒出現過的人名一律不准寫**(例如不可憑空寫出 小明/"
+          "小米 這種沒講過的名字),不知道負責人就寫「未指定」,沒提到期限/時間就寫「未定」。"
           "忽略明顯與會議無關、亂碼、或像影片片頭/字幕台詞的內容(例如『優優獨播劇場』"
           "之類辨識雜訊),不要納入摘要。寧可少寫,也不要編造。\n")
+
+_GROUND_FALLBACK = {"未指定", "未定", "待定", "無", "未提及", "tbd", "n/a", "-", "—"}
+
+
+def _ground(out, transcript):
+    """Deterministic anti-fabrication backstop. A value the summary assigns to a
+    負責人 / 期限 / 時間 / 日期 field that appears NOWHERE in the transcript was
+    invented by the model (the 小米 / 當天 case) -> replace with the safe fallback.
+    A name/time actually said in the meeting is in the transcript, so it's kept."""
+    import re  # noqa: PLC0415
+    t = transcript or ""
+
+    def made_up(val):
+        v = val.strip(" 　()（）[]「」『』,，。、;；")
+        return bool(v) and v.lower() not in _GROUND_FALLBACK and v not in t
+
+    def label(fallback):
+        def f(m):
+            return m.group("pre") + fallback if made_up(m.group("v")) else m.group(0)
+        return f
+
+    out = re.sub(r"(?P<pre>負責人[:：]\s*)(?P<v>[^\s,，。;；]+)", label("未指定"), out)
+    out = re.sub(r"(?P<pre>(?:期限|截止|時間|日期|舉行時間)[:：]\s*)(?P<v>[^\s,，。;；]+)",
+                 label("未定"), out)
+    # actions bracket owner: "- [小米] 事項"
+    out = re.sub(r"(?P<pre>^[-*]\s*\[)(?P<v>[^\]]+)\]",
+                 lambda m: m.group(0) if not made_up(m.group("v"))
+                 else m.group("pre") + "未指定]", out, flags=re.M)
+    return out
 
 
 def build_prompt(text, *, kind, lang):
@@ -70,10 +102,11 @@ def _chunk(text, max_chars):
 
 def summarize(text, *, kind, lang, backend, max_chars=24000):
     if len(text) <= max_chars:
-        return _post(backend(build_prompt(text, kind=kind, lang=lang)), lang)
+        out = _ground(backend(build_prompt(text, kind=kind, lang=lang)), text)
+        return _post(out, lang)
     # map: summarize each chunk; reduce: summarize the joined chunk summaries.
     partials = [
-        backend(build_prompt(c, kind=kind, lang=lang))
+        _ground(backend(build_prompt(c, kind=kind, lang=lang)), c)
         for c in _chunk(text, max_chars)
     ]
     return summarize("\n".join(partials), kind=kind, lang=lang,

@@ -1,4 +1,23 @@
-from summarize import summarize, build_prompt, _dedup_lines
+from summarize import summarize, build_prompt, _dedup_lines, _ground
+
+
+def test_ground_replaces_fabricated_owner_and_time():
+    transcript = "我: 我們來討論 SIT 的進度\n對方: 好"
+    out = "待辦行動:\n1. 負責人: 小米\n2. 舉行時間: 當天"
+    g = _ground(out, transcript)
+    assert "小米" not in g and "當天" not in g       # neither was in the transcript
+    assert "負責人: 未指定" in g and "舉行時間: 未定" in g
+
+
+def test_ground_keeps_names_actually_said():
+    transcript = "我: 這個給 Michael 處理\n對方: 好,期限 週五"
+    out = "- 負責人: Michael 事項\n期限: 週五"
+    assert _ground(out, transcript) == out          # both present -> untouched
+
+
+def test_ground_blanks_fabricated_bracket_owner():
+    g = _ground("- [小米] 提交報告", "我: 提交報告")
+    assert g == "- [未指定] 提交報告"
 
 
 def test_dedup_collapses_repeated_numbered_loop():
