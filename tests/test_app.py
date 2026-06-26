@@ -414,3 +414,17 @@ def test_nonmatch_dismisses_suggestion(tmp_path):
     assert c.get("/speakers/suggestions").json()["pairs"]  # suggested first
     c.post("/speakers/nonmatch", json={"keep": "Bob", "drop": "Alice"})  # any order
     assert c.get("/speakers/suggestions").json()["pairs"] == []  # gone
+
+
+def test_storage_report(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("big", 1.0, "zh-TW")
+    d = tmp_path / "data" / f"{mid}-1"
+    d.mkdir(parents=True)
+    (d / "mic.pcm").write_bytes(b"\x00" * 4096)
+    store.add_segment(mid, idx=0, dir_path=str(d), started_at=1.0, duration_s=0, origin="recorded")
+    j = c.get("/storage").json()
+    assert j["total"] >= 4096
+    assert any(m["id"] == mid and m["bytes"] >= 4096 for m in j["meetings"])
+    assert len(j["categories"]) == 4

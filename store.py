@@ -49,6 +49,7 @@ class Store:
         # ponytail: single shared connection across FastAPI's threadpool;
         # sqlite serializes writes by default. Per-request connections only
         # if write contention ever shows up (single-user local app — unlikely).
+        self.db_path = str(db_path)
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)

@@ -676,6 +676,7 @@ def _models_page():
         "<nav class=subnav>"
         "<a href='#sec-sys'>系統 · 更新</a>"
         "<a href='#sec-models'>模型</a>"
+        "<a href='#sec-data'>資料管理</a>"
         "<a href='#sec-rt'>加速 runtime</a>"
         "<a href='#sec-exp'>實驗性功能</a></nav>"
 
@@ -696,6 +697,17 @@ def _models_page():
         "<table class=tx id=sup><tr><th>模型</th><th>大小</th><th></th></tr></table></div>"
         "<div class=card><h3 style='margin:0 0 8px;font-size:13px;color:var(--muted)'>其他快取</h3>"
         "<table class=tx id=oth><tr><th>名稱</th><th>大小</th><th></th></tr></table></div></section>"
+
+        "<section id=sec-data><h2>資料管理</h2>"
+        "<div class=card>"
+        "<div class=setrow style='margin-bottom:10px'><b>總用量</b>"
+        "<span id=stotal class=muted>計算中…</span></div>"
+        "<table class=tx id=stcat><tr><th>類別</th><th>大小</th></tr></table>"
+        "<h3 style='margin:14px 0 6px;font-size:13px;color:var(--muted)'>最大的會議（音檔）</h3>"
+        "<table class=tx id=stmtg><tr><th>會議</th><th>大小</th></tr></table>"
+        "<p class=hint style='margin:.6em 0 0'>音檔（16k PCM）是主要佔空間來源；"
+        "刪除會議會一併清掉其音檔。模型權重請到上方「模型」管理。</p>"
+        "</div></section>"
 
         "<section id=sec-exp><h2>🧪 實驗性功能</h2>"
         "<div class=card>"
@@ -807,6 +819,28 @@ def _models_page():
     (function(){const d=document.getElementById('denoise_opt');if(!d)return;
       fetch('/settings/denoise').then(r=>r.json()).then(j=>d.checked=j.value==='1');
       d.onchange=()=>fetch('/settings/denoise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:d.checked?'1':'0'})});})();
+    function fmtB(b){if(b>=1e9)return (b/1e9).toFixed(2)+' GB';
+      if(b>=1e6)return (b/1e6).toFixed(1)+' MB';
+      if(b>=1e3)return (b/1e3).toFixed(0)+' KB';return b+' B';}
+    async function loadStorage(){
+      const j=await(await fetch('/storage')).json();
+      document.getElementById('stotal').textContent=fmtB(j.total);
+      const ct=document.getElementById('stcat');
+      ct.querySelectorAll('tr:not(:first-child)').forEach(r=>r.remove());
+      (j.categories||[]).forEach(c=>{const tr=document.createElement('tr');
+        tr.innerHTML='<td>'+esc(c.label)+'</td><td>'+fmtB(c.bytes)+'</td>';ct.appendChild(tr);});
+      const mt=document.getElementById('stmtg');
+      mt.querySelectorAll('tr:not(:first-child)').forEach(r=>r.remove());
+      const ms=j.meetings||[];
+      if(!ms.length){const tr=document.createElement('tr');
+        tr.innerHTML='<td colspan=2 class=muted>沒有錄音資料</td>';mt.appendChild(tr);}
+      ms.forEach(m=>{const a=document.createElement('a');a.href='/m/'+m.id;
+        a.textContent=m.title||('#'+m.id);
+        const t1=document.createElement('td');t1.appendChild(a);
+        const t2=document.createElement('td');t2.textContent=fmtB(m.bytes);
+        const tr=document.createElement('tr');tr.appendChild(t1);tr.appendChild(t2);mt.appendChild(tr);});
+    }
+    loadStorage();
     load();
     """
     return _shell("設定", body, script=script, back=True)
@@ -2873,6 +2907,45 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # "不是同一人" — remember the pair so it stops being suggested.
         store.add_speaker_nonmatch(body.keep.strip(), body.drop.strip())
         return {"ok": True}
+
+    @app.get("/storage")
+    def storage():
+        # Disk usage of app-generated data, so you can see what's eating space.
+        def dsize(p):
+            if not p or not os.path.exists(p):
+                return 0
+            if os.path.isfile(p):
+                try:
+                    return os.path.getsize(p)
+                except OSError:
+                    return 0
+            tot = 0
+            for root, _d, files in os.walk(p):
+                for f in files:
+                    try:
+                        tot += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+            return tot
+        db_b = dsize(store.db_path)
+        data_b = dsize("data")
+        # db often lives under data/ -> don't double-count it in the data category
+        if os.path.abspath(store.db_path).startswith(os.path.abspath("data") + os.sep):
+            data_b = max(0, data_b - db_b)
+        cats = [
+            {"label": "錄音／逐字稿音檔 (data/)", "bytes": data_b},
+            {"label": "資料庫", "bytes": db_b},
+            {"label": "語音模型 (models/)", "bytes": dsize("models")},
+            {"label": "MLX 模型 (mlx_models/)", "bytes": dsize("mlx_models")},
+        ]
+        meetings = []
+        for m in store.list_meetings():
+            b = sum(dsize(s["dir_path"]) for s in store.list_segments(m["id"]))
+            if b:
+                meetings.append({"id": m["id"], "title": m["title"], "bytes": b})
+        meetings.sort(key=lambda x: -x["bytes"])
+        return {"categories": cats, "total": sum(c["bytes"] for c in cats),
+                "meetings": meetings[:12]}
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
                  "denoise": "0"}
