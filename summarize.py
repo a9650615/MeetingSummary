@@ -57,8 +57,10 @@ def _ground(out, transcript):
     return out
 
 
-def build_prompt(text, *, kind, lang):
-    return f"{_GUARD}{_INSTRUCTION[kind]}\n輸出語言:{lang}\n\n逐字稿:\n{text}"
+def build_prompt(text, *, kind, lang, notes=""):
+    ref = (f"\n\n使用者現場筆記（可信參考，優先採用其中的人名、日期、決議）:\n{notes.strip()}"
+           if notes and notes.strip() else "")
+    return f"{_GUARD}{_INSTRUCTION[kind]}\n輸出語言:{lang}{ref}\n\n逐字稿:\n{text}"
 
 
 def _dedup_lines(out):
@@ -100,17 +102,20 @@ def _chunk(text, max_chars):
     return chunks
 
 
-def summarize(text, *, kind, lang, backend, max_chars=24000):
+def summarize(text, *, kind, lang, backend, max_chars=24000, notes=""):
+    # Notes are user-provided ground truth: pass to _ground as valid source so a
+    # name/date the user typed isn't scrubbed as "fabricated".
+    ground = text + ("\n" + notes if notes else "")
     if len(text) <= max_chars:
-        out = _ground(backend(build_prompt(text, kind=kind, lang=lang)), text)
+        out = _ground(backend(build_prompt(text, kind=kind, lang=lang, notes=notes)), ground)
         return _post(out, lang)
     # map: summarize each chunk; reduce: summarize the joined chunk summaries.
     partials = [
-        _ground(backend(build_prompt(c, kind=kind, lang=lang)), c)
+        _ground(backend(build_prompt(c, kind=kind, lang=lang, notes=notes)), c + "\n" + notes)
         for c in _chunk(text, max_chars)
     ]
     return summarize("\n".join(partials), kind=kind, lang=lang,
-                     backend=backend, max_chars=max_chars)
+                     backend=backend, max_chars=max_chars, notes=notes)
 
 
 def mlx_lm_backend(model="mlx-community/Qwen2.5-14B-Instruct-4bit", max_tokens=1024):

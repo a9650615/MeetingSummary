@@ -57,3 +57,13 @@ def test_prompt_reflects_kind_and_lang():
     assert "決議" in build_prompt("hi", kind="minutes", lang="zh-TW")
     assert "條列" in build_prompt("hi", kind="bullets", lang="zh-TW")
     assert "zh-TW" in build_prompt("hi", kind="minutes", lang="zh-TW")
+
+
+def test_notes_injected_and_exempt_from_grounding():
+    from summarize import build_prompt, _ground
+    p = build_prompt("逐字稿", kind="minutes", lang="zh-TW", notes="負責人 Amy；7/3 交稿")
+    assert "使用者現場筆記" in p and "Amy" in p
+    # a name present only in the notes must survive grounding (it's user truth)
+    assert "Amy" in _ground("負責人:Amy", "逐字稿無名\n負責人 Amy")
+    # but a name in neither transcript nor notes is still scrubbed
+    assert "Amy" not in _ground("負責人:Amy", "逐字稿無名")

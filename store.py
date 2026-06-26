@@ -51,6 +51,16 @@ class Store:
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
+        # ponytail: idempotent column add for DBs created before notes existed.
+        try:
+            self.db.execute("ALTER TABLE meetings ADD COLUMN notes TEXT DEFAULT ''")
+            self.db.commit()
+        except sqlite3.OperationalError:
+            pass  # column already present
+
+    def set_notes(self, meeting_id, notes):
+        self.db.execute("UPDATE meetings SET notes=? WHERE id=?", (notes, meeting_id))
+        self.db.commit()
 
     def _insert(self, sql, params):
         cur = self.db.execute(sql, params)

@@ -70,3 +70,11 @@ def test_list_unfinalized_for_recovery(tmp_path):
     s.finalize_meeting(done)
     ids = [m["id"] for m in s.list_unfinalized()]
     assert live in ids and done not in ids
+
+
+def test_set_notes_roundtrip(tmp_path):
+    s = _store(tmp_path)
+    mid = s.create_meeting(title="m", created_at=1.0, lang="zh-TW")
+    assert (s.get_meeting(mid)["notes"] or "") == ""  # default empty
+    s.set_notes(mid, "負責人 Amy")
+    assert s.get_meeting(mid)["notes"] == "負責人 Amy"

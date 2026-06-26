@@ -817,6 +817,13 @@ _LIVE_BODY = """
     <span id=curmodel></span> · 精校:<b id=accmodel>-</b><br>
     系統音/兩者會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>;兩者建議戴耳機。模型可即時切換,免重啟。</p>
 </div>
+<div class=panel style="margin-top:10px">
+  <label style="font-weight:600">📝 現場筆記
+    <span class="muted small" style="font-weight:400">— 邊開會邊記，會成為摘要的可信參考（人名／日期／決議）</span></label>
+  <textarea id=notes rows=3 placeholder="例：負責人 Amy、下次 7/3 前交初稿…（自動儲存）"
+    style="width:100%;box-sizing:border-box;margin-top:6px;font:inherit;padding:8px;border-radius:8px"></textarea>
+  <span class="muted small" id=notestatus></span>
+</div>
 <div class=caption id=caption></div>
 <div class=liveline id=live></div>
 <div class=tlist id=transcript></div>
@@ -831,6 +838,16 @@ const C=document.getElementById('caption'), L=document.getElementById('live');
 const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
 const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
 const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
+const notesEl=document.getElementById('notes'), noteStat=document.getElementById('notestatus');
+let noteTimer;
+function saveNotes(){
+  if(!mid||!notesEl) return;  // no meeting yet -> buffered locally, flushed on 'meeting'
+  fetch('/meetings/'+mid+'/notes',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({value:notesEl.value})})
+    .then(()=>{noteStat.textContent='已儲存';setTimeout(()=>noteStat.textContent='',1500);})
+    .catch(()=>{noteStat.textContent='儲存失敗';});
+}
+if(notesEl) notesEl.addEventListener('input',()=>{clearTimeout(noteTimer);noteTimer=setTimeout(saveNotes,800);});
 
 function showModels(m){
   curModel.textContent = '(目前 '+(m.live||'-').split('/').pop()+')';
@@ -931,7 +948,8 @@ startBtn.onclick = async () => {
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
     if(m.type==='meeting'){ mid=m.id; session=m.id;  // bind session to this meeting
-      S.textContent=' session #'+mid+' 錄製中…'; }
+      S.textContent=' session #'+mid+' 錄製中…';
+      if(notesEl&&notesEl.value) saveNotes(); }  // flush notes typed before record
     else if(m.type==='interim'){
       const sp=m.speaker||'';
       C.textContent = m.text;                       // caption: words only
@@ -964,9 +982,11 @@ startBtn.onclick = async () => {
 document.getElementById('newsess').onclick = () => {
   session=null; mid=null;       // next 開始 starts a fresh session
   T.innerHTML=''; L.textContent=''; C.textContent='';
+  if(notesEl){notesEl.value=''; noteStat.textContent='';}
   S.textContent=' 已開新 session';
 };
 stopBtn.onclick = () => {
+  clearTimeout(noteTimer); saveNotes();  // flush any pending notes edit
   nodes.forEach(n=>n.disconnect()); nodes=[];
   streams.forEach(st => st.getTracks().forEach(t=>t.stop()));
   if(ws) ws.close();
@@ -1587,7 +1607,8 @@ def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs):
             jobs[mid] = {"state": "error", "msg": "meeting not found"}
             return
         text = _transcript_text(store.list_transcripts(mid))
-        out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend)
+        out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend,
+                        notes=(meeting["notes"] or ""))
         store.add_summary(mid, kind, meeting["lang"], out, summary_model, time.time())
         title = None
         if _is_default_title(meeting["title"]):
@@ -1621,7 +1642,8 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
         jobs[mid].update(done=len(segs), total=len(segs), text="產生摘要中…")
         meeting = store.get_meeting(mid)
         text = _transcript_text(store.list_transcripts(mid))
-        out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend)
+        out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend,
+                        notes=(meeting["notes"] or ""))
         store.add_summary(mid, kind, meeting["lang"], out, summary_model, time.time())
         if _is_default_title(title):
             nt = _auto_title(out, summary_backend)
@@ -1669,6 +1691,11 @@ _TRACK_LABEL = {"system": "對方", "mic": "我", "mixed": "混合"}
 
 def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
                  recognized=(), ane_on=False):
+    try:
+        m_notes = meeting["notes"] or ""
+    except (KeyError, IndexError):  # older row / test stub without the column
+        m_notes = ""
+
     def ts_str(ms):
         s = (ms or 0) // 1000
         return f"{s // 60:d}:{s % 60:02d}"
@@ -1702,6 +1729,11 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
             + " <a href='/speakers/manage'>管理語者</a></div>") if recognized else "")
         + audio_card +
         "<div class=card><h2 style='margin-top:0'>摘要</h2>"
+        "<label class='muted small'>📝 筆記（摘要的可信參考：人名／日期／決議，自動儲存）</label>"
+        "<textarea id=mnotes rows=2 placeholder='補充重點…' "
+        "style='width:100%;box-sizing:border-box;font:inherit;padding:8px;"
+        "border-radius:8px;margin:.2em 0 .6em'>"
+        f"{html.escape(m_notes)}</textarea>"
         "<div class=row>"
         "<select id=kind><option value=minutes>會議記錄</option>"
         "<option value=bullets>條列</option>"
@@ -1784,9 +1816,16 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "document.getElementById('dia').onclick=()=>{const ov=localStorage.getItem('exp_overlap')==='1';"
         f"fetch('/meetings/{mid}/diarize',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all',mark_overlap:ov})}).then(_kick);};"
+        "(function(){const n=document.getElementById('mnotes');if(!n)return;let t;"
+        f"const save=()=>fetch('/meetings/{mid}/notes',{{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({value:n.value})});"
+        "n.addEventListener('input',()=>{clearTimeout(t);t=setTimeout(save,800);});"
+        "window._saveNotes=save;})();"
         "document.getElementById('go').onclick=()=>{const k=document.getElementById('kind').value;"
+        # flush notes FIRST so the summary uses them, then kick the summary job
+        "Promise.resolve(window._saveNotes?window._saveNotes():0).then(()=>"
         f"fetch('/meetings/{mid}/summary',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k})}).then(_kick);};"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k})}).then(_kick));};"
         "window.addEventListener('meetingjobs',e=>{for(const k of e.detail.finished){"
         f"const pp=k.split('/');if(+pp[0]!=={mid})continue;"
         "if(pp[1]==='摘要'){"
@@ -2589,6 +2628,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.get("/meetings/{mid}/summary/progress")
     def summary_progress(mid: int):
         return summary_jobs.get(mid, {"state": "idle"})
+
+    @app.post("/meetings/{mid}/notes")
+    def set_notes_route(mid: int, body: SettingIn):
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        store.set_notes(mid, body.value)
+        return {"ok": True}
 
     @app.post("/meetings/{mid}/finalize")
     def finalize_meeting(mid: int):
