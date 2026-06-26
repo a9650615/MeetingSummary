@@ -154,6 +154,21 @@ def test_detail_shows_recognized_cross_meeting_speaker(tmp_path):
     assert "本場認得" in html and "張三" in html  # cross-meeting recognition surfaced
 
 
+def test_speaker_sample_wav(tmp_path):
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("M", 1.0, "zh-TW")
+    seg = tmp_path / "seg"
+    seg.mkdir()
+    (seg / "mic.pcm").write_bytes(b"\x11\x11" * 16000 * 5)  # 5s nonzero
+    store.add_segment(mid, idx=0, dir_path=str(seg),
+                      started_at=store.get_meeting(mid)["created_at"],
+                      duration_s=5, origin="recorded")
+    store.add_transcript(mid, "accurate", "mic", 1000, 4000, "張三", "hi")  # 3s span
+    r = c.get("/speakers/張三/sample.wav")
+    assert r.status_code == 200 and r.headers["content-type"] == "audio/wav" and r.content
+    assert c.get("/speakers/nobody/sample.wav").status_code == 404  # no utterance span
+
+
 def test_speaker_suggestions_route(tmp_path):
     import struct
     c, store = make_client(tmp_path)

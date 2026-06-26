@@ -230,6 +230,14 @@ class Store:
         self.db.execute("DELETE FROM speakers WHERE id=?", (speaker_id,))
         self.db.commit()
 
+    def speaker_best_span(self, name, min_ms=800):
+        """Longest single utterance for a speaker (audio preview / 試聽). Returns
+        (meeting_id, track, start_ms, end_ms) or None if none has a real duration."""
+        return self.db.execute(
+            "SELECT meeting_id, track, start_ms, end_ms FROM transcripts "
+            "WHERE speaker=? AND end_ms > start_ms + ? "
+            "ORDER BY (end_ms - start_ms) DESC LIMIT 1", (name, min_ms)).fetchone()
+
     def speaker_utterances(self, name, limit=500):
         """Every utterance by a speaker ACROSS meetings (newest first)."""
         return self.db.execute(

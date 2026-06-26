@@ -527,8 +527,11 @@ def _speakers_page():
             "<h2 style='margin-top:0' id=utthead>發言</h2>"
             "<div id=utts></div></div>")
     script = """
-let ALL=[];
+let ALL=[],_au=null;
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function play(name){try{if(_au)_au.pause();}catch(e){}
+  _au=new Audio('/speakers/'+encodeURIComponent(name)+'/sample.wav');
+  _au.play().catch(()=>alert('這位語者沒有可試聽的音訊片段'));}
 function ts(ms){const s=Math.round((ms||0)/1000);return (s/60|0)+':'+String(s%60).padStart(2,'0');}
 function fmtDay(t){const d=new Date(t*1000);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
 async function load(){
@@ -543,6 +546,7 @@ async function load(){
     const tr=document.createElement('tr');
     tr.innerHTML=`<td><b>${esc(s.name)}</b></td><td>${s.meetings}</td><td>${s.utterances}</td>
       <td style="white-space:nowrap">
+      <button class=btn data-act=play data-name="${esc(s.name)}" title=試聽>🔊</button>
       <button class=btn data-act=view data-name="${esc(s.name)}">發言</button>
       <button class=btn data-act=rename data-id="${s.id}" data-name="${esc(s.name)}">改名</button>
       ${others?`<select data-act=merge data-keep="${esc(s.name)}"><option value="">合併另一位到此…</option>${others}</select>`:''}
@@ -560,6 +564,7 @@ async function load(){
     if(!confirm(`把「${drop}」併入「${sel.dataset.keep}」?(同一個人)`)){sel.value='';return;}
     await fetch('/speakers/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:sel.dataset.keep,drop})});load();});
   t.querySelectorAll('[data-act=view]').forEach(b=>b.onclick=()=>view(b.dataset.name));
+  t.querySelectorAll('[data-act=play]').forEach(b=>b.onclick=()=>play(b.dataset.name));
   loadSugs();
 }
 async function loadSugs(){
@@ -567,10 +572,13 @@ async function loadSugs(){
   const pairs=j.pairs||[];
   document.getElementById('sugcard').style.display=pairs.length?'block':'none';
   document.getElementById('sugs').innerHTML=pairs.map(p=>
-    `<div class=setrow style="gap:8px;margin:4px 0"><span><b>${esc(p.a)}</b> ↔ <b>${esc(p.b)}</b>
+    `<div class=setrow style="gap:6px;margin:4px 0"><span>
+     <button class=btn data-play="${esc(p.a)}" title=試聽>🔊</button> <b>${esc(p.a)}</b> ↔
+     <button class=btn data-play="${esc(p.b)}" title=試聽>🔊</button> <b>${esc(p.b)}</b>
      <span class="muted small">相似度 ${p.sim}</span></span>
      <button class=btn data-keep="${esc(p.a)}" data-drop="${esc(p.b)}">是同一人，合併</button></div>`).join('');
-  document.querySelectorAll('#sugs button').forEach(b=>b.onclick=async()=>{
+  document.querySelectorAll('#sugs [data-play]').forEach(b=>b.onclick=()=>play(b.dataset.play));
+  document.querySelectorAll('#sugs [data-keep]').forEach(b=>b.onclick=async()=>{
     await fetch('/speakers/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:b.dataset.keep,drop:b.dataset.drop})});load();});
 }
 async function view(name){
@@ -2545,6 +2553,27 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.get("/speakers/{name}/utterances")
     def speaker_utterances(name: str):
         return {"name": name, "utterances": _rows(store.speaker_utterances(name))}
+
+    @app.get("/speakers/{name}/sample.wav")
+    def speaker_sample(name: str):
+        # A short voice clip so you can 試聽 who a speaker is before naming/merging.
+        # Longest utterance for that name, clipped from the (created_at-aligned)
+        # track it was diarized on — same timeline as the transcript timestamps.
+        import recorder
+        span = store.speaker_best_span(name)
+        if span is None:
+            raise HTTPException(404, "no audio sample for this speaker")
+        pcm = _assemble_track(store, span["meeting_id"], span["track"])
+        if pcm is None:
+            raise HTTPException(404, "no audio")
+        sr = 16000
+        a = int(span["start_ms"] / 1000 * sr) * 2
+        b = int(min(span["end_ms"], span["start_ms"] + 6000) / 1000 * sr) * 2
+        clip = pcm[a:max(a + 2, b)]
+        if not clip:
+            raise HTTPException(404, "empty clip")
+        return Response(recorder.pcm_to_wav(clip, sample_rate=sr, channels=1),
+                        media_type="audio/wav")
 
     @app.get("/speakers/suggestions")
     def speaker_suggestions():
