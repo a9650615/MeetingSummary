@@ -1646,7 +1646,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                live_manager=None, live_interim_backend=None, model_names=None,
                on_model_change=None,
                summary_model="mlx-lm", live_silence_ms=500, live_min_speech_ms=150,
-               live_interim_s=0.6, live_max_utt_s=15.0, live_rms_threshold=500,
+               live_interim_s=1.2, live_max_utt_s=15.0, live_rms_threshold=500,
                live_max_lag_s=4.0, live_interim_duty=0.75):
     app = FastAPI()
     transcribe_jobs = {}  # mid -> progress dict; survives page refresh (in-memory)
@@ -2426,7 +2426,7 @@ if __name__ == "__main__":  # pragma: no cover
     live_silence = int(os.environ.get("LIVE_SILENCE_MS", "500"))  # 500: less aggressive
     # split than 400 (measured: 350->4 frags, 450/500->1, 800->0 but +400ms lag)
     live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "150"))  # keep short words
-    live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "0.6"))
+    live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "1.2"))  # ~1/s preview revise (not 2-3/s)
     # target interim ASR duty cycle (compute/realtime); cadence auto-adapts to hold it
     live_interim_duty = float(os.environ.get("LIVE_INTERIM_DUTY", "0.75"))
     live_rms = int(os.environ.get("LIVE_RMS", "500"))
