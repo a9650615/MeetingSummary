@@ -347,6 +347,8 @@ _INDEX = _shell("MeetingSummary", """
     <button class=btn id=pickbtn>選取</button>
     <button class=btn id=mergebtn>整合相近的 live 會議</button>
     <span class="muted small" id=mergemsg></span>
+    <span class=spacer></span>
+    <span class="badge live" id=jobhdr style="display:none"></span>
   </div>
   <div id=selbar class=selbar>
     <span id=selcount class="small">已選 0</span>
@@ -377,7 +379,7 @@ function rowHtml(m){
     <input type=checkbox class=msel data-id="${m.id}"${SEL.has(m.id)?' checked':''}>
     <span class=mico title="${m.has_audio?'有音檔':'無音檔'}">${m.has_audio?'🔊':'🔇'}</span>
     <div class=mmain><a class=mtitle href="/m/${m.id}">${esc(m.title)}</a>
-      <div class=mmeta>${meta.join('<span class=dotsep>·</span>')}${chips(m.tags)}</div></div>
+      <div class=mmeta>${meta.join('<span class=dotsep>·</span>')}${chips(m.tags)}<span class=mjob data-id="${m.id}"></span></div></div>
     <div class=mact><button class="btn mdel" data-id="${m.id}" title=刪除>🗑</button></div></li>`;}
 function render(list){const el=document.getElementById('meetings');el.classList.toggle('picking',PICK);
   if(!list.length){el.innerHTML='<li class="muted small">尚無會議</li>';return;}
@@ -400,7 +402,25 @@ function renderTagbar(){fetch('/tags').then(r=>r.json()).then(j=>{
   bar.innerHTML=j.tags.map(t=>`<span class="tg tgbtn${t.name===TAGFILTER?' on':''}" data-t="${esc(t.name)}">#${esc(t.name)} ${t.count}</span>`).join('');
   bar.querySelectorAll('.tgbtn').forEach(s=>s.onclick=()=>{
     TAGFILTER = TAGFILTER===s.dataset.t ? null : s.dataset.t; renderTagbar(); applyView();});});}
-fetch('/meetings').then(r=>r.json()).then(ms=>{ALL=ms;applyView();renderTagbar();});
+fetch('/meetings').then(r=>r.json()).then(ms=>{ALL=ms;applyView();renderTagbar();paintJobs();});
+let JOBS={}, prevRun=new Set();
+function jobChip(j){const pct=j.total?' '+Math.round(j.done/j.total*100)+'%':'';
+  return `<span class="badge live" title="${esc(j.text||'')}" style="margin-left:6px">⏳ ${esc(j.kind)}${pct}</span>`;}
+function paintJobs(){document.querySelectorAll('.mjob').forEach(s=>{
+  const j=JOBS[+s.dataset.id];s.innerHTML=j?jobChip(j):'';});
+  const n=Object.keys(JOBS).length,h=document.getElementById('jobhdr');
+  if(h){h.style.display=n?'inline-block':'none';h.textContent='⏳ '+n+' 場處理中';}}
+function pollJobs(){fetch('/jobs').then(r=>r.json()).then(d=>{
+  const cur={};(d.jobs||[]).forEach(j=>{cur[j.mid]=j;});
+  const curSet=new Set(Object.keys(cur).map(Number));
+  const have=new Set(ALL.map(m=>m.id));
+  let refresh=[...curSet].some(id=>!have.has(id));
+  prevRun.forEach(id=>{if(!curSet.has(id))refresh=true;});
+  JOBS=cur;prevRun=curSet;
+  if(refresh)fetch('/meetings').then(r=>r.json()).then(ms=>{ALL=ms;applyView();renderTagbar();paintJobs();});
+  else paintJobs();
+}).catch(()=>{});}
+setInterval(pollJobs,2500);pollJobs();
 let tmr; const qel=document.getElementById('q');
 qel.oninput=()=>{clearTimeout(tmr);const q=qel.value.trim();
   if(!q){applyView();return;}
@@ -2326,6 +2346,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.get("/meetings/{mid}/diarize/progress")
     def diarize_progress(mid: int):
         return diarize_jobs.get(mid, {"state": "idle"})
+
+    @app.get("/jobs")
+    def jobs_status():
+        # Global view of in-flight background work, so the home list can flag which
+        # recordings are processing. Upload transcribe+summary writes to
+        # transcribe_jobs, so an uploading meeting shows under 辨識.
+        out = []
+        for kind, jd in (("辨識", transcribe_jobs), ("分群", diarize_jobs),
+                         ("摘要", summary_jobs)):
+            for mid, j in list(jd.items()):
+                if j.get("state") == "running":
+                    out.append({"mid": mid, "kind": kind, "done": j.get("done", 0),
+                                "total": j.get("total", 0), "text": j.get("text", "")})
+        return {"jobs": out}
 
     return app
 
