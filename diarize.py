@@ -352,12 +352,16 @@ def similar_speaker_pairs(rows, threshold=0.5):
         n = float(np.linalg.norm(v))
         if n > 0:
             vecs.append((r["id"], r["name"], v / n))
-    out = []
+    out, seen = [], set()
     for i in range(len(vecs)):
         for j in range(i + 1, len(vecs)):
+            a, b = vecs[i][1], vecs[j][1]
+            if a == b or (a, b) in seen or (b, a) in seen:
+                continue  # same name = same person; dedupe name pairs
             sim = float(np.dot(vecs[i][2], vecs[j][2]))
             if sim >= threshold:
-                out.append({"a": vecs[i][1], "b": vecs[j][1], "sim": round(sim, 3)})
+                seen.add((a, b))
+                out.append({"a": a, "b": b, "sim": round(sim, 3)})
     out.sort(key=lambda x: -x["sim"])
     return out
 

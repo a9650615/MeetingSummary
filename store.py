@@ -205,17 +205,23 @@ class Store:
         return cur.rowcount
 
     def speakers_with_stats(self):
-        """Global speakers + how often they appear in transcripts (linked by name):
-        distinct meetings + total utterances. Powers the speaker-management page."""
+        """ONE row per name (a name = a person; a person may carry several
+        voiceprints). Multiple voiceprints sharing a name would otherwise show as
+        duplicate rows with identical per-name stats. + distinct meetings/utterances."""
         out = []
         for s in self.db.execute(
-                "SELECT id, name, count FROM speakers ORDER BY name"):
+                "SELECT name, COUNT(*) vp FROM speakers GROUP BY name ORDER BY name"):
             r = self.db.execute(
                 "SELECT COUNT(DISTINCT meeting_id) m, COUNT(*) u "
                 "FROM transcripts WHERE speaker=?", (s["name"],)).fetchone()
-            out.append({"id": s["id"], "name": s["name"], "count": s["count"],
+            out.append({"name": s["name"], "voiceprints": s["vp"],
                         "meetings": r["m"], "utterances": r["u"]})
         return out
+
+    def delete_speakers_by_name(self, name):
+        """Forget every voiceprint for a name (the management page is per-name)."""
+        self.db.execute("DELETE FROM speakers WHERE name=?", (name,))
+        self.db.commit()
 
     def merge_speakers(self, keep_name, drop_name):
         """Two voiceprints are the same person: move all of drop's transcripts to

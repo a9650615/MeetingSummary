@@ -121,7 +121,7 @@ def test_detect_ignores_background_app_without_mic(tmp_path, monkeypatch):
 def test_speakers_routes_list_rename_merge_delete(tmp_path):
     import struct
     c, store = make_client(tmp_path)
-    a = store.add_speaker("對方1", struct.pack("2f", 1.0, 0.0))
+    store.add_speaker("對方1", struct.pack("2f", 1.0, 0.0))
     store.add_speaker("對方2", struct.pack("2f", 0.0, 1.0))
     mid = store.create_meeting("M", 1.0, "zh-TW")
     store.add_transcript(mid, "accurate", "system", 0, 1, "對方1", "hi")
@@ -130,16 +130,25 @@ def test_speakers_routes_list_rename_merge_delete(tmp_path):
     body = c.get("/speakers").json()
     assert body["persist"] is True and len(body["speakers"]) == 2
 
-    c.post(f"/speakers/{a}/rename", json={"name": "Scott"})       # global rename
-    assert store.list_transcripts(mid)[0]["speaker"] == "Scott"   # transcript moved too
+    c.post("/speakers/rename", json={"old": "對方1", "new": "Scott"})  # name-based rename
+    assert store.list_transcripts(mid)[0]["speaker"] == "Scott"        # transcript moved too
 
     assert c.post("/speakers/merge", json={"keep": "Scott", "drop": "對方2"}).json()["moved"] == 1
     assert {s["name"] for s in store.list_speakers()} == {"Scott"}
     assert len(c.get("/speakers/Scott/utterances").json()["utterances"]) == 2
 
-    sid = store.list_speakers()[0]["id"]
-    c.delete(f"/speakers/{sid}")
+    c.post("/speakers/delete", json={"name": "Scott"})
     assert store.list_speakers() == []
+
+
+def test_speakers_grouped_by_name(tmp_path):
+    import struct
+    c, store = make_client(tmp_path)
+    store.add_speaker("Jason", struct.pack("2f", 1.0, 0.0))
+    store.add_speaker("Jason", struct.pack("2f", 0.9, 0.1))  # 2nd voiceprint, same name
+    rows = c.get("/speakers").json()["speakers"]
+    jasons = [r for r in rows if r["name"] == "Jason"]
+    assert len(jasons) == 1 and jasons[0]["voiceprints"] == 2  # one row, not two
 
 
 def test_detail_shows_recognized_cross_meeting_speaker(tmp_path):

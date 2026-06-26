@@ -542,23 +542,23 @@ async function load(){
   t.querySelectorAll('tr:not(:first-child)').forEach(r=>r.remove());
   document.getElementById('empty').style.display=ALL.length?'none':'block';
   for(const s of ALL){
-    const others=ALL.filter(o=>o.id!==s.id).map(o=>`<option value="${esc(o.name)}">${esc(o.name)}</option>`).join('');
+    const others=ALL.filter(o=>o.name!==s.name).map(o=>`<option value="${esc(o.name)}">${esc(o.name)}</option>`).join('');
     const tr=document.createElement('tr');
     tr.innerHTML=`<td><b>${esc(s.name)}</b></td><td>${s.meetings}</td><td>${s.utterances}</td>
       <td style="white-space:nowrap">
       <button class=btn data-act=play data-name="${esc(s.name)}" title=試聽>🔊</button>
       <button class=btn data-act=view data-name="${esc(s.name)}">發言</button>
-      <button class=btn data-act=rename data-id="${s.id}" data-name="${esc(s.name)}">改名</button>
+      <button class=btn data-act=rename data-name="${esc(s.name)}">改名</button>
       ${others?`<select data-act=merge data-keep="${esc(s.name)}"><option value="">合併另一位到此…</option>${others}</select>`:''}
-      <button class="btn danger" data-act=del data-id="${s.id}">刪除</button></td>`;
+      <button class="btn danger" data-act=del data-name="${esc(s.name)}">刪除</button></td>`;
     t.appendChild(tr);
   }
   t.querySelectorAll('[data-act=rename]').forEach(b=>b.onclick=async()=>{
     const nw=prompt('語者改名(套用到所有會議):',b.dataset.name);if(nw==null||!nw.trim())return;
-    await fetch(`/speakers/${b.dataset.id}/rename`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nw.trim()})});load();});
+    await fetch('/speakers/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old:b.dataset.name,new:nw.trim()})});load();});
   t.querySelectorAll('[data-act=del]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('忘記這個聲紋?(逐字稿名稱保留,只是之後不再自動認出)'))return;
-    await fetch(`/speakers/${b.dataset.id}`,{method:'DELETE'});load();});
+    if(!confirm('忘記這位語者的聲紋?(逐字稿名稱保留,只是之後不再自動認出)'))return;
+    await fetch('/speakers/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:b.dataset.name})});load();});
   t.querySelectorAll('[data-act=merge]').forEach(sel=>sel.onchange=async()=>{
     const drop=sel.value;if(!drop)return;
     if(!confirm(`把「${drop}」併入「${sel.dataset.keep}」?(同一個人)`)){sel.value='';return;}
@@ -2545,22 +2545,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
         return {"speakers": _rows(store.speakers_with_stats()),
                 "persist": store.get_setting("persist_speakers", "1") == "1"}
 
-    @app.post("/speakers/{sid}/rename")
-    def speaker_rename(sid: int, body: NameIn):
-        cur = next((s for s in store.list_speakers() if s["id"] == sid), None)
-        if cur is None:
-            raise HTTPException(404, "speaker not found")
-        n = store.rename_speaker_global(cur["name"], body.name)
-        return {"renamed": n, "name": body.name.strip()}
+    @app.post("/speakers/rename")
+    def speaker_rename(body: SpeakerRenameIn):
+        # Name-centric: rename every voiceprint + transcript of `old` to `new`.
+        n = store.rename_speaker_global(body.old, body.new.strip())
+        return {"renamed": n, "name": body.new.strip()}
 
     @app.post("/speakers/merge")
     def speaker_merge(body: SpeakerMergeIn):
         return {"moved": store.merge_speakers(body.keep.strip(), body.drop.strip())}
 
-    @app.delete("/speakers/{sid}")
-    def speaker_delete(sid: int):
-        store.delete_speaker(sid)
-        return {"deleted": sid}
+    @app.post("/speakers/delete")
+    def speaker_delete(body: NameIn):
+        store.delete_speakers_by_name(body.name)
+        return {"deleted": body.name}
 
     @app.get("/speakers/{name}/utterances")
     def speaker_utterances(name: str):
