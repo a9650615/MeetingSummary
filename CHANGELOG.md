@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.4.2
+- **修正「ANE 還在用 GPU、沒省電」**：speech-swift 的 CoreML **encoder 預設 `.all`** → CoreML 實際把它排在 **GPU**(所以開了 ANE GPU 還在跑)。改成設環境變數 `SPEECH_COREML_COMPUTE_UNITS=ane` 強制 encoder＋decoder 都走 **Neural Engine**(批次 ANE 與 live helper 子行程都設,執行時讀取、免重編)。首次會為 ANE 重新編譯一次 CoreML(之後快取)。註:mel 前處理等 MLX 膠水仍會用到少量 GPU;live 的 interim 預覽仍走輕量 MLX whisper-small(GPU 負擔小)— 要完全離 GPU 可把 interim 也導到 ANE 或關掉,再說。
+
 ## 0.4.1
 - **修正啟動畫面卡在「啟動中」(其實已啟動)**：bootstrap 啟動splash 原本要先從 `/_setup` 收到 `done=true` 才去檢查 `/health` 重載;但 setup 完成後 bootstrap server 關閉、交棒給真正的伺服器，此時 `/_setup` 失敗 → `_done` 永遠不為真 → 卡在「啟動中」雖然伺服器已起來。改成**每次輪詢先探 `/health`**，真伺服器一接手回 JSON 就重載(交棒競態修掉)。
 

@@ -436,7 +436,11 @@ def ane_speech_backend(engine="qwen3-coreml-full", model="0.6B", language=None):
                    "--jsonl"]
             if language:
                 cmd += ["--language", language]
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=3600).stdout
+            # Force CoreML onto the Neural Engine (encoder defaults to .all = GPU,
+            # which is why 'ANE' still spun the GPU). ane = .cpuAndNeuralEngine.
+            env = {**os.environ, "SPEECH_COREML_COMPUTE_UNITS": "ane"}
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
+                                env=env).stdout
             segs = []
             for line in out.splitlines():
                 line = line.strip()
@@ -502,8 +506,10 @@ def ane_live_backend():
         b = ane_helper_bin()
         if b is None:
             raise RuntimeError("qwen3-ane helper not built (build_qwen3_ane.sh)")
+        # Force CoreML onto the ANE (encoder defaults to .all = GPU). Read at load.
+        env = {**os.environ, "SPEECH_COREML_COMPUTE_UNITS": "ane"}
         p = subprocess.Popen([b], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, bufsize=0)
+                             stderr=subprocess.PIPE, bufsize=0, env=env)
         for line in p.stderr:  # block until model loaded (first time ~tens of seconds)
             if b"READY" in line:
                 break
