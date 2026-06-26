@@ -12,3 +12,5 @@ chatllm.cpp/
 micbusy
 dist/
 setup.log
+transcript.txt
+*.transcript.txt

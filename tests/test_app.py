@@ -144,10 +144,10 @@ def test_speakers_routes_list_rename_merge_delete(tmp_path):
 def test_speakers_grouped_by_name(tmp_path):
     import struct
     c, store = make_client(tmp_path)
-    store.add_speaker("Jason", struct.pack("2f", 1.0, 0.0))
-    store.add_speaker("Jason", struct.pack("2f", 0.9, 0.1))  # 2nd voiceprint, same name
+    store.add_speaker("Alice", struct.pack("2f", 1.0, 0.0))
+    store.add_speaker("Alice", struct.pack("2f", 0.9, 0.1))  # 2nd voiceprint, same name
     rows = c.get("/speakers").json()["speakers"]
-    jasons = [r for r in rows if r["name"] == "Jason"]
+    jasons = [r for r in rows if r["name"] == "Alice"]
     assert len(jasons) == 1 and jasons[0]["voiceprints"] == 2  # one row, not two
     assert jasons[0]["has_sample"] is False  # no transcript span -> no 試聽 button
 
