@@ -29,8 +29,26 @@ def build_prompt(text, *, kind, lang):
     return f"{_GUARD}{_INSTRUCTION[kind]}\n輸出語言:{lang}\n\n逐字稿:\n{text}"
 
 
+def _dedup_lines(out):
+    """Collapse a runaway LLM loop — consecutive lines with identical content (a
+    numbered/bulleted list that repeats the same item 18x, see report). Compare
+    after stripping the leading list marker (the "29." / "30." / "-" differs but
+    the content is the same). Universal guard regardless of model/penalty."""
+    import re  # noqa: PLC0415
+    out_lines, prev = [], None
+    for ln in out.splitlines():
+        key = re.sub(r"^\s*(?:\d+[.)]|[-*])\s*", "", ln).strip()
+        if key and key == prev:
+            continue
+        out_lines.append(ln)
+        prev = key
+    return "\n".join(out_lines)
+
+
 def _post(out, lang):
-    """LLM often emits 簡體 even for a zh-TW meeting -> normalize to 繁體(台灣)."""
+    """LLM often emits 簡體 even for a zh-TW meeting -> normalize to 繁體(台灣).
+    Also collapse degenerate repeated lines (a loop the penalty didn't catch)."""
+    out = _dedup_lines(out)
     if (lang or "").lower().startswith("zh"):
         import zhtw  # noqa: PLC0415
         return zhtw.to_tw(out)
@@ -70,9 +88,16 @@ def mlx_lm_backend(model="mlx-community/Qwen2.5-14B-Instruct-4bit", max_tokens=1
 
     model_obj, tokenizer = load(model)
     # Greedy (temp 0) keeps the summary factual — sampling is what invents 小明/期限.
-    # repetition_penalty stops the model from looping the same line/phrase.
+    # repetition_penalty stops the model looping the same line/phrase. The DEFAULT
+    # repetition_context_size is only 20 tokens — shorter than one list item, so by
+    # the time a line repeats the earlier identical tokens have rolled out of the
+    # window and aren't penalized → it loops a whole line forever (see the 18x
+    # "中午前將完成 Bug…" report). Widen the window to cover many lines + raise the
+    # penalty; frequency_penalty additionally scales with how often a token recurs.
     sampler = make_sampler(temp=0.0)
-    logits_processors = make_logits_processors(repetition_penalty=1.3)
+    logits_processors = make_logits_processors(
+        repetition_penalty=1.5, repetition_context_size=512,
+        frequency_penalty=0.4, frequency_context_size=512)
 
     def _run(prompt):
         messages = [{"role": "user", "content": prompt}]

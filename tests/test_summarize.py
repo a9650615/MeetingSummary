@@ -1,4 +1,19 @@
-from summarize import summarize, build_prompt
+from summarize import summarize, build_prompt, _dedup_lines
+
+
+def test_dedup_collapses_repeated_numbered_loop():
+    # The LLM looped one item 4x with incrementing numbers (real report).
+    looped = "\n".join(f"{i}. 會議討論: 中午前完成 Bug 區分並提交至 SIT。"
+                       for i in range(29, 33)) + "\n34. 會議討論: 中午"
+    out = _dedup_lines(looped)
+    lines = out.splitlines()
+    assert lines == ["29. 會議討論: 中午前完成 Bug 區分並提交至 SIT。",
+                     "34. 會議討論: 中午"]  # loop collapsed to first; truncated tail kept
+
+
+def test_dedup_keeps_distinct_lines():
+    txt = "1. 甲做 A\n2. 乙做 B\n3. 丙做 C"
+    assert _dedup_lines(txt) == txt  # genuine list untouched
 
 
 def test_short_transcript_single_pass():
