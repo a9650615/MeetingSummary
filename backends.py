@@ -95,23 +95,54 @@ def qwen3_mlx_backend(model="mlx-community/Qwen3-ASR-1.7B-8bit", language=None):
         if m is None:
             m = load(model)
             _QWEN3_MLX[model] = m
-        # live -> raw int16 PCM bytes; batch -> raw 16k mono .pcm path; upload -> file.
-        # mlx-audio can't load headerless PCM, so feed those as an mx.array (16k f32).
+        # live -> raw int16 PCM bytes; batch -> raw 16k mono .pcm path; upload ->
+        # container file (m4a/mp3/wav). ALWAYS hand mlx-audio a 16k-mono f32
+        # mx.array, never a path: its loader shells out to ffprobe, which is often
+        # absent (ffmpeg-only installs) -> "ffprobe not found" crash on upload. We
+        # decode containers ourselves with ffmpeg (no ffprobe needed).
         if isinstance(audio, (bytes, bytearray)):
             pcm = np.frombuffer(bytes(audio), dtype=np.int16)
         elif isinstance(audio, str) and audio.endswith(".pcm"):
             pcm = np.frombuffer(open(audio, "rb").read(), dtype=np.int16)
+        elif isinstance(audio, str):
+            import shutil  # noqa: PLC0415
+            import subprocess  # noqa: PLC0415
+            if not shutil.which("ffmpeg"):
+                raise RuntimeError(f"ffmpeg needed to decode {audio}")
+            raw = subprocess.run(
+                ["ffmpeg", "-v", "error", "-i", audio, "-ar", "16000", "-ac", "1",
+                 "-f", "s16le", "-"], stdout=subprocess.PIPE, check=True).stdout
+            pcm = np.frombuffer(raw, dtype=np.int16)
         else:
-            return _txt(generate_transcription(model=m, audio=str(audio), verbose=False))
+            return [{"start": 0.0, "end": 0.0, "text": _txt(
+                generate_transcription(model=m, audio=audio, verbose=False))}]
         import mlx.core as mx  # noqa: PLC0415
-        arr = mx.array(pcm.astype(np.float32) / 32768.0)
-        out = _txt(generate_transcription(model=m, audio=arr, verbose=False))
-        mx.clear_cache()  # return the transient buffers — caps peak over a long session
+
+        def _gen(seg):  # one int16 window -> text; release MLX buffers after
+            t = _txt(generate_transcription(
+                model=m, audio=mx.array(seg.astype(np.float32) / 32768.0), verbose=False))
+            mx.clear_cache()
+            return t
+
+        sr, win = 16000, 16000 * 30
+        # Qwen3-ASR has NO internal long-audio chunking — past its encoder limit it
+        # returns nothing (a 3-min upload came back empty). So window long inputs
+        # (uploads) into ~30s with per-window timestamps. Short inputs (live windows,
+        # re-transcribe's 30s .pcm) stay one untimed segment (caller already windows).
+        if len(pcm) <= win:
+            return [{"start": 0.0, "end": 0.0, "text": _gen(pcm)}]
+        out = []
+        for i in range(0, len(pcm), win):
+            seg = pcm[i:i + win]
+            if len(seg) < sr // 5:  # <0.2s tail
+                continue
+            t = _gen(seg)
+            if t:
+                out.append({"start": i / sr, "end": (i + len(seg)) / sr, "text": t})
         return out
 
     def _run(audio):
-        text = _qwen3_mlx_exec().submit(_infer, audio).result()
-        return [{"start": 0.0, "end": 0.0, "text": text}]
+        return _qwen3_mlx_exec().submit(_infer, audio).result()
 
     return _run
 
