@@ -268,7 +268,7 @@ _DETECT_JS = (
 # react (home paints row chips; the meeting page reloads / renders on completion).
 # window._jobsTick() forces an immediate poll (buttons call it right after start).
 _PROG_JS = (
-    "(function(){let prev=new Set(),timer=null;"
+    "(function(){let prev=new Set(),timer=null,lastKeys='';"
     "function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
     "function card(j){const pct=j.total?Math.round(j.done/j.total*100):null;"
     "const bar=pct!=null?`<div class=pgbar><i style=\"width:${pct}%\"></i></div>"
@@ -277,10 +277,22 @@ _PROG_JS = (
     "<span class=pgtitle>${esc(j.title||('#'+j.mid))}</span></div>"
     "<div class=pgmeta>${esc(j.text||'處理中…')}${j.total?(' · '+j.done+'/'+j.total):''}</div>"
     "<div class=pgrow>${bar}</div></div>`;}"
-    "function render(jobs){const el=document.getElementById('progpop');if(!el)return;"
-    "if(!jobs.length){el.hidden=true;el.innerHTML='';return;}"
-    "el.hidden=false;el.innerHTML=`<div class=pghead>⏳ ${jobs.length} 項處理中</div>`+jobs.map(card).join('');}"
     "function key(j){return j.mid+'/'+j.kind;}"
+    # Rebuild the DOM only when the SET of jobs changes (so the slide-in animation
+    # fires once, not every poll = the flicker). Otherwise update bar/%/text IN
+    # PLACE — width transitions smoothly, the indeterminate animation isn't restarted.
+    "function render(jobs){const el=document.getElementById('progpop');if(!el)return;"
+    "if(!jobs.length){el.hidden=true;el.innerHTML='';lastKeys='';return;}"
+    "el.hidden=false;const keys=jobs.map(key).join('|');"
+    "if(keys!==lastKeys){el.innerHTML=`<div class=pghead>⏳ ${jobs.length} 項處理中</div>`"
+    "+jobs.map(card).join('');lastKeys=keys;return;}"
+    "const cards=el.querySelectorAll('.pgcard');"
+    "jobs.forEach((j,i)=>{const c=cards[i];if(!c)return;"
+    "const pct=j.total?Math.round(j.done/j.total*100):null;"
+    "const meta=c.querySelector('.pgmeta');"
+    "if(meta)meta.textContent=(j.text||'處理中…')+(j.total?(' · '+j.done+'/'+j.total):'');"
+    "const f=c.querySelector('.pgbar i'),p=c.querySelector('.pgpct');"
+    "if(pct!=null){if(f)f.style.width=pct+'%';if(p)p.textContent=pct+'%';}});}"
     "function tick(){fetch('/jobs').then(r=>r.json()).then(d=>{const jobs=d.jobs||[];render(jobs);"
     "const cur=new Set(jobs.map(key));"
     "const finished=[...prev].filter(k=>!cur.has(k)),started=[...cur].filter(k=>!prev.has(k));"
