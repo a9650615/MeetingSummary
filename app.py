@@ -7,6 +7,8 @@ import asyncio
 import html
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from typing import Optional  # not `X | None` — pydantic evals it, fails on 3.9 venvs
@@ -1857,6 +1859,12 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<p class=hint style='margin:.6em 0 0'>※ 摘要只在按下按鈕時才產生。停止錄音不會自動完成。"
         "「多人分群」用聲紋把每條音軌(我/對方)各自拆成多位說話者(會後處理,需先有錄音)。</p>"
         f"<div id=out>{sums}</div></div>"
+        "<div class=card><div class=setrow style='margin-bottom:8px'>"
+        "<h2 style='margin:0'>截圖</h2>"
+        "<button class=btn id=shot>📸 截圖（擷取畫面）</button>"
+        "<span class='muted small' id=shotmsg></span></div>"
+        "<div id=shots class=shotgrid></div>"
+        "<p class=hint style='margin:.6em 0 0'>擷取整個螢幕（如投影片）附加到此會議；首次需在系統設定授權「螢幕錄製」。</p></div>"
         "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
         "<div class=row style='margin-bottom:10px'>"
         "<select id=remodel>"
@@ -2011,7 +2019,23 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "fetch('/tags').then(r=>r.json()).then(j=>{"
         "let dl=document.getElementById('tagdl');if(!dl){dl=document.createElement('datalist');"
         "dl.id='tagdl';document.body.appendChild(dl);}"
-        "dl.innerHTML=(j.tags||[]).map(t=>`<option value=\"${_esc(t)}\">`).join('');});")
+        "dl.innerHTML=(j.tags||[]).map(t=>`<option value=\"${_esc(t)}\">`).join('');});"
+        # screenshots: capture screen -> attach to meeting; grid with delete
+        "function loadShots(){const el=document.getElementById('shots');if(!el)return;"
+        "el.style.cssText='display:flex;flex-wrap:wrap;gap:10px';"
+        "fetch(`/meetings/${MID}/shots`).then(r=>r.json()).then(j=>{"
+        "el.innerHTML=(j.shots||[]).map(n=>`<div style=\"position:relative;width:180px\">"
+        "<a href=\"/meetings/${MID}/shots/${n}\" target=_blank>"
+        "<img src=\"/meetings/${MID}/shots/${n}\" loading=lazy style=\"max-width:100%;border-radius:8px;display:block\"></a>"
+        "<button class=btn data-shot=\"${n}\" style=\"position:absolute;top:4px;right:4px;padding:.1em .4em\">✕</button></div>`).join('');"
+        "el.querySelectorAll('[data-shot]').forEach(b=>b.onclick=async()=>{"
+        "await fetch(`/meetings/${MID}/shots/delete`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:b.dataset.shot})});loadShots();});});}"
+        "const _sb=document.getElementById('shot');if(_sb)_sb.onclick=async()=>{"
+        "const mm=document.getElementById('shotmsg');mm.textContent='擷取中…';"
+        "const r=await fetch(`/meetings/${MID}/screenshot`,{method:'POST'});"
+        "if(r.ok){mm.textContent='已擷取';loadShots();}else{let e={};try{e=await r.json();}catch(_e){}mm.textContent='失敗：'+(e.detail||r.status);}"
+        "setTimeout(()=>{mm.textContent='';},2500);};"
+        "loadShots();")
     return _shell(html.escape(meeting["title"]), body, script=script, back=True)
 
 
@@ -2946,6 +2970,53 @@ def create_app(store, *, summary_backend, asr_backend=None,
         meetings.sort(key=lambda x: -x["bytes"])
         return {"categories": cats, "total": sum(c["bytes"] for c in cats),
                 "meetings": meetings[:12]}
+
+    @app.post("/meetings/{mid}/screenshot")
+    def screenshot(mid: int):
+        # Capture the screen (e.g. shared slides) and attach it to the meeting,
+        # via the built-in `screencapture`. Needs macOS Screen-Recording permission
+        # for this process (granted once on first use). -x = no shutter sound.
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        cap = shutil.which("screencapture")
+        if not cap:
+            raise HTTPException(400, "screencapture unavailable (macOS only)")
+        d = f"data/{mid}/shots"
+        os.makedirs(d, exist_ok=True)
+        name = f"{int(time.time() * 1000)}.png"
+        path = os.path.join(d, name)
+        try:
+            subprocess.run([cap, "-x", path], check=True, timeout=20)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, f"capture failed: {e}")
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            raise HTTPException(500, "empty capture — grant 螢幕錄製 permission to this app")
+        return {"name": name}
+
+    @app.get("/meetings/{mid}/shots")
+    def list_shots(mid: int):
+        d = f"data/{mid}/shots"
+        shots = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        return {"shots": [s for s in shots if s.endswith(".png")]}
+
+    @app.get("/meetings/{mid}/shots/{name}")
+    def get_shot(mid: int, name: str):
+        if "/" in name or ".." in name:  # path-traversal guard
+            raise HTTPException(400, "bad name")
+        path = f"data/{mid}/shots/{name}"
+        if not os.path.exists(path):
+            raise HTTPException(404, "not found")
+        return FileResponse(path, media_type="image/png")
+
+    @app.post("/meetings/{mid}/shots/delete")
+    def delete_shot(mid: int, body: NameIn):
+        name = body.name
+        if "/" in name or ".." in name:
+            raise HTTPException(400, "bad name")
+        path = f"data/{mid}/shots/{name}"
+        if os.path.exists(path):
+            os.remove(path)
+        return {"deleted": name}
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
                  "denoise": "0"}
