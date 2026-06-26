@@ -27,6 +27,32 @@ def _degenerate(text):
     return len(s) >= 12 and len(s.encode()) / max(1, len(zlib.compress(s.encode(), 9))) >= 1.8
 
 
+def _sentence_split(text, start_ms, end_ms, min_chars=6):
+    """Break a long segment into sentence-sized lines (like live) so re-transcribe
+    isn't one big ~30s block. Split after 。！？!?；; ; time distributed by char
+    fraction; short fragments glue onto the previous line. No-punctuation / short
+    segments (e.g. whisper's already-sentence output) pass through unchanged."""
+    import re  # noqa: PLC0415
+    parts = [p for p in re.findall(r"[^。！？!?；;]*[。！？!?；;]+|[^。！？!?；;]+", text)
+             if p.strip()]
+    if len(parts) <= 1:
+        return [(start_ms, end_ms, text)]
+    merged = []
+    for p in parts:
+        if merged and len(p.strip()) < min_chars:
+            merged[-1] += p
+        else:
+            merged.append(p)
+    total = sum(len(p) for p in merged) or 1
+    span = max(1, end_ms - start_ms)
+    out, acc = [], 0
+    for p in merged:
+        s = start_ms + span * acc // total
+        acc += len(p)
+        out.append((s, start_ms + span * acc // total, p.strip()))
+    return out
+
+
 def transcribe(audio_path, *, profile, track, backend):
     import live  # noqa: PLC0415 — reuse the live path's hallucination/filler blocklist
     out = []
@@ -37,14 +63,14 @@ def transcribe(audio_path, *, profile, track, backend):
         # can be real short utterances; only the known hallucination phrases are dropped.
         if not text or _degenerate(text) or live._is_hallucination(text):
             continue
-        text = _collapse_repeats(text)
-        out.append({
-            "start_ms": round(seg["start"] * 1000),
-            "end_ms": round(seg["end"] * 1000),
-            "text": zhtw.to_tw(text.strip()),  # normalize 簡->繁(台灣)
-            "track": track,
-            "profile": profile,
-        })
+        text = zhtw.to_tw(_collapse_repeats(text).strip())  # normalize 簡->繁(台灣)
+        s_ms, e_ms = round(seg["start"] * 1000), round(seg["end"] * 1000)
+        # sentence-split so a long window (qwen3/ANE return one big blob) becomes
+        # several live-sized lines instead of one wall of text.
+        for ss, ee, piece in _sentence_split(text, s_ms, e_ms):
+            if piece:
+                out.append({"start_ms": ss, "end_ms": ee, "text": piece,
+                            "track": track, "profile": profile})
     return out
 
 
