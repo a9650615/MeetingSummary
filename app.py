@@ -693,12 +693,15 @@ def _models_page():
         await fetch('/models/setup',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({runtime:b.dataset.rt})});
         setTimeout(load,800);});
-      // supported
+      // supported — grouped by backend (MLX / .cpp / transformers) for clarity
+      let lastG=null;
       document.getElementById('sup').innerHTML='<tr><th>模型</th><th>大小</th><th></th></tr>'
-        +d.supported.map(m=>{const act=m.cached
+        +d.supported.map(m=>{
+          const hdr=m.group!==lastG?(lastG=m.group,`<tr><td colspan=3 class=muted style="padding-top:12px;font-weight:700">${esc(m.group||'')}</td></tr>`):'';
+          const act=m.cached
           ?`<button class='btn danger' data-p="${esc(m.path)}" data-n="${esc(m.label)}">刪除</button>`
           :`<button class='btn primary' data-id="${esc(m.id)}">下載</button>`;
-          return `<tr><td>${m.label}<div class=muted style='font-size:11px'>${m.id} · ${m.kind}</div></td>`
+          return hdr+`<tr><td>${m.label}<div class=muted style='font-size:11px'>${m.id} · ${m.kind}</div></td>`
             +`<td>${m.cached?human(m.size_mb):'—'}${tmsg(d.tasks[m.id])}</td><td>${act}</td></tr>`;}).join('');
       document.querySelectorAll('#sup button[data-id]').forEach(b=>b.onclick=async()=>{
         b.disabled=true;b.textContent='下載中…';
@@ -779,15 +782,21 @@ _LIVE_BODY = """
       </select></label>
     <label class=fld>即時模型
       <select id=model>
-        <option value="qwen3-asr-0.6b-q4-k-m">Qwen3-ASR 0.6B(.cpp·Metal·預設)</option>
-        <option value="mlx-community/Qwen3-ASR-1.7B-8bit">Qwen3-ASR 1.7B(mlx·Metal·準·快)</option>
-        <option value="qwen3-asr-1.7b">Qwen3-ASR 1.7B(chatllm·Metal·慢·備用)</option>
+        <optgroup label="🔧 .cpp · Metal">
+        <option value="qwen3-asr-0.6b-q4-k-m">Qwen3-ASR 0.6B(預設·快)</option>
+        <option value="qwen3-asr-1.7b">Qwen3-ASR 1.7B(chatllm·慢·備用)</option>
+        </optgroup>
+        <optgroup label="⚡ MLX · Metal/GPU">
+        <option value="mlx-community/Qwen3-ASR-1.7B-8bit">Qwen3-ASR 1.7B(準·快)</option>
         <option value="mlx-community/whisper-small-mlx-q4">whisper small-q4(快·省)</option>
         <option value="mlx-community/whisper-large-v3-turbo-q4">whisper turbo-q4(較準)</option>
         <option value="mlx-community/whisper-large-v3-turbo">whisper turbo(最準·較吃)</option>
         <option value="mlx-community/whisper-base-mlx-q4">whisper base-q4(更快)</option>
         <option value="mlx-community/whisper-tiny-mlx-q4">whisper tiny-q4(最省)</option>
-        <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR 0.6B(transformers·慢)</option>
+        </optgroup>
+        <optgroup label="🐢 transformers · 慢">
+        <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR 0.6B</option>
+        </optgroup>
       </select></label>
     <label class=chk style="align-self:end"><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
   </div>
@@ -1259,18 +1268,18 @@ def _safe_model_path(path, roots=None):
 # (kind decides the runtime). kind: hf (mlx/transformers), femelo (.cpp 0.6b),
 # chatllm (.cpp 1.7b).
 _SUPPORTED = [
-    {"id": "mlx-community/whisper-small-mlx-q4", "label": "whisper small-q4（live 預設）", "kind": "hf"},
-    {"id": "mlx-community/whisper-large-v3-turbo-q4", "label": "whisper turbo-q4（精校）", "kind": "hf"},
-    {"id": "mlx-community/whisper-large-v3-turbo", "label": "whisper turbo", "kind": "hf"},
-    {"id": "mlx-community/whisper-base-mlx-q4", "label": "whisper base-q4", "kind": "hf"},
-    {"id": "mlx-community/whisper-tiny-mlx-q4", "label": "whisper tiny-q4", "kind": "hf"},
-    {"id": "mlx-community/whisper-large-v3-mlx", "label": "whisper large-v3", "kind": "hf"},
-    {"id": "mlx-community/Qwen2.5-3B-Instruct-4bit", "label": "Qwen2.5-3B（摘要）", "kind": "hf"},
-    {"id": "Qwen/Qwen3-ASR-0.6B", "label": "Qwen3-ASR 0.6B（transformers）", "kind": "hf"},
-    {"id": "Qwen/Qwen3-ASR-1.7B", "label": "Qwen3-ASR 1.7B（transformers·最準·慢）", "kind": "hf"},
-    {"id": "mlx-community/Qwen3-ASR-1.7B-8bit", "label": "Qwen3-ASR 1.7B（mlx·Metal·準·快）", "kind": "hf"},
-    {"id": "qwen3-asr-0.6b-q4-k-m", "label": "Qwen3-ASR .cpp 0.6B（femelo·Metal·快）", "kind": "femelo"},
-    {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR .cpp 1.7B（chatllm·Metal·慢·備用）", "kind": "chatllm"},
+    {"id": "mlx-community/whisper-small-mlx-q4", "label": "whisper small-q4（live 預設）", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
+    {"id": "mlx-community/whisper-large-v3-turbo-q4", "label": "whisper turbo-q4（精校）", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
+    {"id": "mlx-community/whisper-large-v3-turbo", "label": "whisper turbo", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
+    {"id": "mlx-community/whisper-base-mlx-q4", "label": "whisper base-q4", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
+    {"id": "mlx-community/whisper-tiny-mlx-q4", "label": "whisper tiny-q4", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
+    {"id": "mlx-community/whisper-large-v3-mlx", "label": "whisper large-v3", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
+    {"id": "mlx-community/Qwen2.5-3B-Instruct-4bit", "label": "Qwen2.5-3B（摘要）", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
+    {"id": "mlx-community/Qwen3-ASR-1.7B-8bit", "label": "Qwen3-ASR 1.7B（準·快）", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
+    {"id": "qwen3-asr-0.6b-q4-k-m", "label": "Qwen3-ASR 0.6B（femelo·快）", "kind": "femelo", "group": "🔧 .cpp · Metal"},
+    {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR 1.7B（chatllm·慢·備用）", "kind": "chatllm", "group": "🔧 .cpp · Metal"},
+    {"id": "Qwen/Qwen3-ASR-0.6B", "label": "Qwen3-ASR 0.6B", "kind": "hf", "group": "🐢 transformers · 慢"},
+    {"id": "Qwen/Qwen3-ASR-1.7B", "label": "Qwen3-ASR 1.7B（最準·慢）", "kind": "hf", "group": "🐢 transformers · 慢"},
     # 說話者分群模型(sherpa pyannote-3-0 seg + 3dspeaker emb)由 diarize.py 首次分群時
     # 自動下載到 models/，不在此清單(community-1 onnx 與 sherpa 不相容,缺 sample_rate metadata)。
 ]
@@ -1688,17 +1697,24 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
         "<div class=row style='margin-bottom:10px'>"
         "<select id=remodel>"
-        + ("<option value='ane-qwen3-0.6b'>Qwen3-ASR 0.6B(ANE·省電·M系列)</option>"
-           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B(ANE混合·快)</option>"
-           if ane_on else "") +
-        "<option value='mlx-community/whisper-large-v3-turbo-q4'>turbo-q4(準·省)</option>"
-        "<option value='mlx-community/whisper-large-v3-mlx'>large-v3(最準·吃)</option>"
-        "<option value='mlx-community/whisper-small-mlx-q4'>small-q4(快)</option>"
-        "<option value='mlx-community/Qwen3-ASR-1.7B-8bit'>Qwen3-ASR 1.7B(mlx·Metal·準·快)</option>"
-        "<option value='qwen3-asr-0.6b-q4-k-m'>Qwen3-ASR 0.6B(.cpp·Metal·快)</option>"
-        "<option value='qwen3-asr-1.7b'>Qwen3-ASR 1.7B(chatllm·Metal·慢·備用)</option>"
-        "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B(transformers·慢)</option>"
-        "<option value='Qwen/Qwen3-ASR-1.7B'>Qwen3-ASR 1.7B(transformers·很慢)</option>"
+        + ("<optgroup label='🧠 NPU · ANE 省電'>"
+           "<option value='ane-qwen3-0.6b'>Qwen3-ASR 0.6B(省電·M系列)</option>"
+           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B(混合·快)</option>"
+           "</optgroup>" if ane_on else "") +
+        "<optgroup label='⚡ MLX · Metal/GPU'>"
+        "<option value='mlx-community/whisper-large-v3-turbo-q4'>whisper turbo-q4(準·省)</option>"
+        "<option value='mlx-community/whisper-large-v3-mlx'>whisper large-v3(最準·吃)</option>"
+        "<option value='mlx-community/whisper-small-mlx-q4'>whisper small-q4(快)</option>"
+        "<option value='mlx-community/Qwen3-ASR-1.7B-8bit'>Qwen3-ASR 1.7B(準·快)</option>"
+        "</optgroup>"
+        "<optgroup label='🔧 .cpp · Metal'>"
+        "<option value='qwen3-asr-0.6b-q4-k-m'>Qwen3-ASR 0.6B(快)</option>"
+        "<option value='qwen3-asr-1.7b'>Qwen3-ASR 1.7B(chatllm·慢·備用)</option>"
+        "</optgroup>"
+        "<optgroup label='🐢 transformers · 慢'>"
+        "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B</option>"
+        "<option value='Qwen/Qwen3-ASR-1.7B'>Qwen3-ASR 1.7B(很慢)</option>"
+        "</optgroup>"
         "</select>"
         "<select id=relang>"
         "<option value=''>語言:自動</option><option value='zh'>中文</option>"

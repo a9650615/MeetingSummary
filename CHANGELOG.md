@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.3.3
+- **模型依後端分組，方便辨識**：即時模型、重新辨識的下拉用 `optgroup` 分成 **🧠 NPU·ANE 省電／⚡ MLX·Metal/GPU／🔧 .cpp·Metal／🐢 transformers·慢**；設定頁「支援的模型」表也加上分組標題。一眼看出每個模型跑在哪個後端（GPU 還是 Neural Engine）。
+
 ## 0.3.2
 - **ANE `speech` CLI 改為 app 內一鍵安裝**：不用再自己開終端機 `brew install speech`。「設定 → 加速 runtime」多出 `speech`(ANE 省電辨識)一列，按「編譯安裝」即在背景 `brew install speech`(含進度)。M 系列若尚未安裝，實驗性功能區的 ANE 說明會指向那裡;裝好後開關自動出現。`setup_runtime.sh` 加 `speech` 目標(冪等)＋確保非登入 shell 也找得到 brew。
 
