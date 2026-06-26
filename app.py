@@ -1490,9 +1490,21 @@ def _run_diarize_job(store, mid, body, jobs):
                 if os.path.exists(tmp):
                     os.remove(tmp)
             rows = [dict(r) for r in store.list_transcripts(mid) if r["track"] == track]
-            for r in diar.assign_speakers(rows, segments, prefix=label,
-                                          names=names, mark_overlap=body.mark_overlap):
-                store.update_speaker(r["id"], r["speaker"])
+            # split=True: a line spanning >1 speaker turn is cut at the boundary so
+            # each person gets their own line (force a break on speaker change).
+            assigned = diar.assign_speakers(rows, segments, prefix=label, names=names,
+                                            mark_overlap=body.mark_overlap, split=True)
+            splits = {}
+            for r in assigned:
+                if r.get("split"):
+                    splits.setdefault(r["src_id"], []).append(r)
+                else:
+                    store.update_speaker(r["id"], r["speaker"])
+            for src_id, pieces in splits.items():  # replace 1 multi-speaker line with N
+                store.delete_transcript(src_id)
+                for p in pieces:
+                    store.add_transcript(mid, p["profile"], p["track"], p["start_ms"],
+                                         p["end_ms"], p["speaker"], p["text"])
             total_spk += len({s["speaker"] for s in segments})
         jobs[mid] = {"state": "done", "speakers": total_spk, "tracks": tracks}
     except Exception as e:

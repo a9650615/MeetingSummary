@@ -67,8 +67,68 @@ def _resolve_models(seg_model=None, emb_model=None, progress=None):
     return seg, emb
 
 
+_PUNCT = "。！？，、；：,!?;.…"
+
+
+def _snap_cut(text, idx, window=10):
+    """Nearest index to idx whose preceding char is sentence/clause punctuation
+    (within ±window), else idx — so a split piece ends on a natural boundary."""
+    n = len(text)
+    idx = max(0, min(n, idx))
+    best, bestd = None, 1e9
+    for i in range(max(1, idx - window), min(n, idx + window) + 1):
+        if text[i - 1] in _PUNCT and abs(i - idx) < bestd:
+            best, bestd = i, abs(i - idx)
+    return best if best is not None else idx
+
+
+def _split_text(text, fracs):
+    """Split text into len(fracs) pieces by cumulative time fraction, each cut
+    snapped to the nearest punctuation so pieces read as whole clauses."""
+    text = (text or "").strip()
+    n = len(text)
+    if n == 0 or len(fracs) <= 1:
+        return [text]
+    cuts, acc, prev = [], 0.0, 0
+    for f in fracs[:-1]:
+        acc += f
+        cuts.append(_snap_cut(text, int(round(acc * n))))
+    pieces = []
+    for c in cuts + [n]:
+        c = max(prev, min(n, c))
+        pieces.append(text[prev:c].strip())
+        prev = c
+    return pieces
+
+
+def _speaker_pieces(s0, s1, segments, min_piece=0.6):
+    """The speaker timeline within [s0,s1]: consecutive same-speaker spans merged,
+    tiny fragments (<min_piece s) absorbed into a neighbour. -> [(speaker, st, en)]."""
+    spans = sorted(((max(s0, sg["start"]), min(s1, sg["end"]), sg["speaker"])
+                    for sg in segments if min(s1, sg["end"]) > max(s0, sg["start"])),
+                   key=lambda x: x[0])
+    if not spans:
+        return []
+    merged = [list(spans[0])]
+    for st, en, sp in spans[1:]:
+        if sp == merged[-1][2]:
+            merged[-1][1] = max(merged[-1][1], en)
+        else:
+            merged.append([st, en, sp])
+    out = []
+    for p in merged:
+        if out and (p[1] - p[0]) < min_piece:
+            out[-1][1] = p[1]            # absorb a tiny piece into the previous one
+        else:
+            out.append(p)
+    if len(out) >= 2 and (out[0][1] - out[0][0]) < min_piece:
+        out[1][0] = out[0][0]
+        out.pop(0)
+    return [(sp, st, en) for st, en, sp in out]
+
+
 def assign_speakers(transcripts, segments, *, prefix="說話者", names=None,
-                    mark_overlap=False, overlap_ratio=0.3):
+                    mark_overlap=False, overlap_ratio=0.3, split=False):
     """Relabel each transcript with the diarization speaker that has the MOST time
     overlap with the line's [start,end] window — so a short interjection at a line's
     start can't mislabel the whole line (dominant speaker wins). Falls back to the
@@ -93,6 +153,20 @@ def assign_speakers(transcripts, segments, *, prefix="說話者", names=None,
             o = min(s1, seg["end"]) - max(s0, seg["start"])
             if o > 0:
                 ov[seg["speaker"]] = ov.get(seg["speaker"], 0.0) + o
+        # split=True: if the line spans >=2 speaker TURNS, cut it at the boundaries
+        # so each person's words land on their own line (text split by time fraction,
+        # snapped to punctuation). mark_overlap takes precedence (can't do both).
+        if split and not mark_overlap:
+            pieces = _speaker_pieces(s0, s1, segments)
+            if len(pieces) >= 2:
+                texts = _split_text(t.get("text", ""), [(pe - ps) / dur for _, ps, pe in pieces])
+                for (spk, ps, pe), txt in zip(pieces, texts):
+                    if not txt:
+                        continue
+                    out.append({**t, "speaker": label(spk), "text": txt,
+                                "start_ms": int(ps * 1000), "end_ms": int(pe * 1000),
+                                "split": True, "src_id": t.get("id")})
+                continue
         nt = dict(t)
         if ov:
             ranked = sorted(ov.items(), key=lambda kv: -kv[1])

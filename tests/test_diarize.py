@@ -99,3 +99,24 @@ def test_mark_overlap_ignores_brief_interjection():
             {"start": 0.4, "end": 5.0, "speaker": 0}]
     out = assign_speakers(line, segs, mark_overlap=True)
     assert out[0]["speaker"] == "說話者1" and "overlap" not in out[0]
+
+
+def test_split_text_snaps_to_punctuation():
+    from diarize import _split_text
+    p = _split_text("愛實作啊，這個應該也得學實作。好，謝謝。", [0.7, 0.3])
+    assert len(p) == 2 and p[0].endswith("。") and p[1] == "好，謝謝。"
+
+
+def test_assign_speakers_splits_on_speaker_change():
+    t = [{"id": 1, "track": "system", "profile": "accurate",
+          "start_ms": 0, "end_ms": 10000, "text": "前半段講完了。後半段換人說。"}]
+    segs = [{"start": 0, "end": 5, "speaker": "A"}, {"start": 5, "end": 10, "speaker": "B"}]
+    out = assign_speakers(t, segs, prefix="對方", split=True)
+    assert len(out) == 2                                  # one line -> two (speaker change)
+    assert out[0]["speaker"] == "對方1" and out[1]["speaker"] == "對方2"
+    assert out[0]["split"] and out[0]["src_id"] == 1
+    assert out[0]["text"] and out[1]["text"]              # text distributed to both
+    # a single-speaker line is NOT split
+    one = assign_speakers(t, [{"start": 0, "end": 10, "speaker": "A"}],
+                          prefix="對方", split=True)
+    assert len(one) == 1 and not one[0].get("split")

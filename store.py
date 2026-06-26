@@ -109,6 +109,10 @@ class Store:
             (meeting_id,),
         ).fetchall()
 
+    def delete_transcript(self, transcript_id):
+        self.db.execute("DELETE FROM transcripts WHERE id=?", (transcript_id,))
+        self.db.commit()
+
     def update_speaker(self, transcript_id, speaker):
         self.db.execute("UPDATE transcripts SET speaker=? WHERE id=?",
                         (speaker, transcript_id))
