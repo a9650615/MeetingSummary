@@ -5,6 +5,7 @@
 # Auto-installs the build env via brew when needed. Idempotent.
 set -euo pipefail
 cd "$(dirname "$0")"
+export PATH="/opt/homebrew/bin:$PATH"  # server runs non-login shell -> ensure brew is found
 REPO="${MEETING_REPO:-a9650615/MeetingSummary}"
 
 _brew() { command -v brew >/dev/null && brew install "$1"; }
@@ -84,5 +85,13 @@ case "${1:-}" in
     fi
     test -f chatllm.cpp/bindings/libchatllm.dylib && echo "chatllm OK"
     ;;
-  *) echo "usage: setup_runtime.sh femelo|chatllm"; exit 2 ;;
+  speech)
+    # ANE (Neural Engine) ASR: Qwen3-ASR CoreML via the homebrew `speech` CLI
+    # (homebrew-core). Power-efficient transcription, off the GPU.
+    command -v brew >/dev/null || { echo "need Homebrew (brew install …)"; exit 1; }
+    if command -v speech >/dev/null; then echo "speech already installed"; exit 0; fi
+    echo "安裝 speech (Qwen3-ASR ANE)…"
+    brew install speech && command -v speech >/dev/null && echo "speech OK"
+    ;;
+  *) echo "usage: setup_runtime.sh femelo|chatllm|speech"; exit 2 ;;
 esac

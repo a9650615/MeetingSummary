@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.3.2
+- **ANE `speech` CLI 改為 app 內一鍵安裝**：不用再自己開終端機 `brew install speech`。「設定 → 加速 runtime」多出 `speech`(ANE 省電辨識)一列，按「編譯安裝」即在背景 `brew install speech`(含進度)。M 系列若尚未安裝，實驗性功能區的 ANE 說明會指向那裡;裝好後開關自動出現。`setup_runtime.sh` 加 `speech` 目標(冪等)＋確保非登入 shell 也找得到 brew。
+
 ## 0.3.1
 - **ANE 省電辨識納入自動流程**：開關開啟後（M 系列），不只手動下拉選 ANE — **上傳音檔的自動辨識**、以及**未指定模型的「重新語音辨識」** 都改走 Neural Engine（離 GPU、省電）。新增 `_default_asr()` 統一決定自動/預設用哪個 backend；上傳 (`/ingest`) 與兩條 transcribe 路由共用。關閉開關則回到原本 MLX 預設。
 

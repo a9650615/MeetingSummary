@@ -645,20 +645,23 @@ def _models_page():
         "分群時標記重疊/多人語音（同一句多位說話者會標「🔀」，啟發式，非真分離）</label>"
         "<p class=hint style='margin:.6em 0 0'>實驗性功能可能不穩定或不準確；於各會議的「多人分群」時生效。</p>"
         "</div>"
-        + ("<div class=card style='margin-top:12px'>"
-           "<label class=chk><input type=checkbox id=ane_opt> "
-           "🧪 ANE 省電辨識（Apple Neural Engine·M 系列）：重新辨識多出 Qwen3-ASR(ANE) 引擎，"
-           "跑在 Neural Engine — 省電、不發熱、不占 GPU（INT8，準度略降一點）。</label>"
-           "<p class=hint style='margin:.6em 0 0'>需 <code>brew install speech</code>。偵測到 Apple Silicon + speech CLI 才顯示此選項。</p>"
-           "</div>" if _ane_available() else "")
+        + (("<div class=card style='margin-top:12px'>"
+            "<label class=chk><input type=checkbox id=ane_opt> "
+            "🧪 ANE 省電辨識（Apple Neural Engine·M 系列）：辨識（自動＋重新辨識）跑在 Neural Engine — "
+            "省電、不發熱、不占 GPU（INT8，準度略降一點）。</label>"
+            "<p class=hint style='margin:.6em 0 0'>開啟後上傳的自動辨識與「重新語音辨識」都改走 ANE。</p></div>"
+            if _ane_available() else
+            "<div class=card style='margin-top:12px'><p class=hint>🧪 <b>ANE 省電辨識（M 系列）</b>："
+            "先到下方「加速 runtime」一鍵安裝 <code>speech</code>，裝好後這裡會出現開關。</p></div>")
+           if _apple_silicon() else "")
         + "</section>"
 
         "<section id=sec-rt><h2>加速 runtime（.cpp · Metal）</h2>"
         "<div class=card>"
         "<table class=tx id=rt><tr><th>Runtime</th><th>狀態</th><th></th></tr></table>"
         "<p class=hint style='margin:.5em 0 0'>一鍵安裝。chatllm 優先下載預編譯(免 cmake)，"
-        "下載不到才原始碼編譯；femelo 需 python≥3.11。缺的環境會自動 brew 安裝。"
-        "清除只移除編譯產物，模型權重保留。</p>"
+        "下載不到才原始碼編譯；femelo 需 python≥3.11；speech = ANE 省電辨識(Qwen3-ASR CoreML，brew)。"
+        "缺的環境會自動 brew 安裝。清除只移除編譯產物，模型權重保留。</p>"
         "</div></section>")
     script = r"""
     function human(mb){return mb>=1000?(mb/1000).toFixed(1)+' GB':mb+' MB';}
@@ -1307,10 +1310,15 @@ def _model_cached(m):
 
 
 def _runtime_status():
-    return {
+    import platform  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+    st = {
         "femelo": os.path.isfile(os.path.abspath(".venv-qwen314/bin/python")),
         "chatllm": os.path.isfile(os.path.abspath("chatllm.cpp/bindings/libchatllm.dylib")),
     }
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        st["speech"] = shutil.which("speech") is not None  # ANE ASR (省電)
+    return st
 
 
 def _free_models():
@@ -1341,13 +1349,16 @@ def _free_models():
     return freed
 
 
+def _apple_silicon():
+    import platform  # noqa: PLC0415
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
 def _ane_available():
     """Apple Neural Engine ASR path is usable: Apple Silicon + the `speech` CLI
-    installed. Gates the experimental ANE (省電) option — shown only on M-series."""
-    import platform  # noqa: PLC0415
+    installed. (On M-series but speech missing -> the 設定 install button shows.)"""
     import shutil  # noqa: PLC0415
-    return (sys.platform == "darwin" and platform.machine() == "arm64"
-            and shutil.which("speech") is not None)
+    return _apple_silicon() and shutil.which("speech") is not None
 
 
 def _persistent_names(store, embs, prefix, threshold=0.62):
@@ -2089,6 +2100,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # Uninstall a .cpp runtime = remove its build dir -> status flips to 未安裝.
         # Re-compile re-fetches/builds. Model weights live elsewhere, untouched.
         import shutil
+        if body.runtime == "speech":  # brew formula, not a build dir
+            import subprocess
+            subprocess.run(["brew", "uninstall", "speech"], capture_output=True)
+            return {"runtime": "speech", "removed": True}
         targets = {"femelo": ".venv-qwen314", "chatllm": "chatllm.cpp"}
         d = targets.get(body.runtime)
         if not d:
