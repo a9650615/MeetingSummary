@@ -265,6 +265,29 @@ def match_speaker(emb, known, threshold=0.62):
     return (best_id if best >= threshold else None), best
 
 
+def similar_speaker_pairs(rows, threshold=0.5):
+    """Global-speaker pairs whose voiceprints are close enough to maybe be the SAME
+    person but didn't auto-merge — surfaced as 'might be a duplicate, merge?'
+    suggestions. rows = store.list_speakers() (id, name, centroid bytes)."""
+    import numpy as np  # noqa: PLC0415
+    vecs = []
+    for r in rows:
+        if not r["centroid"]:
+            continue
+        v = np.frombuffer(r["centroid"], dtype=np.float32)
+        n = float(np.linalg.norm(v))
+        if n > 0:
+            vecs.append((r["id"], r["name"], v / n))
+    out = []
+    for i in range(len(vecs)):
+        for j in range(i + 1, len(vecs)):
+            sim = float(np.dot(vecs[i][2], vecs[j][2]))
+            if sim >= threshold:
+                out.append({"a": vecs[i][1], "b": vecs[j][1], "sim": round(sim, 3)})
+    out.sort(key=lambda x: -x["sim"])
+    return out
+
+
 def diarize_pcm(pcm_path, *, sample_rate=16000, num_speakers=-1,
                 seg_model=None, emb_model=None, progress=None, on_progress=None):
     """Cluster speakers in a 16-bit mono PCM file -> [{start,end,speaker}].

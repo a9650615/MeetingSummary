@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS meeting_tags(
     meeting_id INTEGER, tag_id INTEGER, PRIMARY KEY(meeting_id, tag_id));
 CREATE TABLE IF NOT EXISTS speakers(
     id INTEGER PRIMARY KEY, name TEXT, centroid BLOB, count INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
 """
 
 
@@ -185,6 +186,68 @@ class Store:
         cur = self.db.execute("UPDATE speakers SET name=? WHERE name=?", (new, old))
         self.db.commit()
         return cur.rowcount
+
+    def rename_speaker_global(self, old, new):
+        """Rename a speaker EVERYWHERE: all meetings' transcripts + the voiceprint.
+        (rename_global_speaker only touches the voiceprint — that's for propagating
+        a per-meeting rename forward; this is the management-page global rename.)"""
+        new = (new or "").strip()
+        if not old or not new or old == new:
+            return 0
+        cur = self.db.execute("UPDATE transcripts SET speaker=? WHERE speaker=?",
+                              (new, old))
+        self.db.execute("UPDATE speakers SET name=? WHERE name=?", (new, old))
+        self.db.commit()
+        return cur.rowcount
+
+    def speakers_with_stats(self):
+        """Global speakers + how often they appear in transcripts (linked by name):
+        distinct meetings + total utterances. Powers the speaker-management page."""
+        out = []
+        for s in self.db.execute(
+                "SELECT id, name, count FROM speakers ORDER BY name"):
+            r = self.db.execute(
+                "SELECT COUNT(DISTINCT meeting_id) m, COUNT(*) u "
+                "FROM transcripts WHERE speaker=?", (s["name"],)).fetchone()
+            out.append({"id": s["id"], "name": s["name"], "count": s["count"],
+                        "meetings": r["m"], "utterances": r["u"]})
+        return out
+
+    def merge_speakers(self, keep_name, drop_name):
+        """Two voiceprints are the same person: move all of drop's transcripts to
+        keep (every meeting) and delete drop's voiceprint(s). Returns rows moved."""
+        if not keep_name or not drop_name or keep_name == drop_name:
+            return 0
+        cur = self.db.execute("UPDATE transcripts SET speaker=? WHERE speaker=?",
+                              (keep_name, drop_name))
+        self.db.execute("DELETE FROM speakers WHERE name=?", (drop_name,))
+        self.db.commit()
+        return cur.rowcount
+
+    def delete_speaker(self, speaker_id):
+        """Forget a voiceprint (future meetings won't match it). Transcripts keep
+        their existing text label."""
+        self.db.execute("DELETE FROM speakers WHERE id=?", (speaker_id,))
+        self.db.commit()
+
+    def speaker_utterances(self, name, limit=500):
+        """Every utterance by a speaker ACROSS meetings (newest first)."""
+        return self.db.execute(
+            "SELECT t.meeting_id, m.title, m.created_at, t.start_ms, t.text "
+            "FROM transcripts t JOIN meetings m ON m.id=t.meeting_id "
+            "WHERE t.speaker=? ORDER BY m.created_at DESC, t.start_ms LIMIT ?",
+            (name, limit)).fetchall()
+
+    # --- key/value settings (e.g. the global persistent-speaker toggle) ---
+    def get_setting(self, k, default=None):
+        r = self.db.execute("SELECT v FROM settings WHERE k=?", (k,)).fetchone()
+        return r["v"] if r else default
+
+    def set_setting(self, k, v):
+        self.db.execute(
+            "INSERT INTO settings(k,v) VALUES(?,?) "
+            "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, str(v)))
+        self.db.commit()
 
     # --- tags (many-to-many: a meeting can carry #客戶 #1on1 #產品) ---
     def add_tag(self, meeting_id, name):

@@ -391,6 +391,7 @@ _INDEX = _shell("MeetingSummary", """
 <h1>本地會議轉錄 · 摘要</h1>
 <div class=row style="margin-bottom:4px">
 <a class="btn primary" href="/live">🔴 開始 Live 即時逐字稿</a>
+<a class="btn" href="/speakers/manage">👥 語者</a>
 <a class="btn" href="/models/manage">⚙️ 設定</a>
 </div>
 <h2>上傳音檔</h2>
@@ -506,6 +507,91 @@ document.getElementById('mergebtn').onclick = async () => {
   setTimeout(()=>location.reload(),600);
 };
 """)
+
+
+def _speakers_page():
+    body = ("<h1>👥 語者</h1>"
+            "<div class=card>"
+            "<label class=chk><input type=checkbox id=persist> "
+            "跨會議記住說話者(聲紋)：分群時把每個人的聲紋存進語者庫，下次會議自動認出同一人並沿用名字。</label>"
+            "<p class=hint style='margin:.5em 0 0'>關閉後分群只在單場內進行，不建立／比對全域聲紋。</p>"
+            "<div class=setrow style='margin-top:10px'><label class=hint>辨識門檻(cosine，越高越保守、寧可分開) "
+            "<input id=thr type=number min=0.3 max=0.9 step=0.01 style='width:80px'></label></div></div>"
+            "<div class=card id=sugcard style='display:none'>"
+            "<h2 style='margin-top:0;font-size:15px'>可能是同一人</h2>"
+            "<div id=sugs></div></div>"
+            "<div class=card><table class=tx id=sp>"
+            "<tr><th>名稱</th><th>會議</th><th>發言</th><th></th></tr></table>"
+            "<p class=hint id=empty style='display:none'>還沒有任何已記住的語者。分群一場多人會議(會後處理)即可建立。</p></div>"
+            "<div class=card id=uttcard style='display:none'>"
+            "<h2 style='margin-top:0' id=utthead>發言</h2>"
+            "<div id=utts></div></div>")
+    script = """
+let ALL=[];
+function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function ts(ms){const s=Math.round((ms||0)/1000);return (s/60|0)+':'+String(s%60).padStart(2,'0');}
+function fmtDay(t){const d=new Date(t*1000);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+async function load(){
+  const j=await(await fetch('/speakers')).json();
+  document.getElementById('persist').checked=j.persist;
+  ALL=j.speakers||[];
+  const t=document.getElementById('sp');
+  t.querySelectorAll('tr:not(:first-child)').forEach(r=>r.remove());
+  document.getElementById('empty').style.display=ALL.length?'none':'block';
+  for(const s of ALL){
+    const others=ALL.filter(o=>o.id!==s.id).map(o=>`<option value="${esc(o.name)}">${esc(o.name)}</option>`).join('');
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><b>${esc(s.name)}</b></td><td>${s.meetings}</td><td>${s.utterances}</td>
+      <td style="white-space:nowrap">
+      <button class=btn data-act=view data-name="${esc(s.name)}">發言</button>
+      <button class=btn data-act=rename data-id="${s.id}" data-name="${esc(s.name)}">改名</button>
+      ${others?`<select data-act=merge data-keep="${esc(s.name)}"><option value="">合併另一位到此…</option>${others}</select>`:''}
+      <button class="btn danger" data-act=del data-id="${s.id}">刪除</button></td>`;
+    t.appendChild(tr);
+  }
+  t.querySelectorAll('[data-act=rename]').forEach(b=>b.onclick=async()=>{
+    const nw=prompt('語者改名(套用到所有會議):',b.dataset.name);if(nw==null||!nw.trim())return;
+    await fetch(`/speakers/${b.dataset.id}/rename`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nw.trim()})});load();});
+  t.querySelectorAll('[data-act=del]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('忘記這個聲紋?(逐字稿名稱保留,只是之後不再自動認出)'))return;
+    await fetch(`/speakers/${b.dataset.id}`,{method:'DELETE'});load();});
+  t.querySelectorAll('[data-act=merge]').forEach(sel=>sel.onchange=async()=>{
+    const drop=sel.value;if(!drop)return;
+    if(!confirm(`把「${drop}」併入「${sel.dataset.keep}」?(同一個人)`)){sel.value='';return;}
+    await fetch('/speakers/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:sel.dataset.keep,drop})});load();});
+  t.querySelectorAll('[data-act=view]').forEach(b=>b.onclick=()=>view(b.dataset.name));
+  loadSugs();
+}
+async function loadSugs(){
+  const j=await(await fetch('/speakers/suggestions')).json();
+  const pairs=j.pairs||[];
+  document.getElementById('sugcard').style.display=pairs.length?'block':'none';
+  document.getElementById('sugs').innerHTML=pairs.map(p=>
+    `<div class=setrow style="gap:8px;margin:4px 0"><span><b>${esc(p.a)}</b> ↔ <b>${esc(p.b)}</b>
+     <span class="muted small">相似度 ${p.sim}</span></span>
+     <button class=btn data-keep="${esc(p.a)}" data-drop="${esc(p.b)}">是同一人，合併</button></div>`).join('');
+  document.querySelectorAll('#sugs button').forEach(b=>b.onclick=async()=>{
+    await fetch('/speakers/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:b.dataset.keep,drop:b.dataset.drop})});load();});
+}
+async function view(name){
+  const j=await(await fetch(`/speakers/${encodeURIComponent(name)}/utterances`)).json();
+  document.getElementById('utthead').textContent=`${name} 的發言（${j.utterances.length}）`;
+  const by={};for(const u of j.utterances){(by[u.meeting_id]=by[u.meeting_id]||{title:u.title,at:u.created_at,items:[]}).items.push(u);}
+  document.getElementById('utts').innerHTML=Object.entries(by).map(([mid,g])=>
+    `<div style="margin:0 0 12px"><a href="/m/${mid}"><b>${esc(g.title)}</b></a> <span class="muted small">${fmtDay(g.at)}</span>
+     <table class=tx>${g.items.map(u=>`<tr><td class=ts style="width:64px">${ts(u.start_ms)}</td><td>${esc(u.text)}</td></tr>`).join('')}</table></div>`).join('')
+     || '<p class=muted>無發言</p>';
+  document.getElementById('uttcard').style.display='block';
+  document.getElementById('uttcard').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+document.getElementById('persist').onchange=async(e)=>{
+  await fetch('/settings/persist_speakers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:e.target.checked?'1':'0'})});};
+async function loadThr(){const t=document.getElementById('thr');
+  t.value=(await(await fetch('/settings/speaker_threshold')).json()).value;
+  t.onchange=async()=>{await fetch('/settings/speaker_threshold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:t.value})});loadSugs();};}
+loadThr();load();
+"""
+    return _shell("語者 · MeetingSummary", body, script=script, back=True)
 
 
 def _models_page():
@@ -894,6 +980,19 @@ class MergeIn(BaseModel):
     ids: list[int]
 
 
+class SpeakerMergeIn(BaseModel):
+    keep: str   # the name to keep
+    drop: str   # the duplicate voiceprint/name to fold into keep
+
+
+class NameIn(BaseModel):
+    name: str
+
+
+class SettingIn(BaseModel):
+    value: str
+
+
 class TranscribeIn(BaseModel):
     model: Optional[str] = None      # None -> default accurate backend
     language: Optional[str] = None   # None -> auto-detect; "zh"/"en"/"ja"… forces it
@@ -1232,6 +1331,10 @@ def _persistent_names(store, embs, prefix, threshold=0.62):
     /speaker route -> rename_global_speaker)."""
     import numpy as np  # noqa: PLC0415
     import diarize as diar  # noqa: PLC0415
+    try:
+        threshold = float(store.get_setting("speaker_threshold", str(threshold)))
+    except (ValueError, TypeError):
+        pass
     known = [(r["id"], np.frombuffer(r["centroid"], dtype=np.float32))
              for r in store.list_speakers() if r["centroid"]]
     rows = {r["id"]: r for r in store.list_speakers()}
@@ -1364,12 +1467,14 @@ def _run_diarize_job(store, mid, body, jobs):
                 jobs[mid].update(done=done, total=total, text=f"{_p}{_l} 分群中…")
 
             names = None
+            # Persistent cross-meeting voiceprints: on unless the global toggle is off.
+            enroll = body.enroll and store.get_setting("persist_speakers", "1") == "1"
             try:
                 # Runs in a subprocess — sherpa's process() holds the GIL and would
                 # otherwise freeze the event loop (no page switches while diarizing).
                 segments, embs = diar.diarize_with_progress(
                     tmp, num_speakers=body.num_speakers, seg_model=body.seg_model,
-                    emb_model=body.emb_model, enroll=body.enroll, on_progress=on_prog,
+                    emb_model=body.emb_model, enroll=enroll, on_progress=on_prog,
                     on_phase=lambda ph: jobs[mid].update(text=f"{pre}{label} 建立聲紋…"))
                 if embs:
                     names = _persistent_names(store, embs, label)
@@ -1474,7 +1579,8 @@ def _save_upload_pcm(src_path, mid, store):
 _TRACK_LABEL = {"system": "對方", "mic": "我", "mixed": "混合"}
 
 
-def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=()):
+def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
+                 recognized=()):
     def ts_str(ms):
         s = (ms or 0) // 1000
         return f"{s // 60:d}:{s % 60:02d}"
@@ -1503,6 +1609,9 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         f"<button class=btn id=edittitle title='改標題' style='padding:.25em .5em;font-size:13px'>✏️</button> "
         f"<span class='badge {badge}'>{html.escape(meeting['status'])}</span></h1>"
         "<div id=tags class=row style='gap:6px;margin:-4px 0 14px'></div>"
+        + ((f"<div class=hint style='margin:-6px 0 12px'>🔁 本場認得："
+            + "、".join(html.escape(n) for n in recognized)
+            + " <a href='/speakers/manage'>管理語者</a></div>") if recognized else "")
         + audio_card +
         "<div class=card><h2 style='margin-top:0'>摘要</h2>"
         "<div class=row>"
@@ -1758,9 +1867,15 @@ def create_app(store, *, summary_backend, asr_backend=None,
             raise HTTPException(404, "meeting not found")
         # Tracks with retained audio (across all segments — handles merged meetings).
         audio_tracks = _meeting_tracks(store, mid)
-        return _detail_page(mid, dict(meeting), _rows(store.list_transcripts(mid)),
+        transcripts = _rows(store.list_transcripts(mid))
+        # "本場認得" = speakers here that are global voiceprints also seen in OTHER
+        # meetings (cross-meeting recognition), so the user sees persistence working.
+        here = {r["speaker"] for r in transcripts}
+        known = {s["name"]: s for s in store.speakers_with_stats()}
+        recognized = sorted(n for n in here if known.get(n, {}).get("meetings", 0) > 1)
+        return _detail_page(mid, dict(meeting), transcripts,
                             _rows(store.list_summaries(mid)), audio_tracks,
-                            tags=store.tags_for(mid))
+                            tags=store.tags_for(mid), recognized=recognized)
 
     @app.get("/meetings/{mid}/audio/{track}.wav")
     def meeting_audio(mid: int, track: str):
@@ -1791,6 +1906,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.get("/models/manage", response_class=HTMLResponse)
     def models_manage():
         return _models_page()
+
+    @app.get("/speakers/manage", response_class=HTMLResponse)
+    def speakers_manage():
+        return _speakers_page()
 
     @app.get("/changelog", response_class=HTMLResponse)
     def changelog_page():
@@ -2399,6 +2518,57 @@ def create_app(store, *, summary_backend, asr_backend=None,
                                 "total": j.get("total", 0), "text": j.get("text", ""),
                                 "title": m["title"] if m else None})
         return {"jobs": out}
+
+    # --- persistent global speakers (cross-meeting voiceprint library) ---
+    @app.get("/speakers")
+    def speakers_list():
+        return {"speakers": _rows(store.speakers_with_stats()),
+                "persist": store.get_setting("persist_speakers", "1") == "1"}
+
+    @app.post("/speakers/{sid}/rename")
+    def speaker_rename(sid: int, body: NameIn):
+        cur = next((s for s in store.list_speakers() if s["id"] == sid), None)
+        if cur is None:
+            raise HTTPException(404, "speaker not found")
+        n = store.rename_speaker_global(cur["name"], body.name)
+        return {"renamed": n, "name": body.name.strip()}
+
+    @app.post("/speakers/merge")
+    def speaker_merge(body: SpeakerMergeIn):
+        return {"moved": store.merge_speakers(body.keep.strip(), body.drop.strip())}
+
+    @app.delete("/speakers/{sid}")
+    def speaker_delete(sid: int):
+        store.delete_speaker(sid)
+        return {"deleted": sid}
+
+    @app.get("/speakers/{name}/utterances")
+    def speaker_utterances(name: str):
+        return {"name": name, "utterances": _rows(store.speaker_utterances(name))}
+
+    @app.get("/speakers/suggestions")
+    def speaker_suggestions():
+        import diarize as diar
+        thr = float(store.get_setting("merge_suggest_threshold", "0.5"))
+        return {"pairs": diar.similar_speaker_pairs(store.list_speakers(), thr)}
+
+    _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62"}
+
+    @app.get("/settings/{key}")
+    def get_setting_route(key: str):
+        if key not in _SETTINGS:
+            raise HTTPException(404, "unknown setting")
+        return {"value": store.get_setting(key, _SETTINGS[key])}
+
+    @app.post("/settings/{key}")
+    def set_setting_route(key: str, body: SettingIn):
+        if key not in _SETTINGS:
+            raise HTTPException(404, "unknown setting")
+        v = body.value
+        if key == "persist_speakers":
+            v = "1" if v in ("1", "true", "on") else "0"
+        store.set_setting(key, v)
+        return {"value": store.get_setting(key, _SETTINGS[key])}
 
     return app
 

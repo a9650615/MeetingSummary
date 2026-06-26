@@ -118,6 +118,58 @@ def test_detect_ignores_background_app_without_mic(tmp_path, monkeypatch):
     assert c.get("/detect").json()["meeting"] is True       # real mic use -> meeting
 
 
+def test_speakers_routes_list_rename_merge_delete(tmp_path):
+    import struct
+    c, store = make_client(tmp_path)
+    a = store.add_speaker("對方1", struct.pack("2f", 1.0, 0.0))
+    store.add_speaker("對方2", struct.pack("2f", 0.0, 1.0))
+    mid = store.create_meeting("M", 1.0, "zh-TW")
+    store.add_transcript(mid, "accurate", "system", 0, 1, "對方1", "hi")
+    store.add_transcript(mid, "accurate", "system", 1, 2, "對方2", "yo")
+
+    body = c.get("/speakers").json()
+    assert body["persist"] is True and len(body["speakers"]) == 2
+
+    c.post(f"/speakers/{a}/rename", json={"name": "Scott"})       # global rename
+    assert store.list_transcripts(mid)[0]["speaker"] == "Scott"   # transcript moved too
+
+    assert c.post("/speakers/merge", json={"keep": "Scott", "drop": "對方2"}).json()["moved"] == 1
+    assert {s["name"] for s in store.list_speakers()} == {"Scott"}
+    assert len(c.get("/speakers/Scott/utterances").json()["utterances"]) == 2
+
+    sid = store.list_speakers()[0]["id"]
+    c.delete(f"/speakers/{sid}")
+    assert store.list_speakers() == []
+
+
+def test_detail_shows_recognized_cross_meeting_speaker(tmp_path):
+    import struct
+    c, store = make_client(tmp_path)
+    store.add_speaker("張三", struct.pack("2f", 1.0, 0.0))  # known voiceprint
+    m1 = store.create_meeting("A", 1.0, "zh-TW")
+    m2 = store.create_meeting("B", 2.0, "zh-TW")
+    store.add_transcript(m1, "accurate", "system", 0, 1, "張三", "hi")
+    store.add_transcript(m2, "accurate", "system", 0, 1, "張三", "yo")  # 2nd meeting
+    html = c.get(f"/m/{m2}").text
+    assert "本場認得" in html and "張三" in html  # cross-meeting recognition surfaced
+
+
+def test_speaker_suggestions_route(tmp_path):
+    import struct
+    c, store = make_client(tmp_path)
+    store.add_speaker("A", struct.pack("2f", 1.0, 0.0))
+    store.add_speaker("B", struct.pack("2f", 0.95, 0.31))  # near-duplicate voice
+    pairs = c.get("/speakers/suggestions").json()["pairs"]
+    assert pairs and pairs[0]["a"] == "A" and pairs[0]["b"] == "B" and pairs[0]["sim"] > 0.8
+
+
+def test_persist_speakers_toggle_route(tmp_path):
+    c, store = make_client(tmp_path)
+    assert c.get("/settings/persist_speakers").json()["value"] == "1"
+    assert c.post("/settings/persist_speakers", json={"value": "0"}).json()["value"] == "0"
+    assert store.get_setting("persist_speakers") == "0"
+
+
 def test_merge_nearby_route(tmp_path):
     c, store = make_client(tmp_path)
     store.create_meeting("A", 1000.0, "zh-TW")
