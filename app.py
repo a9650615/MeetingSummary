@@ -1864,7 +1864,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<button class=btn id=shot>📸 截圖（擷取畫面）</button>"
         "<span class='muted small' id=shotmsg></span></div>"
         "<div id=shots class=shotgrid></div>"
-        "<p class=hint style='margin:.6em 0 0'>擷取整個螢幕（如投影片）附加到此會議；首次需在系統設定授權「螢幕錄製」。</p></div>"
+        "<p class=hint style='margin:.6em 0 0'>由瀏覽器擷取畫面（如投影片）附加到此會議；會跳出分享畫面選擇（瀏覽器自己的權限，免額外授權）。</p></div>"
         "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
         "<div class=row style='margin-bottom:10px'>"
         "<select id=remodel>"
@@ -2031,9 +2031,19 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "el.querySelectorAll('[data-shot]').forEach(b=>b.onclick=async()=>{"
         "await fetch(`/meetings/${MID}/shots/delete`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:b.dataset.shot})});loadShots();});});}"
         "const _sb=document.getElementById('shot');if(_sb)_sb.onclick=async()=>{"
-        "const mm=document.getElementById('shotmsg');mm.textContent='擷取中…';"
-        "const r=await fetch(`/meetings/${MID}/screenshot`,{method:'POST'});"
-        "if(r.ok){mm.textContent='已擷取';loadShots();}else{let e={};try{e=await r.json();}catch(_e){}mm.textContent='失敗：'+(e.detail||r.status);}"
+        "const mm=document.getElementById('shotmsg');"
+        # capture in the browser (it owns the screen-share permission), then upload
+        "let stream;try{stream=await navigator.mediaDevices.getDisplayMedia({video:true});}"
+        "catch(e){mm.textContent='已取消';setTimeout(()=>{mm.textContent='';},2000);return;}"
+        "mm.textContent='擷取中…';"
+        "const v=document.createElement('video');v.srcObject=stream;await v.play();"
+        "await new Promise(r=>setTimeout(r,250));"
+        "const cv=document.createElement('canvas');cv.width=v.videoWidth;cv.height=v.videoHeight;"
+        "cv.getContext('2d').drawImage(v,0,0);stream.getTracks().forEach(t=>t.stop());"
+        "const blob=await new Promise(res=>cv.toBlob(res,'image/png'));"
+        "const fd=new FormData();fd.append('img',blob,'shot.png');mm.textContent='上傳中…';"
+        "const r=await fetch(`/meetings/${MID}/screenshot`,{method:'POST',body:fd});"
+        "if(r.ok){mm.textContent='已擷取';loadShots();}else{mm.textContent='失敗：'+r.status;}"
         "setTimeout(()=>{mm.textContent='';},2500);};"
         "loadShots();")
     return _shell(html.escape(meeting["title"]), body, script=script, back=True)
@@ -2972,25 +2982,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 "meetings": meetings[:12]}
 
     @app.post("/meetings/{mid}/screenshot")
-    def screenshot(mid: int):
-        # Capture the screen (e.g. shared slides) and attach it to the meeting,
-        # via the built-in `screencapture`. Needs macOS Screen-Recording permission
-        # for this process (granted once on first use). -x = no shutter sound.
+    async def screenshot(mid: int, img: UploadFile = File(...)):
+        # The browser captures the frame (it owns the screen-share permission —
+        # macOS Screen-Recording is per-app/TCC, so a headless server can't run
+        # `screencapture`). We just store the uploaded PNG against the meeting.
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
-        cap = shutil.which("screencapture")
-        if not cap:
-            raise HTTPException(400, "screencapture unavailable (macOS only)")
+        data = await img.read()
+        if not data:
+            raise HTTPException(400, "empty image")
         d = f"data/{mid}/shots"
         os.makedirs(d, exist_ok=True)
         name = f"{int(time.time() * 1000)}.png"
-        path = os.path.join(d, name)
-        try:
-            subprocess.run([cap, "-x", path], check=True, timeout=20)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(500, f"capture failed: {e}")
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
-            raise HTTPException(500, "empty capture — grant 螢幕錄製 permission to this app")
+        with open(os.path.join(d, name), "wb") as f:
+            f.write(data)
         return {"name": name}
 
     @app.get("/meetings/{mid}/shots")

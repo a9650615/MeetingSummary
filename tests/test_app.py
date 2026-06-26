@@ -431,19 +431,14 @@ def test_storage_report(tmp_path, monkeypatch):
 
 
 def test_screenshot_routes(tmp_path, monkeypatch):
-    import subprocess
-
-    import app
+    # Browser uploads the captured PNG (server doesn't run screencapture — TCC is
+    # per-app, a headless server can't be granted Screen-Recording).
     monkeypatch.chdir(tmp_path)
     c, store = make_client(tmp_path)
     mid = store.create_meeting("m", 1.0, "zh-TW")
-    monkeypatch.setattr(app.shutil, "which", lambda n: "/usr/sbin/screencapture")
-
-    def fake_run(cmd, **k):
-        open(cmd[-1], "wb").write(b"\x89PNG\r\n")  # nonempty fake png
-        return type("R", (), {"returncode": 0})()
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    name = c.post(f"/meetings/{mid}/screenshot").json()["name"]
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    r = c.post(f"/meetings/{mid}/screenshot", files={"img": ("shot.png", png, "image/png")})
+    name = r.json()["name"]
     assert name.endswith(".png")
     assert name in c.get(f"/meetings/{mid}/shots").json()["shots"]
     assert c.get(f"/meetings/{mid}/shots/{name}").status_code == 200
