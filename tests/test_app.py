@@ -104,6 +104,20 @@ def test_run_diarize_job_errors_without_audio(tmp_path, monkeypatch):
     assert jobs[mid]["state"] == "error"
 
 
+def test_detect_ignores_background_app_without_mic(tmp_path, monkeypatch):
+    import meeting_watch as mw
+    c, _ = make_client(tmp_path)
+    micbusy = tmp_path / "micbusy"
+    micbusy.write_text("x")  # helper present -> mic is the real signal
+    monkeypatch.setattr(mw, "_MICBUSY", str(micbusy))
+    monkeypatch.setattr(mw, "meeting_app_running", lambda: "MSTeams")  # runs all day
+    monkeypatch.setattr(mw, "mic_in_use", lambda: False)
+    d = c.get("/detect").json()
+    assert d["meeting"] is False and d["app"] == "MSTeams"  # bg app alone != meeting
+    monkeypatch.setattr(mw, "mic_in_use", lambda: True)
+    assert c.get("/detect").json()["meeting"] is True       # real mic use -> meeting
+
+
 def test_merge_nearby_route(tmp_path):
     c, store = make_client(tmp_path)
     store.create_meeting("A", 1000.0, "zh-TW")

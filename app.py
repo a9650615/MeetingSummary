@@ -1686,8 +1686,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.get("/detect")
     def detect():
-        # Meeting = mic in use (CoreAudio via micbusy) or a known meeting app running.
-        # Polled by every page (_DETECT_JS) -> banner + Web Notification.
+        # "In a meeting" = mic ACTUALLY in use. Teams/Slack/etc. run in the
+        # background all day, so a process match alone false-fires (reported:
+        # HUD said "MSTeams 進行中" with no mic). So when the micbusy helper is
+        # available, mic is the real signal and the app name only LABELS it; the
+        # process list is the trigger ONLY as a fallback when micbusy is absent.
         import meeting_watch as mw
         app_name = None
         try:
@@ -1699,8 +1702,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
             mic = mw.mic_in_use()
         except Exception:
             pass
+        have_mic = os.path.exists(mw._MICBUSY)
+        meeting = mic if have_mic else bool(app_name)
         label = app_name or ("麥克風使用中" if mic else None)
-        return {"meeting": bool(mic or app_name), "app": label,
+        return {"meeting": bool(meeting), "app": label,
                 "recording": idle["live"] > 0}
 
     @app.post("/shutdown")
