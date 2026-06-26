@@ -339,6 +339,12 @@ def match_speaker(emb, known, threshold=0.62):
     return (best_id if best >= threshold else None), best
 
 
+def _is_placeholder(name):
+    """Auto label not yet named by a human (我3 / 對方24 / 說話者5)."""
+    import re  # noqa: PLC0415
+    return bool(re.match(r"^(我|對方|說話者)\d+$", (name or "").strip()))
+
+
 def similar_speaker_pairs(rows, threshold=0.5):
     """Global-speaker pairs whose voiceprints are close enough to maybe be the SAME
     person but didn't auto-merge — surfaced as 'might be a duplicate, merge?'
@@ -358,6 +364,8 @@ def similar_speaker_pairs(rows, threshold=0.5):
             a, b = vecs[i][1], vecs[j][1]
             if a == b or (a, b) in seen or (b, a) in seen:
                 continue  # same name = same person; dedupe name pairs
+            if _is_placeholder(a) and _is_placeholder(b):
+                continue  # two un-named speakers -> can't judge, not a useful suggestion
             sim = float(np.dot(vecs[i][2], vecs[j][2]))
             if sim >= threshold:
                 seen.add((a, b))

@@ -120,3 +120,17 @@ def test_assign_speakers_splits_on_speaker_change():
     one = assign_speakers(t, [{"start": 0, "end": 10, "speaker": "A"}],
                           prefix="對方", split=True)
     assert len(one) == 1 and not one[0].get("split")
+
+
+def test_similar_pairs_skips_two_unnamed():
+    import struct
+    from diarize import similar_speaker_pairs
+    Row = lambda i, n, x, y: {"id": i, "name": n,
+                              "centroid": struct.pack("2f", x, y)}
+    # 我3 ↔ 對方5 both auto-labels -> dropped; Alice ↔ 我3 kept (one is named)
+    rows = [Row(1, "我3", 1.0, 0.0), Row(2, "對方5", 0.99, 0.14),
+            Row(3, "Alice", 0.98, 0.2)]
+    pairs = similar_speaker_pairs(rows, threshold=0.3)
+    names = {frozenset((p["a"], p["b"])) for p in pairs}
+    assert frozenset(("我3", "對方5")) not in names      # two un-named -> skipped
+    assert any("Alice" in (p["a"], p["b"]) for p in pairs)  # named pair kept
