@@ -268,7 +268,7 @@ _DETECT_JS = (
 # react (home paints row chips; the meeting page reloads / renders on completion).
 # window._jobsTick() forces an immediate poll (buttons call it right after start).
 _PROG_JS = (
-    "(function(){let prev=new Set(),timer=null,lastKeys='';"
+    "(function(){let prev=new Set(),timer=null,lastSig='';"
     "function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
     "function card(j){const pct=j.total?Math.round(j.done/j.total*100):null;"
     "const bar=pct!=null?`<div class=pgbar><i style=\"width:${pct}%\"></i></div>"
@@ -282,10 +282,14 @@ _PROG_JS = (
     # fires once, not every poll = the flicker). Otherwise update bar/%/text IN
     # PLACE — width transitions smoothly, the indeterminate animation isn't restarted.
     "function render(jobs){const el=document.getElementById('progpop');if(!el)return;"
-    "if(!jobs.length){el.hidden=true;el.innerHTML='';lastKeys='';return;}"
-    "el.hidden=false;const keys=jobs.map(key).join('|');"
-    "if(keys!==lastKeys){el.innerHTML=`<div class=pghead>⏳ ${jobs.length} 項處理中</div>`"
-    "+jobs.map(card).join('');lastKeys=keys;return;}"
+    "if(!jobs.length){el.hidden=true;el.innerHTML='';lastSig='';return;}"
+    # sig includes D/I (has-total) so a job that flips indeterminate->determinate
+    # (diarize: total unknown for the first tick, then 27/1361) rebuilds into a real
+    # bar instead of staying a looping animation. NOTE: the event-diff key (mid/kind)
+    # stays identity-only, so this never reads as a false 'finished'.
+    "el.hidden=false;const sig=jobs.map(j=>key(j)+(j.total?'D':'I')).join('|');"
+    "if(sig!==lastSig){el.innerHTML=`<div class=pghead>⏳ ${jobs.length} 項處理中</div>`"
+    "+jobs.map(card).join('');lastSig=sig;return;}"
     "const cards=el.querySelectorAll('.pgcard');"
     "jobs.forEach((j,i)=>{const c=cards[i];if(!c)return;"
     "const pct=j.total?Math.round(j.done/j.total*100):null;"
