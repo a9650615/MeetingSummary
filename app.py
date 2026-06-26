@@ -309,6 +309,54 @@ _PROG_JS = (
     "window._jobsTick=tick;tick();})();")
 
 
+# Global quick-record: a floating button on every page (except /live, which has
+# the full controls) that starts a MIC recording in place — so you can capture
+# from anywhere, not just the live page. Self-contained (own ws/AudioContext);
+# system-audio/model/diarize control still lives on /live. No bare // comments
+# (this script ships in the shell, scanned by the single-line-script guard).
+_REC_JS = (
+    "(function(){if(location.pathname==='/live')return;"
+    "let gws=null,gctx=null,gnode=null,gstream=null,t0=0,timer=null;"
+    "const fab=document.createElement('div');fab.id='_recfab';"
+    "fab.style.cssText='position:fixed;right:18px;bottom:18px;z-index:300';"
+    "document.body.appendChild(fab);"
+    "function fmt(s){s=Math.floor(s);return (s/60|0)+':'+('0'+s%60).slice(-2);}"
+    "const RB='border-radius:24px;padding:.6em 1em;box-shadow:0 6px 18px -6px rgba(0,0,0,.5)';"
+    "const RED='background:#c0392b;border-color:#c0392b;color:#fff;font-weight:700;';"
+    "function render(rec,elsewhere){"
+    "if(rec){fab.innerHTML=`<button class=btn id=_rs style=\"${RED}${RB}\">■ 停止 <span id=_rt>0:00</span></button>`;"
+    "document.getElementById('_rs').onclick=stop;}"
+    "else if(elsewhere){fab.innerHTML=`<a class=btn href=/live style=\"${RED}${RB}\">● 錄音中（前往）</a>`;}"
+    "else{fab.innerHTML=`<button class=btn id=_rstart style=\"${RB}\">● 快速錄音</button>`;"
+    "document.getElementById('_rstart').onclick=start;}}"
+    "async function start(){"
+    "try{gstream=await navigator.mediaDevices.getUserMedia({audio:true});}"
+    "catch(e){alert('無法取得麥克風');return;}"
+    "try{gctx=new AudioContext({sampleRate:16000});}catch(e){gctx=new AudioContext();}"
+    "const ratio=gctx.sampleRate/16000;"
+    "gws=new WebSocket(`ws://${location.host}/ws/live?src=mic`);gws.binaryType='arraybuffer';"
+    "gws.onmessage=e=>{};"
+    "gws.onopen=()=>{gnode=gctx.createScriptProcessor(4096,1,1);"
+    "gctx.createMediaStreamSource(gstream).connect(gnode);"
+    "const g=gctx.createGain();g.gain.value=0;gnode.connect(g);g.connect(gctx.destination);"
+    "gnode.onaudioprocess=ev=>{if(!gws||gws.readyState!==1)return;"
+    "const inp=ev.inputBuffer.getChannelData(0),outLen=Math.floor(inp.length/ratio),pcm=new Int16Array(outLen);"
+    "for(let i=0;i<outLen;i++){const a=Math.floor(i*ratio),b=Math.floor((i+1)*ratio);let s=0,n=0;"
+    "for(let j=a;j<b&&j<inp.length;j++){s+=inp[j];n++;}"
+    "const v=Math.max(-1,Math.min(1,n?s/n:0));pcm[i]=v*32767;}gws.send(pcm.buffer);};"
+    "t0=Date.now();render(true,false);"
+    "timer=setInterval(()=>{const el=document.getElementById('_rt');if(el)el.textContent=fmt((Date.now()-t0)/1000);},1000);};"
+    "gws.onclose=()=>cleanup();gws.onerror=()=>cleanup();}"
+    "function stop(){if(gws){try{gws.close();}catch(e){}}cleanup();}"
+    "function cleanup(){clearInterval(timer);timer=null;"
+    "if(gnode){gnode.onaudioprocess=null;try{gnode.disconnect();}catch(e){}gnode=null;}"
+    "if(gstream){gstream.getTracks().forEach(t=>t.stop());gstream=null;}"
+    "if(gctx){try{gctx.close();}catch(e){}gctx=null;}gws=null;refresh();}"
+    "async function refresh(){if(gws){render(true,false);return;}"
+    "try{const d=await(await fetch('/detect')).json();render(false,!!d.recording);}catch(e){render(false,false);}}"
+    "refresh();setInterval(()=>{if(!gws)refresh();},10000);})();")
+
+
 def _md_html(text):
     """Minimal, safe Markdown -> HTML (offline, no dep) for changelog + summaries.
     HTML-escapes first, then headings / **bold** / `code` / - and 1. lists / paras."""
@@ -388,6 +436,7 @@ def _shell(title, body, script="", back=False):
         + (f"<script>{script}</script>" if script else "")
         + f"<script>{_DETECT_JS}</script>"
         + f"<script>{_PROG_JS}</script>"
+        + f"<script>{_REC_JS}</script>"
         + "</body></html>"
     )
 
