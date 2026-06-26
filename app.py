@@ -1870,13 +1870,25 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t.trim()})});"
         "if(r.ok)document.getElementById('mtitle').textContent=(await r.json()).title;};"
         # Click a speaker name -> rename that person across the whole meeting.
+        # Speaker cell: click -> inline input backed by a datalist of known names
+        # (pick a past speaker instead of retyping). Enter/blur commits, Esc cancels.
         "document.querySelectorAll('td.who[data-spk]').forEach(td=>{td.style.cursor='pointer';"
-        "td.onclick=async(e)=>{e.stopPropagation();const old=td.dataset.spk;"
-        "const nw=prompt('把「'+old+'」改成(套用到整場該說話者):',old);"
-        "if(nw==null||!nw.trim()||nw.trim()===old)return;"
+        "td.onclick=(e)=>{e.stopPropagation();if(td.querySelector('input'))return;"
+        "const old=td.dataset.spk;let cancelled=false;"
+        "const inp=document.createElement('input');inp.value=old;inp.setAttribute('list','spkdl');"
+        "inp.autocomplete='off';inp.style.cssText='font:inherit;width:7em';"
+        "td.textContent='';td.appendChild(inp);inp.focus();inp.select();"
+        "const commit=async()=>{const nw=inp.value.trim();"
+        "if(cancelled||!nw||nw===old){td.textContent=old;return;}"
         f"const r=await fetch('/meetings/{mid}/speaker',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({old:old,new:nw.trim()})});"
-        "if(r.ok)location.reload();};});"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({old:old,new:nw})});"
+        "if(r.ok)location.reload();else td.textContent=old;};"
+        "inp.onkeydown=(ev)=>{if(ev.key==='Enter')inp.blur();"
+        "else if(ev.key==='Escape'){cancelled=true;inp.blur();}};inp.onblur=commit;};});"
+        "(function(){fetch('/speakers').then(r=>r.json()).then(j=>{"
+        "let dl=document.getElementById('spkdl');if(!dl){dl=document.createElement('datalist');"
+        "dl.id='spkdl';document.body.appendChild(dl);}"
+        "dl.innerHTML=(j.speakers||[]).map(s=>`<option value=\"${_esc(s.name)}\">`).join('');});})();"
         # Tags: chips + remove (✕) + an add input (Enter to add).
         "function _esc(s){return (s||'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));}"
         f"const MID={mid};"
@@ -1884,11 +1896,16 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({name,remove})})).json();}"
         "function renderTags(list){const el=document.getElementById('tags');"
         "el.innerHTML=list.map(t=>`<span class=tg>#${_esc(t)}<span class=x data-rm=\"${_esc(t)}\">✕</span></span>`).join('')"
-        "+`<input id=tagin placeholder='+ 標籤' style='font-size:12px;padding:2px 8px;width:88px'>`;"
+        "+`<input id=tagin placeholder='+ 標籤' list=tagdl autocomplete=off style='font-size:12px;padding:2px 8px;width:88px'>`;"
         "el.querySelectorAll('.x').forEach(s=>s.onclick=async()=>renderTags((await _postTag(s.dataset.rm,true)).tags));"
         "const ti=document.getElementById('tagin');ti.onkeydown=async(e)=>{"
         "if(e.key==='Enter'&&ti.value.trim()){const j=await _postTag(ti.value.trim(),false);renderTags(j.tags);}};}"
-        f"renderTags({json.dumps(list(tags))});")
+        f"renderTags({json.dumps(list(tags))});"
+        # tag autocomplete: suggest previously-used tags (across all meetings)
+        "fetch('/tags').then(r=>r.json()).then(j=>{"
+        "let dl=document.getElementById('tagdl');if(!dl){dl=document.createElement('datalist');"
+        "dl.id='tagdl';document.body.appendChild(dl);}"
+        "dl.innerHTML=(j.tags||[]).map(t=>`<option value=\"${_esc(t)}\">`).join('');});")
     return _shell(html.escape(meeting["title"]), body, script=script, back=True)
 
 
