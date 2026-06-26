@@ -1647,6 +1647,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
     # Idle auto-release: free loaded models after N seconds with no activity and no
     # live connection. Loaded weights lazy-reload on next use.
     idle = {"last": time.time(), "live": 0}
+    live_active = {}  # mid -> open live connections; surfaced in /jobs (global popout)
     idle_release_s = int(os.environ.get("LIVE_IDLE_RELEASE_S", "600"))
 
     def _touch():
@@ -1938,6 +1939,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # in the assembled track; live start_ms is per-connection (0-based), so add
         # the same offset or resumed transcripts collide with the first session at 0.
         conn_offset_ms = max(0, int((t0 - store.get_meeting(mid)["created_at"]) * 1000))
+        live_active[mid] = live_active.get(mid, 0) + 1  # show in the global popout
         await ws.send_json({"type": "meeting", "id": mid})
 
         # Per-track. Dual = separate tagged streams (0=mic/我, 1=system/對方);
@@ -2105,6 +2107,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
             for f in audio_files.values():
                 f.close()
             idle["live"] = max(0, idle["live"] - 1)
+            if live_active.get(mid, 0) <= 1:
+                live_active.pop(mid, None)
+            else:
+                live_active[mid] -= 1
             _touch()  # idle countdown starts when recording stops
             # Stop != finalize — explicit only.
 
@@ -2361,6 +2367,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # recordings are processing. Upload transcribe+summary writes to
         # transcribe_jobs, so an uploading meeting shows under 辨識.
         out = []
+        for mid, n in list(live_active.items()):  # live recording = ongoing 辨識
+            if n > 0:
+                m = store.get_meeting(mid)
+                out.append({"mid": mid, "kind": "錄音", "done": 0, "total": 0,
+                            "text": "🔴 即時辨識中", "title": m["title"] if m else None})
         for kind, jd in (("辨識", transcribe_jobs), ("分群", diarize_jobs),
                          ("摘要", summary_jobs)):
             for mid, j in list(jd.items()):
