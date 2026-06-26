@@ -60,3 +60,12 @@ def test_live_manager_hot_swap():
     assert mgr.requested == "small" and mgr.current == "small"
     assert mgr.backend.models == ["small"]  # fallback dedups the chosen
     assert mgr(b"\x00" * 32000)[0]["text"] == "small"
+
+
+def test_denoise_file_graceful_without_speech(monkeypatch, tmp_path):
+    # no `speech` CLI -> returns src unchanged (never blocks transcription)
+    import shutil as _sh
+    monkeypatch.setattr(_sh, "which", lambda _x: None)
+    monkeypatch.setattr("os.path.exists", lambda _p: False)
+    src = str(tmp_path / "a.pcm")
+    assert backends.denoise_file(src, raw_pcm=True) == src

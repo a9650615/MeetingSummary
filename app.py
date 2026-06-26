@@ -649,7 +649,11 @@ def _models_page():
             "<label class=chk><input type=checkbox id=ane_opt> "
             "🧪 ANE 省電辨識（Apple Neural Engine·M 系列）：辨識（自動＋重新辨識）跑在 Neural Engine — "
             "省電、不發熱、不占 GPU（INT8，準度略降一點）。</label>"
-            "<p class=hint style='margin:.6em 0 0'>開啟後上傳的自動辨識與「重新語音辨識」都改走 ANE。</p></div>"
+            "<p class=hint style='margin:.6em 0 0'>開啟後上傳的自動辨識與「重新語音辨識」都改走 ANE。</p>"
+            "<label class=chk style='margin-top:.6em'><input type=checkbox id=denoise_opt> "
+            "🧪 嘈雜環境降噪（DeepFilterNet3·ANE）：辨識前先去背景噪音。</label>"
+            "<p class=hint style='margin:.4em 0 0'>僅嘈雜錄音有用；乾淨音訊反而可能變差，預設關閉。"
+            "於上傳辨識與「重新語音辨識」生效，會增加辨識耗時。</p></div>"
             if _ane_available() else
             "<div class=card style='margin-top:12px'><p class=hint>🧪 <b>ANE 省電辨識（M 系列）</b>："
             "先到下方「加速 runtime」一鍵安裝 <code>speech</code>，裝好後這裡會出現開關。</p></div>")
@@ -742,6 +746,9 @@ def _models_page():
     (function(){const a=document.getElementById('ane_opt');if(!a)return;
       fetch('/settings/ane').then(r=>r.json()).then(j=>a.checked=j.value==='1');
       a.onchange=()=>fetch('/settings/ane',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:a.checked?'1':'0'})});})();
+    (function(){const d=document.getElementById('denoise_opt');if(!d)return;
+      fetch('/settings/denoise').then(r=>r.json()).then(j=>d.checked=j.value==='1');
+      d.onchange=()=>fetch('/settings/denoise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:d.checked?'1':'0'})});})();
     load();
     """
     return _shell("設定", body, script=script, back=True)
@@ -1445,10 +1452,22 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
                 units.append((track, p, seg_off, bs, min(win_bytes, size - bs)))
     yield {"type": "start", "total": len(units)}
     n = 0
+    # Optional ANE denoise: clean each source PCM ONCE (cached), then window the
+    # cleaned copy. Off by default — only helps genuinely noisy recordings.
+    denoise_on = store.get_setting("denoise", "0") == "1" and _ane_available()
+    _clean = {}
+
+    def _src(path):
+        if not denoise_on:
+            return path
+        if path not in _clean:
+            _clean[path] = backends.denoise_file(path, raw_pcm=True)
+        return _clean[path]
+
     for i, (track, p, seg_off, bs, bl) in enumerate(units):
         win_off_ms = seg_off + int(bs / 2 / sample_rate * 1000)
         tmp = f"{os.path.dirname(p)}/_win.pcm"
-        with open(p, "rb") as f:
+        with open(_src(p), "rb") as f:
             f.seek(bs)
             with open(tmp, "wb") as w:
                 w.write(f.read(bl))
@@ -1590,7 +1609,11 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
     m4a/wav/mp3) so it does NOT depend on the best-effort ffmpeg PCM decode."""
     jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": "辨識中…"}
     try:
-        segs = asr.transcribe(audio_path, profile="accurate", track="mic",
+        tx_path = audio_path  # denoise the ASR input only; playback uses the original
+        if store.get_setting("denoise", "0") == "1" and _ane_available():
+            jobs[mid]["text"] = "降噪中…"
+            tx_path = backends.denoise_file(audio_path)
+        segs = asr.transcribe(tx_path, profile="accurate", track="mic",
                               backend=asr_backend)
         for s in segs:
             store.add_transcript(mid, s["profile"], s["track"], s["start_ms"],
@@ -2683,7 +2706,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
         thr = float(store.get_setting("merge_suggest_threshold", "0.5"))
         return {"pairs": diar.similar_speaker_pairs(store.list_speakers(), thr)}
 
-    _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0"}
+    _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
+                 "denoise": "0"}
 
     @app.get("/settings/{key}")
     def get_setting_route(key: str):

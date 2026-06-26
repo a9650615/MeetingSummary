@@ -389,6 +389,44 @@ def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B", language=None):
     return _run
 
 
+def denoise_file(src, *, raw_pcm=False):
+    """Background-noise removal via `speech denoise` (DeepFilterNet3, CoreML/ANE).
+    Returns a cleaned temp path, or `src` unchanged on any failure (graceful — a
+    denoise hiccup must never block transcription). `raw_pcm=True`: `src` is 16k
+    mono s16le PCM (wrapped to wav first), output is the same raw PCM. Else `src`
+    is a normal audio file, output a 16k mono wav. DeepFilterNet3 only helps noisy
+    input — on clean speech it adds errors, so this is an off-by-default toggle.
+    ponytail: shells the CLI (reloads model per call); fine for a one-shot batch step."""
+    import os  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+    speech = shutil.which("speech") or "/opt/homebrew/bin/speech"
+    if not os.path.exists(speech):
+        return src
+    try:
+        td = tempfile.mkdtemp(prefix="dn_")
+        inp = src
+        if raw_pcm:
+            inp = os.path.join(td, "in.wav")
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "s16le",
+                            "-ar", "16000", "-ac", "1", "-i", src, inp], check=True)
+        clean = os.path.join(td, "clean.wav")
+        env = {**os.environ, "SPEECH_COREML_COMPUTE_UNITS": "ane",
+               "PATH": os.environ.get("PATH", "") + ":/opt/homebrew/bin"}
+        subprocess.run([speech, "denoise", inp, "-o", clean],
+                       env=env, check=True, capture_output=True)
+        out = os.path.join(td, "out.pcm" if raw_pcm else "out.wav")
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", clean, "-ar", "16000", "-ac", "1"]
+        cmd += (["-f", "s16le", out] if raw_pcm else [out])
+        subprocess.run(cmd, check=True)
+        return out
+    except Exception as e:  # noqa: BLE001
+        print(f"denoise failed, using original: {e}", file=sys.stderr)
+        return src
+
+
 def ane_speech_backend(engine="qwen3-coreml-full", model="0.6B", language=None):
     """ANE (Neural Engine) batch ASR via the `speech` CLI (homebrew, Qwen3-ASR
     CoreML). Power-efficient — runs off the GPU. The CoreML encoder is fixed at
