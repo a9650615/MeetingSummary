@@ -161,6 +161,17 @@ pre.sum{white-space:pre-wrap;font:inherit;background:var(--surface2);border:1px 
 audio{filter:saturate(.9)}:root[data-theme=dark] audio{filter:invert(.92) hue-rotate(180deg)}
 .card.sticky{position:sticky;top:60px;z-index:20;backdrop-filter:blur(8px);
  background:color-mix(in srgb,var(--surface) 92%,transparent)}
+.progpop{position:fixed;right:18px;bottom:18px;width:300px;max-width:calc(100vw - 36px);
+ background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-sm);
+ box-shadow:0 10px 30px rgba(0,0,0,.18);padding:12px 14px;z-index:60}
+.progpop[hidden]{display:none}
+.progpop .pr-top{display:flex;align-items:center;gap:8px}
+.progpop b{font-size:13px;flex:1}.progpop .pr-x{cursor:pointer;color:var(--muted)}
+.progpop .pr-msg{color:var(--muted);font-size:12px;margin-top:3px}
+.progbar{height:6px;background:var(--surface2);border-radius:999px;overflow:hidden;margin-top:9px}
+.progbar i{display:block;height:100%;width:0;background:var(--accent);border-radius:999px;transition:width .3s}
+.progbar.indet{position:relative}.progbar.indet i{width:38%;animation:prind 1.1s infinite ease-in-out}
+@keyframes prind{0%{margin-left:-38%}100%{margin-left:100%}}
 """
 
 
@@ -1297,6 +1308,31 @@ def _run_diarize_job(store, mid, body, jobs):
         jobs[mid] = {"state": "error", "msg": str(e)}
 
 
+def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs):
+    """Background summary generation (the LLM call is seconds-to-minutes). No
+    token-stream progress, so it's indeterminate — jobs[mid] stays running with
+    no total until done, then carries the text/title so the page renders inline
+    without a reload."""
+    jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": "產生摘要中…"}
+    try:
+        meeting = store.get_meeting(mid)
+        if meeting is None:
+            jobs[mid] = {"state": "error", "msg": "meeting not found"}
+            return
+        text = _transcript_text(store.list_transcripts(mid))
+        out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend)
+        store.add_summary(mid, kind, meeting["lang"], out, summary_model, time.time())
+        title = None
+        if _is_default_title(meeting["title"]):
+            nt = _auto_title(out, summary_backend)
+            if nt:
+                store.update_title(mid, nt)
+                title = nt
+        jobs[mid] = {"state": "done", "text": out, "kind": kind, "title": title}
+    except Exception as e:
+        jobs[mid] = {"state": "error", "msg": str(e)}
+
+
 def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
                     summary_model, kind, title, jobs):
     """Background upload pipeline (mirrors run_pipeline, off the request thread):
@@ -1428,7 +1464,11 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         "<button class=btn id=retr>重新語音辨識</button>"
         "<span class='muted small' id=remsg></span></div>"
         "<table class=tx><tr><th>時間</th><th>說話者</th><th>內容</th></tr>"
-        f"{rows}</table></div>")
+        f"{rows}</table></div>"
+        "<div id=progpop class=progpop hidden>"
+        "<div class=pr-top><b id=progname>處理中</b><span class=pr-x id=progx>✕</span></div>"
+        "<div class=pr-msg id=progmsg></div>"
+        "<div class=progbar><i id=progfill></i></div></div>")
     script = (
         "function _mdEsc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
         "function _mdHtml(t){const L=(t||'').split('\\n');let o=[],lt=null;"
@@ -1438,13 +1478,6 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         "if(h){cl();const n=h[1].length;o.push('<h'+n+'>'+il(h[2])+'</h'+n+'>');}"
         "else if(u||ol){const tg=u?'ul':'ol';if(lt!==tg){cl();o.push('<'+tg+'>');lt=tg;}o.push('<li>'+il((u||ol)[1])+'</li>');}"
         "else if(!ln.trim()){cl();}else{cl();o.push('<p>'+il(ln)+'</p>');}}cl();return o.join('');}"
-        "document.getElementById('go').onclick=async()=>{"
-        "const k=document.getElementById('kind').value;"
-        "const o=document.getElementById('out');o.textContent='產生中…';"
-        f"const r=await fetch('/meetings/{mid}/summary',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k})});"
-        "const j=await r.json();o.innerHTML='<div class=md>'+_mdHtml(j.text)+'</div>';"
-        "if(j.title)document.getElementById('mtitle').textContent=j.title;};"
         "document.getElementById('fin').onclick=async()=>{"
         f"await fetch('/meetings/{mid}/finalize',{{method:'POST'}});"
         "document.getElementById('finmsg').textContent=' 已完成。';};"
@@ -1458,49 +1491,61 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=())
         f"const r=await fetch('/meetings/{mid}',{{method:'DELETE'}});"
         "if(r.ok)location.href='/';"
         "else document.getElementById('finmsg').textContent=' 刪除失敗';};"
-        # Background job + polling: progress is server-side, so a page refresh
-        # reconnects to the running job instead of losing it. poll() self-manages
-        # the interval — only ticks while a job is active.
-        "const rm=document.getElementById('remsg'),retr=document.getElementById('retr');"
-        "let poller=null,sawRunning=false;"  # only reload after we watched it finish
-        "function poll(){"
-        f"fetch('/meetings/{mid}/transcribe/progress').then(r=>r.json()).then(p=>{{"
-        "if(p.state==='running'){sawRunning=true;retr.disabled=true;"
-        "rm.textContent=` 處理中 ${p.done||0}/${p.total||'?'} — ${p.text||''}`;"
-        "if(!poller)poller=setInterval(poll,1000);return;}"
-        "if(poller){clearInterval(poller);poller=null;}"
-        "if(p.state==='done'){rm.textContent=' 完成 '+p.done+' 段';"
-        "if(sawRunning){sawRunning=false;setTimeout(()=>location.reload(),500);}}"  # reload once
-        "else if(p.state==='error'){retr.disabled=false;rm.textContent=' 失敗: '+p.msg;}"
-        "else retr.disabled=false;});}"
-        "retr.onclick=()=>{const mdl=document.getElementById('remodel').value;"
-        "const lng=document.getElementById('relang').value;"
-        "rm.textContent=' 啟動中…';retr.disabled=true;sawRunning=true;"
+        # All async jobs (語音辨識/分群/摘要) report through ONE shared floating
+        # popout (Prog) driven by ONE generic poller (pollJob). Progress is
+        # server-side, so a refresh resumes the running job; pollJob acts (render /
+        # reload) only on a job we started or saw running, never a stale done.
+        "const Prog={"
+        "el(){return document.getElementById('progpop');},"
+        "run(name,msg,done,total){const e=this.el();e.hidden=false;"
+        "document.getElementById('progname').textContent=name;"
+        "document.getElementById('progmsg').textContent=(msg||'處理中…')+(total?' '+(done||0)+'/'+total:'');"
+        "const b=e.querySelector('.progbar'),f=document.getElementById('progfill');"
+        "if(total){b.classList.remove('indet');f.style.width=Math.round((done||0)/total*100)+'%';}"
+        "else{b.classList.add('indet');f.style.width='38%';}},"
+        "done(name,msg){const e=this.el();document.getElementById('progname').textContent=name;"
+        "e.querySelector('.progbar').classList.remove('indet');"
+        "document.getElementById('progfill').style.width='100%';"
+        "document.getElementById('progmsg').textContent=msg||'完成';"
+        "setTimeout(()=>{e.hidden=true;},2600);},"
+        "error(name,msg){const e=this.el();e.hidden=false;"
+        "document.getElementById('progname').textContent=name;"
+        "document.getElementById('progmsg').textContent='失敗: '+(msg||'');},"
+        "hide(){const e=this.el();if(e)e.hidden=true;}};"
+        "document.getElementById('progx').onclick=()=>Prog.hide();"
+        "function pollJob(name,url,opts){opts=opts||{};let timer=null,seen=false;"
+        "function tick(active){if(active)seen=true;"
+        "fetch(url).then(r=>r.json()).then(p=>{"
+        "if(p.state==='running'){seen=true;Prog.run(name,p.text,p.done,p.total);"
+        "if(!timer)timer=setInterval(()=>tick(false),1000);return;}"
+        "if(timer){clearInterval(timer);timer=null;}"
+        "if(p.state==='error'){Prog.error(name,p.msg);return;}"
+        "if(p.state==='done'&&seen){seen=false;"
+        "const m=opts.onDone?opts.onDone(p):null;Prog.done(name,m||'完成');"
+        "if(opts.reload)setTimeout(()=>location.reload(),700);}"
+        "else Prog.hide();});}"
+        "tick(false);return ()=>tick(true);}"
+        f"const tProg=pollJob('語音辨識','/meetings/{mid}/transcribe/progress',"
+        "{reload:true,onDone:p=>'完成 '+(p.done||0)+' 段'});"
+        "document.getElementById('retr').onclick=()=>{"
+        "const mdl=document.getElementById('remodel').value,lng=document.getElementById('relang').value;"
         f"fetch('/meetings/{mid}/transcribe/start',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({model:mdl,language:lng})})"
-        ".then(()=>poll());};"
-        "poll();"  # resume on load if a job is already running
-        # Diarize = async background job with progress (sherpa reports chunk %),
-        # polled like re-transcribe: resumes on refresh, reloads once on done.
-        "const fm2=document.getElementById('finmsg'),diab=document.getElementById('dia');"
-        "let dp=null,dseen=false;"
-        "function dpoll(){"
-        f"fetch('/meetings/{mid}/diarize/progress').then(r=>r.json()).then(p=>{{"
-        "if(p.state==='running'){dseen=true;diab.disabled=true;"
-        "const pct=p.total?Math.round(p.done/p.total*100)+'%':'';"
-        "fm2.textContent=' '+(p.text||'分群中…')+' '+pct;"
-        "if(!dp)dp=setInterval(dpoll,1000);return;}"
-        "if(dp){clearInterval(dp);dp=null;}"
-        "if(p.state==='done'){fm2.textContent=' 分出 '+(p.speakers||0)+' 位說話者';"
-        "if(dseen){dseen=false;setTimeout(()=>location.reload(),500);}}"
-        "else if(p.state==='error'){diab.disabled=false;fm2.textContent=' 分群失敗: '+p.msg;}"
-        "else diab.disabled=false;});}"
-        "diab.onclick=()=>{const ov=localStorage.getItem('exp_overlap')==='1';"
-        "diab.disabled=true;dseen=true;fm2.textContent=' 啟動分群…';"
+        ".then(()=>tProg());};"
+        f"const dProg=pollJob('多人分群','/meetings/{mid}/diarize/progress',"
+        "{reload:true,onDone:p=>'分出 '+(p.speakers||0)+' 位說話者'});"
+        "document.getElementById('dia').onclick=()=>{const ov=localStorage.getItem('exp_overlap')==='1';"
         f"fetch('/meetings/{mid}/diarize',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({track:'all',mark_overlap:ov})})"
-        ".then(()=>dpoll());};"
-        "dpoll();"
+        ".then(()=>dProg());};"
+        f"const sProg=pollJob('產生摘要','/meetings/{mid}/summary/progress',"
+        "{reload:false,onDone:p=>{const o=document.getElementById('out');"
+        "o.innerHTML='<div class=md>'+_mdHtml(p.text)+'</div>';"
+        "if(p.title)document.getElementById('mtitle').textContent=p.title;return '摘要完成';}});"
+        "document.getElementById('go').onclick=()=>{const k=document.getElementById('kind').value;"
+        f"fetch('/meetings/{mid}/summary',{{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k})})"
+        ".then(()=>sProg());};"
         # Player for a row: its own track, else the single (unified mixed) player.
         "const onlyAudio=document.querySelector('audio[id^=aud-]');"
         "function rowAudio(trk){return document.getElementById('aud-'+trk)||onlyAudio;}"
@@ -1569,6 +1614,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
     app = FastAPI()
     transcribe_jobs = {}  # mid -> progress dict; survives page refresh (in-memory)
     diarize_jobs = {}     # mid -> diarization progress dict (same shape)
+    summary_jobs = {}     # mid -> summary-generation progress dict (same shape)
 
     # Idle auto-release: free loaded models after N seconds with no activity and no
     # live connection. Loaded weights lazy-reload on next use.
@@ -2218,23 +2264,25 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.post("/meetings/{mid}/summary")
     def summarize_meeting(mid: int, body: SummaryIn):
+        # Async: the LLM call is seconds-to-minutes. Background thread (progress ->
+        # summary_jobs, polled by the page) + return at once. The done payload
+        # carries text/title so the page renders inline (no reload).
         _touch()
-        meeting = store.get_meeting(mid)
-        if meeting is None:
+        if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
-        text = _transcript_text(store.list_transcripts(mid))
-        out = summarize(text, kind=body.kind, lang=meeting["lang"],
-                        backend=summary_backend)
-        store.add_summary(mid, body.kind, meeting["lang"], out,
-                          summary_model, time.time())
-        # Summary done -> derive a real title (unless the user set one of their own).
-        new_title = None
-        if _is_default_title(meeting["title"]):
-            nt = _auto_title(out, summary_backend)
-            if nt:
-                store.update_title(mid, nt)
-                new_title = nt
-        return {"text": out, "kind": body.kind, "title": new_title}
+        if summary_jobs.get(mid, {}).get("state") == "running":
+            return {"started": True}
+        import threading
+        summary_jobs[mid] = {"state": "running", "done": 0, "total": 0,
+                             "text": "產生摘要中…"}
+        threading.Thread(target=_run_summary_job,
+                         args=(store, mid, body.kind, summary_backend,
+                               summary_model, summary_jobs), daemon=True).start()
+        return {"started": True}
+
+    @app.get("/meetings/{mid}/summary/progress")
+    def summary_progress(mid: int):
+        return summary_jobs.get(mid, {"state": "idle"})
 
     @app.post("/meetings/{mid}/finalize")
     def finalize_meeting(mid: int):

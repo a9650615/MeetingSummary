@@ -137,21 +137,33 @@ def test_get_missing_meeting_404(tmp_path):
     assert c.get("/meetings/999").status_code == 404
 
 
-def test_summary_route_runs_backend_and_stores(tmp_path):
+def test_summary_job_runs_backend_and_stores(tmp_path):
+    import app
     captured = {}
 
     def backend(p):
         captured["p"] = p
         return "會議記錄"
 
-    c, store = make_client(tmp_path, summary_backend=backend)
+    store = Store(tmp_path / "m.db")
     mid = store.create_meeting("m", 1.0, "zh-TW")
     store.add_transcript(mid, "accurate", "mic", 0, 1000, "我", "討論預算")
-    r = c.post(f"/meetings/{mid}/summary", json={"kind": "minutes"})
-    assert r.status_code == 200
-    assert r.json()["text"] == "會議記錄"
+    jobs = {}
+    app._run_summary_job(store, mid, "minutes", backend, "mlx-lm", jobs)
+    assert jobs[mid]["state"] == "done" and jobs[mid]["text"] == "會議記錄"
     assert "討論預算" in captured["p"]  # transcript fed into the prompt
     assert store.list_summaries(mid)[0]["text"] == "會議記錄"
+
+
+def test_summary_route_is_async_started(tmp_path):
+    # The route now spawns a bg job and returns at once (no blocking on the LLM).
+    c, store = make_client(tmp_path, summary_backend=lambda p: "S")
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    store.add_transcript(mid, "accurate", "mic", 0, 1000, "我", "x")
+    r = c.post(f"/meetings/{mid}/summary", json={"kind": "minutes"})
+    assert r.status_code == 200 and r.json().get("started") is True
+    assert c.get(f"/meetings/{mid}/summary/progress").json()["state"] in (
+        "running", "done")
 
 
 def test_transcribe_route_runs_asr_and_stores(tmp_path):
