@@ -223,8 +223,17 @@ _SW_JS = ("self.addEventListener('install',e=>self.skipWaiting());"
 # polls /detect; on a meeting (mic in use / meeting app) while not recording, shows a
 # top banner + a Web Notification (PWA, permission-based — actually visible).
 _DETECT_JS = (
-    "if(window.Notification&&Notification.permission==='default')"
-    "{try{Notification.requestPermission();}catch(e){}}"
+    # Web Notifications need permission, and requestPermission() is IGNORED by
+    # Safari (and unreliable in Chrome) unless it runs from a USER GESTURE — a
+    # page-load call silently no-ops, so permission stays 'default', the granted
+    # branch never fires, and no notification ever shows (works in some browsers,
+    # not others). Ask on the first click/keydown instead. Per-origin: a grant on
+    # one port (the .app's 8765) does NOT carry to another (a dev port).
+    "function _detAsk(){if(window.Notification&&Notification.permission==='default')"
+    "{try{Notification.requestPermission();}catch(e){}}}"
+    "if(window.Notification&&Notification.permission==='default'){"
+    "document.addEventListener('click',_detAsk,{once:true});"
+    "document.addEventListener('keydown',_detAsk,{once:true});}"
     "let _detSeen=false,_detRec=false;"
     "async function _detTick(){try{const d=await(await fetch('/detect')).json();"
     "_detRec=!!d.recording;"

@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.1.36
+- **修正部分瀏覽器（Safari）收不到會議偵測通知**：`Notification.requestPermission()` 原本在頁面載入時就呼叫，但 Safari（Chrome 也不穩）只在**使用者手勢**中才允許要求權限 → 載入時呼叫被靜默忽略，權限永遠停在 `default`，通知分支不會觸發（所以有些瀏覽器有、有些沒有）。改成在**第一次點擊／按鍵**時才要求權限。註：通知權限是 per-origin（含 port），.app（8765）上授權不會帶到不同 port 的 dev。
+
 ## 0.1.35
 - **修正用 Qwen3-ASR(mlx) 上傳音檔崩潰／無逐字稿**：(1) mlx-audio 載入音檔會呼叫 **ffprobe**，只裝 ffmpeg（沒 ffprobe）時直接 `RuntimeError: ffprobe not found` → 上傳 500。改成 backend 一律用 **ffmpeg** 自行解碼成 16k 單聲道 PCM 再餵 mlx-audio（不傳檔案路徑、不需 ffprobe）。(2) Qwen3-ASR 沒有長音訊內部切段，整段長檔丟進去會回空（3 分鐘檔→空逐字稿）。改成上傳的長音訊在 backend 內**切成 ~30 秒視窗**逐段辨識並帶時間戳。live／重新辨識的短輸入維持單段不變。
 
