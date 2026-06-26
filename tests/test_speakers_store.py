@@ -32,6 +32,18 @@ def test_speakers_with_stats(tmp_path):
     assert st["meetings"] == 2 and st["utterances"] == 3
 
 
+def test_speakers_with_stats_hides_orphan_voiceprints(tmp_path):
+    # A voiceprint no transcript references (0 utterances) must not show on the
+    # speaker page — "根本沒有紀錄就不應該進語者頁面" (e.g. orphaned by re-transcribe).
+    s = Store(str(tmp_path / "m.db"))
+    s.add_speaker("我68", _cen(1.0, 0.0))  # orphan: no transcripts
+    s.add_speaker("張三", _cen(0.0, 1.0))
+    m = s.create_meeting("A", 1.0, "zh-TW")
+    s.add_transcript(m, "accurate", "mic", 0, 1, "張三", "hi")
+    names = [r["name"] for r in s.speakers_with_stats()]
+    assert names == ["張三"]  # 我68 hidden
+
+
 def test_merge_speakers_reassigns_and_drops(tmp_path):
     s = Store(str(tmp_path / "m.db"))
     s.add_speaker("張三", _cen(1.0, 0.0))

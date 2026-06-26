@@ -146,10 +146,12 @@ def test_speakers_grouped_by_name(tmp_path):
     c, store = make_client(tmp_path)
     store.add_speaker("Alice", struct.pack("2f", 1.0, 0.0))
     store.add_speaker("Alice", struct.pack("2f", 0.9, 0.1))  # 2nd voiceprint, same name
+    mid = store.create_meeting("A", 1.0, "zh-TW")
+    store.add_transcript(mid, "accurate", "mic", 0, 1, "Alice", "hi")  # 1ms: shows, but no sample
     rows = c.get("/speakers").json()["speakers"]
     jasons = [r for r in rows if r["name"] == "Alice"]
     assert len(jasons) == 1 and jasons[0]["voiceprints"] == 2  # one row, not two
-    assert jasons[0]["has_sample"] is False  # no transcript span -> no 試聽 button
+    assert jasons[0]["has_sample"] is False  # span <800ms -> no 試聽 button
 
 
 def test_detail_shows_recognized_cross_meeting_speaker(tmp_path):

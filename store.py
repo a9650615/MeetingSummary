@@ -225,6 +225,8 @@ class Store:
                 "SELECT COUNT(DISTINCT meeting_id) m, COUNT(*) u, "
                 "MAX(end_ms - start_ms) span FROM transcripts WHERE speaker=?",
                 (s["name"],)).fetchone()
+            if not r["u"]:
+                continue  # no transcript references this name -> orphan voiceprint, hide it
             out.append({"name": s["name"], "voiceprints": s["vp"],
                         "meetings": r["m"], "utterances": r["u"],
                         "has_sample": (r["span"] or 0) > 800})  # matches speaker_best_span
