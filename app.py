@@ -810,6 +810,8 @@ _LIVE_BODY = """
         </optgroup>
       </select></label>
     <label class=chk style="align-self:end"><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
+    <label class=chk style="align-self:end" title="只錄音不辨識，零推論、不發熱；事後再「重新語音辨識」"><input type=checkbox id=reconly> 🪫 純錄音(省電·不即時辨識)</label>
+    <label class=chk style="align-self:end" title="嘈雜環境降噪，於事後重新辨識時生效"><input type=checkbox id=denoise_live> 🧪 降噪(重新辨識時)</label>
   </div>
   <div class=row style="margin-top:14px">
     <button class="btn primary" id=start>開始</button>
@@ -864,6 +866,17 @@ modelSel.onchange = () => {
     body:JSON.stringify({live:modelSel.value})})
     .then(r=>r.json()).then(()=>fetch('/models').then(r=>r.json()).then(showModels));
 };
+// 純錄音 hot-toggle: flip mid-recording (e.g. when the machine overheats) without
+// stop/restart — sends a control message to the live socket.
+const recOnly=document.getElementById('reconly');
+recOnly.onchange=()=>{
+  if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'mode',record_only:recOnly.checked}));
+  L.textContent=recOnly.checked?'🪫 純錄音中（不即時辨識，事後可重新辨識）':'';
+};
+// 降噪 toggle mirrors the global setting (applies when you re-transcribe).
+const dnLive=document.getElementById('denoise_live');
+fetch('/settings/denoise').then(r=>r.json()).then(j=>dnLive.checked=j.value==='1').catch(()=>{});
+dnLive.onchange=()=>fetch('/settings/denoise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:dnLive.checked?'1':'0'})});
 
 async function getStreams(source){
   if(source==='mic') return [await navigator.mediaDevices.getUserMedia({audio:true})];
@@ -946,7 +959,8 @@ startBtn.onclick = async () => {
   const vad = '&vad='+document.getElementById('vad').value;
   const lv = document.getElementById('lang').value;
   const lang = lv ? '&lang='+lv : '';
-  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}${lang}`);
+  const ro = document.getElementById('reconly').checked ? '&record_only=1' : '';
+  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}${lang}${ro}`);
   ws.binaryType='arraybuffer';
   function colored(speaker){ return COLORS[speaker]||'#444'; }
   ws.onmessage = e => {
@@ -2359,6 +2373,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # smarter back-pressure cap only if a slow model makes the buffer balloon.
         got = asyncio.Event()
         closed = False
+        # 純錄音 (record-only): capture + save PCM but run NO ASR — zero inference,
+        # zero heat (for "電腦快炸" / quick capture). Re-transcribe later. Hot-
+        # toggleable mid-recording via a {type:'mode'} control message.
+        rec = {"on": ws.query_params.get("record_only") == "1"}
         interim_lag_bytes = int(2 * live_interim_s * 16000) * 2
         written = {tag: 0 for tag in tracks}  # bytes laid down per track (wall-clock)
 
@@ -2377,7 +2395,21 @@ def create_app(store, *, summary_backend, asr_backend=None,
             nonlocal closed
             try:
                 while True:
-                    data = await ws.receive_bytes()
+                    msg = await ws.receive()
+                    if msg["type"] == "websocket.disconnect":
+                        break
+                    txt = msg.get("text")
+                    if txt is not None:                 # control message (mode toggle)
+                        try:
+                            o = json.loads(txt)
+                            if o.get("type") == "mode":
+                                rec["on"] = bool(o.get("record_only"))
+                        except Exception:
+                            pass
+                        continue
+                    data = msg.get("bytes")
+                    if data is None:
+                        continue
                     tag, pcm = (data[0], data[1:]) if dual else (0, data)
                     if tag not in buffers:
                         continue
@@ -2387,8 +2419,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     written[tag] += len(pcm)
                     got.set()
             except WebSocketDisconnect:
-                closed = True
-                got.set()
+                pass
+            closed = True
+            got.set()
 
         rtask = asyncio.create_task(receiver())
         try:
@@ -2402,6 +2435,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                         continue
                     chunk = bytes(buf)
                     buf.clear()
+                    if rec["on"]:
+                        continue  # 純錄音: PCM already saved; skip ASR (no inference)
                     want_interim = len(chunk) <= interim_lag_bytes
                     try:
                         events = await run_in_threadpool(
