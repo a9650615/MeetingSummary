@@ -2,6 +2,12 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.3.0
+- **實驗性：ANE 省電辨識（Apple Neural Engine·M 系列）**：重新辨識可改跑在 Neural Engine，**完全離開 GPU → 省電、不發熱**（先前 ASR 跑 GPU 會過熱）。
+  - 新增 `ane` ASR backend：透過 homebrew `speech` CLI（Qwen3-ASR CoreML）。把音訊切成 30s 窗丟進暫存資料夾、`transcribe-batch` 一次跑完（模型只載一次），實測 **RTF 0.039**，輸出自動轉繁體。zh-TW 逐字稿與現有 MLX 路徑幾乎一致（CoreML INT8 量化，WER 略高於 MLX 8-bit，但內容感受不大）。
+  - **Gated**：偵測到 Apple Silicon + `speech` CLI 才在「設定 → 實驗性功能」顯示開關；開啟後「重新語音辨識」下拉多出 Qwen3-ASR(ANE/混合) 選項。需先 `brew install speech`（homebrew-core）。
+  - 註：實測 sherpa 分群走 CoreML 反而更慢（onnx ops 退回 CPU），且分群本來就跑 CPU、非發熱源 → 不採用，維持原樣。ANE 只用於 ASR。
+
 ## 0.2.5
 - **「可能是同一人」不再列出兩個都還沒命名的語者**：原本連「我NN ↔ 對方NN」這種雙方都是自動標籤的也列出來 → 都還沒命名根本無從判斷、又一大堆雜訊。改成只在**至少一方有真名**時才建議（才能判斷某個匿名聲紋是不是某位已命名的人）。
 

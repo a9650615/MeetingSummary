@@ -644,7 +644,14 @@ def _models_page():
         "<label class=chk><input type=checkbox id=exp_overlap> "
         "分群時標記重疊/多人語音（同一句多位說話者會標「🔀」，啟發式，非真分離）</label>"
         "<p class=hint style='margin:.6em 0 0'>實驗性功能可能不穩定或不準確；於各會議的「多人分群」時生效。</p>"
-        "</div></section>"
+        "</div>"
+        + ("<div class=card style='margin-top:12px'>"
+           "<label class=chk><input type=checkbox id=ane_opt> "
+           "🧪 ANE 省電辨識（Apple Neural Engine·M 系列）：重新辨識多出 Qwen3-ASR(ANE) 引擎，"
+           "跑在 Neural Engine — 省電、不發熱、不占 GPU（INT8，準度略降一點）。</label>"
+           "<p class=hint style='margin:.6em 0 0'>需 <code>brew install speech</code>。偵測到 Apple Silicon + speech CLI 才顯示此選項。</p>"
+           "</div>" if _ane_available() else "")
+        + "</section>"
 
         "<section id=sec-rt><h2>加速 runtime（.cpp · Metal）</h2>"
         "<div class=card>"
@@ -726,6 +733,9 @@ def _models_page():
     (function(){const xo=document.getElementById('exp_overlap');
       xo.checked=localStorage.getItem('exp_overlap')==='1';
       xo.onchange=()=>localStorage.setItem('exp_overlap',xo.checked?'1':'0');})();
+    (function(){const a=document.getElementById('ane_opt');if(!a)return;
+      fetch('/settings/ane').then(r=>r.json()).then(j=>a.checked=j.value==='1');
+      a.onchange=()=>fetch('/settings/ane',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:a.checked?'1':'0'})});})();
     load();
     """
     return _shell("設定", body, script=script, back=True)
@@ -1331,6 +1341,15 @@ def _free_models():
     return freed
 
 
+def _ane_available():
+    """Apple Neural Engine ASR path is usable: Apple Silicon + the `speech` CLI
+    installed. Gates the experimental ANE (省電) option — shown only on M-series."""
+    import platform  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+    return (sys.platform == "darwin" and platform.machine() == "arm64"
+            and shutil.which("speech") is not None)
+
+
 def _persistent_names(store, embs, prefix, threshold=0.62):
     """cluster id -> persistent voiceprint label. Match each cluster embedding to the
     global speakers table (cosine); reuse the matched speaker's name + nudge its
@@ -1477,12 +1496,16 @@ def _run_diarize_job(store, mid, body, jobs):
             names = None
             # Persistent cross-meeting voiceprints: on unless the global toggle is off.
             enroll = body.enroll and store.get_setting("persist_speakers", "1") == "1"
+            # Diarize stays on CPU: measured CoreML/ANE here is SLOWER (sherpa's
+            # pyannote/3d-speaker onnx ops fall back), and diarize isn't a GPU-heat
+            # source anyway. The ANE win is ASR-only (see the speech CLI backend).
             try:
                 # Runs in a subprocess — sherpa's process() holds the GIL and would
                 # otherwise freeze the event loop (no page switches while diarizing).
                 segments, embs = diar.diarize_with_progress(
                     tmp, num_speakers=body.num_speakers, seg_model=body.seg_model,
-                    emb_model=body.emb_model, enroll=enroll, on_progress=on_prog,
+                    emb_model=body.emb_model, enroll=enroll,
+                    on_progress=on_prog,
                     on_phase=lambda ph: jobs[mid].update(text=f"{pre}{label} 建立聲紋…"))
                 if embs:
                     names = _persistent_names(store, embs, label)
@@ -1600,7 +1623,7 @@ _TRACK_LABEL = {"system": "對方", "mic": "我", "mixed": "混合"}
 
 
 def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
-                 recognized=()):
+                 recognized=(), ane_on=False):
     def ts_str(ms):
         s = (ms or 0) // 1000
         return f"{s // 60:d}:{s % 60:02d}"
@@ -1654,6 +1677,9 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
         "<div class=row style='margin-bottom:10px'>"
         "<select id=remodel>"
+        + ("<option value='ane-qwen3-0.6b'>Qwen3-ASR 0.6B(ANE·省電·M系列)</option>"
+           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B(ANE混合·快)</option>"
+           if ane_on else "") +
         "<option value='mlx-community/whisper-large-v3-turbo-q4'>turbo-q4(準·省)</option>"
         "<option value='mlx-community/whisper-large-v3-mlx'>large-v3(最準·吃)</option>"
         "<option value='mlx-community/whisper-small-mlx-q4'>small-q4(快)</option>"
@@ -1893,9 +1919,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         here = {r["speaker"] for r in transcripts}
         known = {s["name"]: s for s in store.speakers_with_stats()}
         recognized = sorted(n for n in here if known.get(n, {}).get("meetings", 0) > 1)
+        ane_on = _ane_available() and store.get_setting("ane", "0") == "1"
         return _detail_page(mid, dict(meeting), transcripts,
                             _rows(store.list_summaries(mid)), audio_tracks,
-                            tags=store.tags_for(mid), recognized=recognized)
+                            tags=store.tags_for(mid), recognized=recognized, ane_on=ane_on)
 
     @app.get("/meetings/{mid}/audio/{track}.wav")
     def meeting_audio(mid: int, track: str):
@@ -2591,7 +2618,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         thr = float(store.get_setting("merge_suggest_threshold", "0.5"))
         return {"pairs": diar.similar_speaker_pairs(store.list_speakers(), thr)}
 
-    _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62"}
+    _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0"}
 
     @app.get("/settings/{key}")
     def get_setting_route(key: str):

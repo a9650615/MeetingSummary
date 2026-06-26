@@ -13,6 +13,8 @@ def route(model):
     binding); q4-k-m -> femelo .cpp (Metal); other qwen3-asr -> transformers;
     whisper(-mlx) is the Apple-native live engine."""
     m = model.lower()
+    if m.startswith("ane-"):  # ANE (Neural Engine) via the `speech` CLI
+        return "ane"
     if model == "qwen3-asr-1.7b":
         return "chatllm"
     if "qwen3-asr" in m and "mlx-community" in m:  # MLX-native Qwen3-ASR (Metal, fast)
@@ -385,10 +387,90 @@ def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B", language=None):
     return _run
 
 
+def ane_speech_backend(engine="qwen3-coreml-full", model="0.6B", language=None):
+    """ANE (Neural Engine) batch ASR via the `speech` CLI (homebrew, Qwen3-ASR
+    CoreML). Power-efficient — runs off the GPU. The CoreML encoder is fixed at
+    30s, and the CLI reloads the model per `transcribe` call, so we window into
+    ~29s wavs in a temp dir and run `transcribe-batch` ONCE (model loaded once).
+    callable(audio) -> [{start,end,text}]. Output simplified zh -> converted to TW."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    bin_ = shutil.which("speech") or "/opt/homebrew/bin/speech"
+
+    def _decode(audio):
+        if isinstance(audio, (bytes, bytearray)):
+            return np.frombuffer(bytes(audio), dtype=np.int16)
+        if isinstance(audio, str) and audio.endswith(".pcm"):
+            return np.frombuffer(open(audio, "rb").read(), dtype=np.int16)
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(audio), "-ar", "16000", "-ac", "1",
+             "-f", "s16le", "-"], stdout=subprocess.PIPE, check=True).stdout
+        return np.frombuffer(raw, dtype=np.int16)
+
+    def _run(audio):
+        import recorder  # noqa: PLC0415
+        import zhtw  # noqa: PLC0415
+        pcm = _decode(audio)
+        sr, win = 16000, 16000 * 29  # encoder caps at 30s -> 29s windows
+        d = tempfile.mkdtemp(prefix="ane_asr_")
+        idx = {}
+        try:
+            for i in range((len(pcm) + win - 1) // win or 1):
+                seg = pcm[i * win:(i + 1) * win]
+                if len(seg) < sr // 5:
+                    continue
+                name = f"{i:04d}"
+                with open(os.path.join(d, name + ".wav"), "wb") as f:
+                    f.write(recorder.pcm_to_wav(seg.tobytes(), sample_rate=sr, channels=1))
+                idx[name] = i
+            if not idx:
+                return []
+            cmd = [bin_, "transcribe-batch", d, "--engine", engine, "--model", model,
+                   "--jsonl"]
+            if language:
+                cmd += ["--language", language]
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=3600).stdout
+            segs = []
+            for line in out.splitlines():
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    j = json.loads(line)
+                except Exception:
+                    continue
+                i = idx.get(str(j.get("file")))
+                t = (j.get("text") or "").strip()
+                if i is None or not t:
+                    continue
+                segs.append((i, zhtw.to_tw(t)))
+            segs.sort()
+            return [{"start": i * win / sr, "end": min((i + 1) * win, len(pcm)) / sr,
+                     "text": t} for i, t in segs]
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    return _run
+
+
+# Synthetic model ids -> (engine, model) for the ANE `speech` CLI path.
+_ANE_IDS = {
+    "ane-qwen3-0.6b": ("qwen3-coreml-full", "0.6B"),     # pure ANE (coolest)
+    "ane-qwen3-0.6b-hybrid": ("qwen3-coreml", "0.6B"),   # ANE encoder + GPU decoder (fastest)
+}
+
+
 def make_batch_backend(model, language=None):
     """Batch/accurate: route to Qwen3-ASR .cpp (fast, Metal, word-aligned) or
     transformers Qwen3-ASR or whisper-MLX. callable(audio_path) -> segments.
     language=None -> auto-detect; a code forces it."""
+    if route(model) == "ane":  # ANE speech CLI (don't honor_language-reroute it)
+        engine, m = _ANE_IDS.get(model, ("qwen3-coreml-full", "0.6B"))
+        return ane_speech_backend(engine, m, language)
     model = _honor_language(model, language)  # femelo ignores language -> whisper
     r = route(model)
     if r == "chatllm":

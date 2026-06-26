@@ -219,14 +219,15 @@ class SpeakerTracker:
         return self.last_id
 
 
-def embedding_extractor(model=None):
-    """sherpa-onnx speaker embedding extractor: int16 PCM bytes -> vector. Lazy."""
+def embedding_extractor(model=None, provider="cpu"):
+    """sherpa-onnx speaker embedding extractor: int16 PCM bytes -> vector. Lazy.
+    provider='coreml' offloads to the Neural Engine (power-efficient)."""
     import numpy as np  # noqa: PLC0415
     import sherpa_onnx  # noqa: PLC0415
 
     _, emb = _resolve_models(emb_model=model)
     ext = sherpa_onnx.SpeakerEmbeddingExtractor(
-        sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb))
+        sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb, provider=provider))
 
     def _run(pcm_bytes, sample_rate=16000):
         samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -238,12 +239,12 @@ def embedding_extractor(model=None):
 
 
 def cluster_embeddings(pcm_path, segments, *, sample_rate=16000, max_secs=12,
-                       model=None):
+                       model=None, provider="cpu"):
     """One L2-normalized speaker embedding per cluster id, from up to max_secs of
     that cluster's audio (concatenated). {} on no audio. Lazy (sherpa emb model)."""
     import numpy as np  # noqa: PLC0415
     audio = np.frombuffer(open(pcm_path, "rb").read(), dtype=np.int16)
-    ext = embedding_extractor(model)
+    ext = embedding_extractor(model, provider)
     spans = {}
     for seg in segments:
         spans.setdefault(seg["speaker"], []).append((seg["start"], seg["end"]))
@@ -268,17 +269,18 @@ def cluster_embeddings(pcm_path, segments, *, sample_rate=16000, max_secs=12,
     return out
 
 
-def _diar_worker(q, pcm_path, num_speakers, seg_model, emb_model, enroll):
+def _diar_worker(q, pcm_path, num_speakers, seg_model, emb_model, enroll, provider="cpu"):
     """Child-process entry: do ALL the GIL-holding sherpa work here, stream
     progress/result back over the queue."""
     try:
         segs = diarize_pcm(pcm_path, num_speakers=num_speakers, seg_model=seg_model,
-                           emb_model=emb_model, on_progress=lambda d, t: q.put(("p", d, t)))
+                           emb_model=emb_model, provider=provider,
+                           on_progress=lambda d, t: q.put(("p", d, t)))
         embs = None
         if enroll:
             q.put(("phase", "enroll"))
             try:
-                embs = cluster_embeddings(pcm_path, segs)
+                embs = cluster_embeddings(pcm_path, segs, provider=provider)
             except Exception as e:  # enroll is best-effort
                 q.put(("warn", f"enroll skipped: {e}"))
         q.put(("done", segs, embs))
@@ -287,7 +289,7 @@ def _diar_worker(q, pcm_path, num_speakers, seg_model, emb_model, enroll):
 
 
 def diarize_with_progress(pcm_path, *, num_speakers=-1, seg_model=None, emb_model=None,
-                          enroll=False, on_progress=None, on_phase=None):
+                          enroll=False, on_progress=None, on_phase=None, provider="cpu"):
     """Diarize in a SUBPROCESS. sherpa's OfflineSpeakerDiarization.process() does
     NOT release the GIL, so running it in a thread freezes the whole interpreter
     (incl. the asyncio event loop -> the server can't serve other pages while
@@ -300,7 +302,7 @@ def diarize_with_progress(pcm_path, *, num_speakers=-1, seg_model=None, emb_mode
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     p = ctx.Process(target=_diar_worker, daemon=True,
-                    args=(q, pcm_path, num_speakers, seg_model, emb_model, enroll))
+                    args=(q, pcm_path, num_speakers, seg_model, emb_model, enroll, provider))
     p.start()
     segs, embs = None, None
     try:
@@ -375,11 +377,13 @@ def similar_speaker_pairs(rows, threshold=0.5):
 
 
 def diarize_pcm(pcm_path, *, sample_rate=16000, num_speakers=-1,
-                seg_model=None, emb_model=None, progress=None, on_progress=None):
+                seg_model=None, emb_model=None, progress=None, on_progress=None,
+                provider="cpu"):
     """Cluster speakers in a 16-bit mono PCM file -> [{start,end,speaker}].
     num_speakers=-1 auto-detects the count. Models auto-provision into models/
     on first use (see _resolve_models); override via SHERPA_SEG/EMB_MODEL.
-    on_progress(done, total): optional, called as sherpa processes chunks."""
+    on_progress(done, total): optional, called as sherpa processes chunks.
+    provider='coreml' runs the seg + embedding onnx on the Neural Engine."""
     import numpy as np  # noqa: PLC0415
     import sherpa_onnx  # noqa: PLC0415
 
@@ -387,8 +391,9 @@ def diarize_pcm(pcm_path, *, sample_rate=16000, num_speakers=-1,
 
     config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
-            pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=seg)),
-        embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb),
+            pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=seg),
+            provider=provider),
+        embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb, provider=provider),
         clustering=sherpa_onnx.FastClusteringConfig(num_clusters=num_speakers),
     )
     sd = sherpa_onnx.OfflineSpeakerDiarization(config)

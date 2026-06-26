@@ -82,7 +82,7 @@ def test_run_diarize_job_reports_progress_then_done(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "_meeting_tracks", lambda s, m: ["mixed"])
     monkeypatch.setattr(app, "_assemble_track", lambda s, m, t: b"\x00\x00")
     def fake_diar(tmp, *, num_speakers=-1, seg_model=None, emb_model=None,
-                  enroll=False, on_progress=None, on_phase=None):
+                  enroll=False, on_progress=None, on_phase=None, provider="cpu"):
         on_progress(1, 2)
         on_progress(2, 2)  # callback drives the progress dict
         return [{"start": 0.0, "end": 1.0, "speaker": 0}], None  # (segments, embeddings)

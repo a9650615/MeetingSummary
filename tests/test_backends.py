@@ -7,6 +7,9 @@ def test_route_qwen3_vs_whisper():
     assert backends.route("qwen3-asr-0.6b-q4-k-m") == "qwen3cpp"  # femelo GGUF sidecar
     assert backends.route("qwen3-asr-1.7b") == "chatllm"          # chatllm.cpp 1.7B
     assert backends.route("Qwen/Qwen3-ASR-1.7B") == "qwen3"       # transformers, not chatllm
+    assert backends.route("ane-qwen3-0.6b") == "ane"          # ANE speech CLI
+    assert backends.route("ane-qwen3-0.6b-hybrid") == "ane"
+    assert backends._ANE_IDS["ane-qwen3-0.6b"] == ("qwen3-coreml-full", "0.6B")
     assert backends.route("mlx-community/whisper-large-v3-turbo") == "whisper"
     assert backends.route("mlx-community/whisper-small-mlx") == "whisper"
 
