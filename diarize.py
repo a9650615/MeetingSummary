@@ -347,11 +347,13 @@ def _is_placeholder(name):
     return bool(re.match(r"^(我|對方|說話者)\d+$", (name or "").strip()))
 
 
-def similar_speaker_pairs(rows, threshold=0.5):
+def similar_speaker_pairs(rows, threshold=0.5, dismissed=()):
     """Global-speaker pairs whose voiceprints are close enough to maybe be the SAME
     person but didn't auto-merge — surfaced as 'might be a duplicate, merge?'
-    suggestions. rows = store.list_speakers() (id, name, centroid bytes)."""
+    suggestions. rows = store.list_speakers() (id, name, centroid bytes). `dismissed`
+    = iterable of (name, name) pairs the user marked 'not the same person' — skipped."""
     import numpy as np  # noqa: PLC0415
+    dismissed = {frozenset(p) for p in dismissed}
     vecs = []
     for r in rows:
         if not r["centroid"]:
@@ -368,6 +370,8 @@ def similar_speaker_pairs(rows, threshold=0.5):
                 continue  # same name = same person; dedupe name pairs
             if _is_placeholder(a) and _is_placeholder(b):
                 continue  # two un-named speakers -> can't judge, not a useful suggestion
+            if frozenset((a, b)) in dismissed:
+                continue  # user said 'not the same person'
             sim = float(np.dot(vecs[i][2], vecs[j][2]))
             if sim >= threshold:
                 seen.add((a, b))

@@ -576,10 +576,14 @@ async function loadSugs(){
      <button class=btn data-play="${esc(p.a)}" title=試聽>🔊</button> <b>${esc(p.a)}</b> ↔
      <button class=btn data-play="${esc(p.b)}" title=試聽>🔊</button> <b>${esc(p.b)}</b>
      <span class="muted small">相似度 ${p.sim}</span></span>
-     <button class=btn data-keep="${esc(p.a)}" data-drop="${esc(p.b)}">是同一人，合併</button></div>`).join('');
+     <span style="display:flex;gap:6px">
+     <button class=btn data-keep="${esc(p.a)}" data-drop="${esc(p.b)}">是同一人，合併</button>
+     <button class=btn data-no-a="${esc(p.a)}" data-no-b="${esc(p.b)}">不是同一人</button></span></div>`).join('');
   document.querySelectorAll('#sugs [data-play]').forEach(b=>b.onclick=()=>play(b.dataset.play));
   document.querySelectorAll('#sugs [data-keep]').forEach(b=>b.onclick=async()=>{
     await fetch('/speakers/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:b.dataset.keep,drop:b.dataset.drop})});load();});
+  document.querySelectorAll('#sugs [data-no-a]').forEach(b=>b.onclick=async()=>{
+    await fetch('/speakers/nonmatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:b.dataset.noA,drop:b.dataset.noB})});loadSugs();});
 }
 async function view(name){
   const j=await(await fetch(`/speakers/${encodeURIComponent(name)}/utterances`)).json();
@@ -2772,7 +2776,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # it is useless ("沒有語音就不應該拿來比較是不是同一人").
         sampled = {s["name"] for s in store.speakers_with_stats() if s["has_sample"]}
         rows = [r for r in store.list_speakers() if r["name"] in sampled]
-        return {"pairs": diar.similar_speaker_pairs(rows, thr)}
+        return {"pairs": diar.similar_speaker_pairs(
+            rows, thr, dismissed=store.list_speaker_nonmatches())}
+
+    @app.post("/speakers/nonmatch")
+    def speaker_nonmatch(body: SpeakerMergeIn):
+        # "不是同一人" — remember the pair so it stops being suggested.
+        store.add_speaker_nonmatch(body.keep.strip(), body.drop.strip())
+        return {"ok": True}
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
                  "denoise": "0"}

@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS meeting_tags(
 CREATE TABLE IF NOT EXISTS speakers(
     id INTEGER PRIMARY KEY, name TEXT, centroid BLOB, count INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS speaker_nonmatches(a TEXT, b TEXT, PRIMARY KEY(a, b));
 """
 
 
@@ -61,6 +62,17 @@ class Store:
     def set_notes(self, meeting_id, notes):
         self.db.execute("UPDATE meetings SET notes=? WHERE id=?", (notes, meeting_id))
         self.db.commit()
+
+    def add_speaker_nonmatch(self, a, b):
+        """Record 'these two are NOT the same person' so the pair stops being
+        suggested. Stored order-normalized (a<b) so (X,Y)==(Y,X)."""
+        a, b = sorted((a, b))
+        self.db.execute("INSERT OR IGNORE INTO speaker_nonmatches(a, b) VALUES(?,?)", (a, b))
+        self.db.commit()
+
+    def list_speaker_nonmatches(self):
+        return [(r["a"], r["b"]) for r in
+                self.db.execute("SELECT a, b FROM speaker_nonmatches")]
 
     def _insert(self, sql, params):
         cur = self.db.execute(sql, params)

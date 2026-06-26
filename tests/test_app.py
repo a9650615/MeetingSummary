@@ -400,3 +400,17 @@ def test_suggestions_skip_speakers_without_audio_sample(tmp_path):
     names = {n for p in pairs for n in (p["a"], p["b"])}
     assert "Ghost" not in names
     assert {"Alice", "Bob"} <= names
+
+
+def test_nonmatch_dismisses_suggestion(tmp_path):
+    # "不是同一人" — after dismissing, the pair stops being suggested.
+    import struct
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("m", 0.0, "zh-TW")
+    store.add_speaker("Alice", struct.pack("2f", 1.0, 0.0))
+    store.add_speaker("Bob", struct.pack("2f", 0.95, 0.31))
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "Alice", "hi")
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "Bob", "yo")
+    assert c.get("/speakers/suggestions").json()["pairs"]  # suggested first
+    c.post("/speakers/nonmatch", json={"keep": "Bob", "drop": "Alice"})  # any order
+    assert c.get("/speakers/suggestions").json()["pairs"] == []  # gone
