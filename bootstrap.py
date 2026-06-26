@@ -92,6 +92,11 @@ def setup():
         if not os.path.exists(os.path.join(HERE, "micbusy")):
             subprocess.run(["swiftc", "micbusy.swift", "-o", "micbusy",
                             "-framework", "CoreAudio"], cwd=HERE, capture_output=True)
+        # pyobjc = the native floating meeting-detection HUD (Notion-style).
+        # best-effort: without it meeting_watch.py falls back to notifications.
+        if _is_apple_silicon_hw() and subprocess.run(
+                [PY, "-c", "import AppKit"], cwd=HERE, capture_output=True).returncode != 0:
+            _pip(["install", "--no-input", "pyobjc-framework-Cocoa"], log=True)
     except Exception as e:
         state["line"] = "setup: " + str(e)[:120]   # note it, but still start
     state["step"] = "啟動服務…"

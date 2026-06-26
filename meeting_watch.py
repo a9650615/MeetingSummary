@@ -10,6 +10,7 @@ MEETING_WATCH_APPS to extend the list, or wire that helper later.
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.request
 
@@ -85,6 +86,16 @@ def startup_ping():
 
 
 def main():
+    # Prefer the native always-on-top HUD (Notion-style floating bar) when PyObjC
+    # is available; it polls /detect itself and blocks on the AppKit run loop.
+    # Fall back to notifications if pyobjc is missing or MEETING_HUD=0.
+    if os.environ.get("MEETING_HUD") != "0":
+        try:
+            import hud
+            hud.main()
+            return
+        except Exception as e:
+            print(f"native HUD unavailable, using notifications: {e}", file=sys.stderr)
     startup_ping()
     notified = False
     have_mic = os.path.exists(_MICBUSY)

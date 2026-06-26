@@ -2,6 +2,9 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.1.42
+- **原生浮動會議偵測 HUD（Notion 風）**：新增 `hud.py` — PyObjC 原生 always-on-top 浮動視窗，釘在螢幕底部置中。偵測到會議（麥克風使用中／已知會議 app）且未錄音時跳出「📝 偵測到會議 · <app> 進行中 — 開始轉譯」+「開始轉譯」鈕（點了開 /live），✕ 可關到本次通話結束；偵測流在背景執行緒、不卡 UI；浮層可跨桌面／全螢幕 app。`meeting_watch.py` 在有 PyObjC 時自動改用 HUD，否則退回原本的系統通知（`MEETING_HUD=0` 可強制關閉）。bootstrap 會盡力安裝 `pyobjc-framework-Cocoa`。
+
 ## 0.1.41
 - **修正分群時整個介面卡住、無法切換頁面**：分群雖然丟到背景執行緒，但 sherpa 的 `OfflineSpeakerDiarization.process()` 是 C++ 且**不釋放 GIL**（實測：分群進行中主執行緒 2 秒只跑 1 次、卡 2145ms）→ 整個 Python 直譯器凍結，連 asyncio 事件迴圈都停 → 伺服器無法回應其他頁面。執行緒救不了 GIL-bound 的 C 呼叫，改成跑在**獨立子行程**（自有 GIL，父行程只在 `queue.get()` 等待＝會釋放 GIL），進度照樣經 queue 回傳。實測：分群進行中主執行緒可自由運行（最大停頓 8ms）、154 段進度正常回報。註：MLX（辨識／摘要）本來就會釋放 GIL，不受影響。
 
