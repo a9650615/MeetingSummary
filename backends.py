@@ -153,6 +153,8 @@ def make_live_backend(model, language=None):
     """Live backend, callable(pcm_bytes) -> segments. language=None -> auto-detect;
     a code ("zh"/"en"/"ja"...) forces it. whisper-MLX (default), Qwen3-ASR .cpp via a
     persistent daemon (Metal), or transformers Qwen3-ASR."""
+    if route(model) == "ane":  # persistent Neural-Engine helper (省電, off-GPU)
+        return ane_live_backend()
     model = _honor_language(model, language)
     r = route(model)
     if r == "chatllm":

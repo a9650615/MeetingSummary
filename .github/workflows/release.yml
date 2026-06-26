@@ -45,3 +45,20 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" "chatllm-runtime-arm64.tar.gz" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+      - name: Cache qwen3-ane swift build
+        uses: actions/cache@v4
+        with:
+          path: swift/qwen3-ane/.build
+          key: qwen3ane-arm64-${{ hashFiles('swift/qwen3-ane/Package.resolved', 'swift/qwen3-ane/Sources/**') }}
+      - name: Build + attach prebuilt ANE live helper (best-effort)
+        # Swift Qwen3-ASR CoreML helper + mlx.metallib (the runner has full Xcode so
+        # the Metal toolchain builds the metallib). Portable arm64; setup_runtime.sh
+        # downloads it. Non-blocking — the release already shipped above.
+        continue-on-error: true
+        timeout-minutes: 40
+        run: |
+          ./build_qwen3_ane.sh
+          ./package_qwen3_ane.sh "$PWD/qwen3-ane-arm64.tar.gz"
+          gh release upload "$GITHUB_REF_NAME" "qwen3-ane-arm64.tar.gz" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

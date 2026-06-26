@@ -93,5 +93,25 @@ case "${1:-}" in
     echo "安裝 speech (Qwen3-ASR ANE)…"
     brew install speech && command -v speech >/dev/null && echo "speech OK"
     ;;
-  *) echo "usage: setup_runtime.sh femelo|chatllm|speech"; exit 2 ;;
+  qwen3-ane)
+    # Live ANE helper: download the prebuilt binary + mlx.metallib from the latest
+    # release (no Xcode needed); fall back to building from source (needs full Xcode
+    # for the Metal toolchain).
+    OUT="swift/qwen3-ane/.build/release"
+    if [ -f "$OUT/qwen3-ane" ] && [ -f "$OUT/mlx.metallib" ]; then
+      echo "qwen3-ane already installed"; exit 0
+    fi
+    mkdir -p "$OUT"
+    url="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+      | python3 -c "import sys,json
+a=[x['browser_download_url'] for x in json.load(sys.stdin).get('assets',[]) if x['name']=='qwen3-ane-arm64.tar.gz']
+print(a[0] if a else '')" 2>/dev/null)" || true
+    if [ -n "${url:-}" ]; then
+      echo "下載預編譯 qwen3-ane…"
+      curl -fsSL "$url" | tar xzf - -C "$OUT" && { echo "qwen3-ane OK (prebuilt)"; exit 0; }
+    fi
+    echo "預編譯不可用，改從原始碼編譯(需 Xcode 的 metal toolchain)…"
+    bash build_qwen3_ane.sh
+    ;;
+  *) echo "usage: setup_runtime.sh femelo|chatllm|speech|qwen3-ane"; exit 2 ;;
 esac

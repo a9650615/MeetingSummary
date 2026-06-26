@@ -1326,7 +1326,9 @@ def _runtime_status():
         "chatllm": os.path.isfile(os.path.abspath("chatllm.cpp/bindings/libchatllm.dylib")),
     }
     if sys.platform == "darwin" and platform.machine() == "arm64":
-        st["speech"] = shutil.which("speech") is not None  # ANE ASR (省電)
+        st["speech"] = shutil.which("speech") is not None  # ANE batch ASR (省電)
+        import backends  # noqa: PLC0415
+        st["qwen3-ane"] = backends.ane_helper_bin() is not None  # ANE live helper
     return st
 
 
@@ -1931,6 +1933,17 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.get("/live", response_class=HTMLResponse)
     def live_page():
+        # Live ANE (省電): show only on Apple Silicon with the prebuilt helper + the
+        # toggle on. Selecting it -> /models -> make_live_backend('ane-live') -> the
+        # persistent Neural-Engine helper (off the GPU).
+        import backends as _b
+        if (_apple_silicon() and _b.ane_helper_bin() is not None
+                and store.get_setting("ane", "0") == "1"):
+            body = _LIVE_BODY.replace(
+                "<select id=model>",
+                "<select id=model><optgroup label='🧠 NPU · ANE 省電'>"
+                "<option value='ane-live'>Qwen3-ASR(ANE·省電·M系列)</option></optgroup>", 1)
+            return _shell("Live · MeetingSummary", body, script=_LIVE_JS, back=True)
         return _LIVE
 
     @app.get("/m/{mid}", response_class=HTMLResponse)
@@ -2120,7 +2133,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             import subprocess
             subprocess.run(["brew", "uninstall", "speech"], capture_output=True)
             return {"runtime": "speech", "removed": True}
-        targets = {"femelo": ".venv-qwen314", "chatllm": "chatllm.cpp"}
+        targets = {"femelo": ".venv-qwen314", "chatllm": "chatllm.cpp",
+                   "qwen3-ane": "swift/qwen3-ane/.build"}
         d = targets.get(body.runtime)
         if not d:
             raise HTTPException(400, "unknown runtime")

@@ -2,6 +2,11 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.4.0
+- **Live 即時辨識支援 ANE（省電、離 GPU）**：新增常駐 Swift helper `qwen3-ane`（speech-swift Qwen3-ASR CoreML）— 載入一次模型在 Neural Engine，伺服器把每個 live 視窗經 stdin/stdout 餵給它（實測載一次後 warm ~RTF 0.15）。Live 模型下拉在「M 系列 + 已安裝 helper + ANE 開關」時多出「Qwen3-ASR(ANE·省電)」，選了即走 ANE、不燒 GPU。
+  - **預編譯發佈**：release CI 編好 helper（含 `mlx.metallib`，runner 有 Xcode metal toolchain）並附上 `qwen3-ane-arm64.tar.gz`；「設定 → 加速 runtime」的 `qwen3-ane` 一鍵下載安裝（免 Xcode），下載不到才退回本機編譯（需 Xcode）。binary + metallib 可攜（僅依系統 framework）。
+  - 註：live interim 仍走輕量 MLX whisper-small（GPU 負擔極小）；ANE 用於 live 的 final/accurate 與批次。
+
 ## 0.3.4
 - **重新辨識逐字稿改為句子級(像 live，不再一大段)**：qwen3/ANE 一個 30 秒視窗原本回傳一整塊文字、存成一行很難讀。`asr.transcribe` 現在把每段依標點(。！？；)切成句子級的多行、時間依字數比例分配；短句／無標點(如 whisper 本來就斷好的)維持原樣不會被過切。批次重辨識與上傳辨識都套用。
 
