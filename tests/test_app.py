@@ -149,6 +149,7 @@ def test_speakers_grouped_by_name(tmp_path):
     rows = c.get("/speakers").json()["speakers"]
     jasons = [r for r in rows if r["name"] == "Jason"]
     assert len(jasons) == 1 and jasons[0]["voiceprints"] == 2  # one row, not two
+    assert jasons[0]["has_sample"] is False  # no transcript span -> no 試聽 button
 
 
 def test_detail_shows_recognized_cross_meeting_speaker(tmp_path):

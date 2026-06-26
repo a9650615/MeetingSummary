@@ -546,7 +546,7 @@ async function load(){
     const tr=document.createElement('tr');
     tr.innerHTML=`<td><b>${esc(s.name)}</b></td><td>${s.meetings}</td><td>${s.utterances}</td>
       <td style="white-space:nowrap">
-      <button class=btn data-act=play data-name="${esc(s.name)}" title=試聽>🔊</button>
+      ${s.has_sample?`<button class=btn data-act=play data-name="${esc(s.name)}" title=試聽>🔊</button>`:''}
       <button class=btn data-act=view data-name="${esc(s.name)}">發言</button>
       <button class=btn data-act=rename data-name="${esc(s.name)}">改名</button>
       ${others?`<select data-act=merge data-keep="${esc(s.name)}"><option value="">合併另一位到此…</option>${others}</select>`:''}

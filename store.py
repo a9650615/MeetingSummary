@@ -212,10 +212,12 @@ class Store:
         for s in self.db.execute(
                 "SELECT name, COUNT(*) vp FROM speakers GROUP BY name ORDER BY name"):
             r = self.db.execute(
-                "SELECT COUNT(DISTINCT meeting_id) m, COUNT(*) u "
-                "FROM transcripts WHERE speaker=?", (s["name"],)).fetchone()
+                "SELECT COUNT(DISTINCT meeting_id) m, COUNT(*) u, "
+                "MAX(end_ms - start_ms) span FROM transcripts WHERE speaker=?",
+                (s["name"],)).fetchone()
             out.append({"name": s["name"], "voiceprints": s["vp"],
-                        "meetings": r["m"], "utterances": r["u"]})
+                        "meetings": r["m"], "utterances": r["u"],
+                        "has_sample": (r["span"] or 0) > 800})  # matches speaker_best_span
         return out
 
     def delete_speakers_by_name(self, name):
