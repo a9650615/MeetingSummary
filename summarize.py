@@ -103,6 +103,8 @@ def _chunk(text, max_chars):
 
 
 def summarize(text, *, kind, lang, backend, max_chars=24000, notes=""):
+    if not (text or "").strip():
+        return "（無逐字稿，無法產生摘要）"
     # Notes are user-provided ground truth: pass to _ground as valid source so a
     # name/date the user typed isn't scrubbed as "fabricated".
     ground = text + ("\n" + notes if notes else "")

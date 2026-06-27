@@ -328,7 +328,7 @@ _PROG_JS = (
 # scanned by the single-line-script guard).
 _REC_JS = (
     "(function(){if(location.pathname==='/live')return;"
-    "let gws=null,gctx=null,nodes=[],streams=[],t0=0,timer=null,open=false;"
+    "let gws=null,gctx=null,nodes=[],streams=[],t0=0,timer=null,open=false,_busy=false;"
     "const fab=document.createElement('div');fab.id='_recfab';"
     "fab.style.cssText='position:fixed;right:18px;bottom:18px;z-index:300;display:flex;"
     "flex-direction:column;align-items:flex-end;gap:8px';document.body.appendChild(fab);"
@@ -353,16 +353,17 @@ _REC_JS = (
     "const go=document.getElementById('_rgo');if(go)go.onclick=begin;}"
     "function renderRec(){open=false;fab.innerHTML=`<button class=btn id=_rstop style=\"${RED}${RB}\">"
     "■ 停止 <span id=_rt>0:00</span></button>`;document.getElementById('_rstop').onclick=stop;}"
-    "async function begin(){const src=document.getElementById('_rsrc').value;"
+    "async function begin(){if(_busy||gws)return;_busy=true;"  # guard double-start race
+    "const src=document.getElementById('_rsrc').value;"
     "const model=document.getElementById('_rmodel').value,ro=document.getElementById('_rro').checked;"
     "try{if(src==='mic')streams=[await navigator.mediaDevices.getUserMedia({audio:true})];"
     "else if(src==='system'){const s=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});"
     "s.getVideoTracks().forEach(t=>t.stop());"
-    "if(!s.getAudioTracks().length){alert('未取得系統音(分享時要勾「分享音訊」)');return;}streams=[s];}"
+    "if(!s.getAudioTracks().length){alert('未取得系統音(分享時要勾「分享音訊」)');_busy=false;return;}streams=[s];}"
     "else{const mic=await navigator.mediaDevices.getUserMedia({audio:true});"
     "const sys=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});"
     "sys.getVideoTracks().forEach(t=>t.stop());streams=[mic,sys];}}"
-    "catch(e){alert('無法取得音訊：'+e.message);return;}"
+    "catch(e){alert('無法取得音訊：'+e.message);_busy=false;return;}"
     "try{await fetch('/models',{method:'POST',headers:{'Content-Type':'application/json'},"
     "body:JSON.stringify({live:model})});}catch(e){}"
     "try{gctx=new AudioContext({sampleRate:16000});}catch(e){gctx=new AudioContext();}"
@@ -379,11 +380,11 @@ _REC_JS = (
     "const v=Math.max(-1,Math.min(1,n?sm/n:0));pcm[k]=v*32767;}"
     "if(tag===null)gws.send(pcm.buffer);"
     "else{const bb=new Uint8Array(1+pcm.byteLength);bb[0]=tag;bb.set(new Uint8Array(pcm.buffer),1);gws.send(bb.buffer);}};"
-    "nodes.push(node);});t0=Date.now();renderRec();"
-    "timer=setInterval(()=>{const el=document.getElementById('_rt');if(el)el.textContent=fmt((Date.now()-t0)/1000);},1000);};"
+    "nodes.push(node);});t0=Date.now();renderRec();clearInterval(timer);"
+    "clearInterval(timer);timer=setInterval(()=>{const el=document.getElementById('_rt');if(el)el.textContent=fmt((Date.now()-t0)/1000);},1000);};"
     "gws.onclose=()=>cleanup();gws.onerror=()=>cleanup();}"
     "function stop(){if(gws){try{gws.close();}catch(e){}}cleanup();}"
-    "function cleanup(){clearInterval(timer);timer=null;"
+    "function cleanup(){_busy=false;clearInterval(timer);timer=null;"
     "nodes.forEach(n=>{n.onaudioprocess=null;try{n.disconnect();}catch(e){}});nodes=[];"
     "streams.forEach(s=>s.getTracks().forEach(t=>t.stop()));streams=[];"
     "if(gctx){try{gctx.close();}catch(e){}gctx=null;}gws=null;refresh();}"
@@ -1075,6 +1076,8 @@ function attach(stream, tag, ratio, gate){
 }
 
 startBtn.onclick = async () => {
+  if(ws||startBtn.disabled) return;       // guard double-start during the async permission window
+  startBtn.disabled=true;
   const source = document.getElementById('source').value;
   const nativeSys = document.getElementById('nativesys').checked;
   const dual = source==='dual';
@@ -1083,7 +1086,7 @@ startBtn.onclick = async () => {
   let browserSrc = source;
   if(nativeSys) browserSrc = (source==='dual') ? 'mic' : (source==='system' ? 'none' : source);
   try { streams = browserSrc==='none' ? [] : await getStreams(browserSrc); }
-  catch(e){ S.textContent=' 取得音源失敗: '+e.message; return; }
+  catch(e){ S.textContent=' 取得音源失敗: '+e.message; startBtn.disabled=false; return; }
   // Ask for a 16 kHz context so the browser's quality resampler does the work
   // (ratio≈1, no crude decimation). Falls back to the device rate if unsupported.
   try { ctx = new AudioContext({sampleRate:16000}); }
@@ -1805,6 +1808,9 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
                                  s["end_ms"], s["track"], s["text"])
         jobs[mid].update(done=len(segs), total=len(segs), text="產生摘要中…")
         meeting = store.get_meeting(mid)
+        if meeting is None:  # deleted mid-job (race with DELETE /meetings/{mid})
+            jobs[mid] = {"state": "error", "msg": "meeting was deleted"}
+            return
         text = _transcript_text(store.list_transcripts(mid))
         out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend,
                         notes=(meeting["notes"] or ""))

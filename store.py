@@ -225,6 +225,9 @@ class Store:
         cur = self.db.execute("UPDATE transcripts SET speaker=? WHERE speaker=?",
                               (new, old))
         self.db.execute("UPDATE speakers SET name=? WHERE name=?", (new, old))
+        # keep nonmatch pairs pointing at the new name (else stale rows linger)
+        self.db.execute("UPDATE speaker_nonmatches SET a=? WHERE a=?", (new, old))
+        self.db.execute("UPDATE speaker_nonmatches SET b=? WHERE b=?", (new, old))
         self.db.commit()
         return cur.rowcount
 
@@ -352,6 +355,7 @@ class Store:
                                 (target_id, next_idx, seg["id"]))
                 next_idx += 1
             self.db.execute("DELETE FROM summaries WHERE meeting_id=?", (sid,))
+            self.db.execute("DELETE FROM meeting_tags WHERE meeting_id=?", (sid,))
             self.db.execute("DELETE FROM meetings WHERE id=?", (sid,))
         self.db.commit()
         return target_id

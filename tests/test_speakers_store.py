@@ -74,3 +74,20 @@ def test_settings_kv(tmp_path):
     assert s.get_setting("persist_speakers") == "0"
     s.set_setting("persist_speakers", "1")                # upsert
     assert s.get_setting("persist_speakers") == "1"
+
+
+def test_rename_updates_nonmatches(tmp_path):
+    s = Store(str(tmp_path / "m.db"))
+    s.add_speaker_nonmatch("Alice", "Bob")
+    s.rename_speaker_global("Bob", "Bobby")
+    assert s.list_speaker_nonmatches() == [("Alice", "Bobby")]  # not stale "Bob"
+
+
+def test_merge_meetings_clears_tags(tmp_path):
+    s = Store(str(tmp_path / "m.db"))
+    t = s.create_meeting("T", 1.0, "zh-TW"); src = s.create_meeting("S", 2.0, "zh-TW")
+    s.add_tag(src, "x")
+    s.merge_meetings(t, [src])
+    # the source's meeting_tags row is gone (no orphan)
+    n = s.db.execute("SELECT COUNT(*) c FROM meeting_tags WHERE meeting_id=?", (src,)).fetchone()["c"]
+    assert n == 0
