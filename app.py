@@ -997,6 +997,7 @@ function showModels(m){
   document.getElementById('accmodel').textContent = (m.accurate||'-').split('/').pop();
 }
 fetch('/models').then(r=>r.json()).then(showModels).catch(()=>{});
+fetch('/live/prewarm',{method:'POST'}).catch(()=>{});  // warm ANE helper before first record
 modelSel.onchange = () => {
   fetch('/models',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({live:modelSel.value})})
@@ -2314,12 +2315,18 @@ def create_app(store, *, summary_backend, asr_backend=None,
         live_manager.set_model(body.live)  # hot reload — no restart
         if on_model_change:
             on_model_change(body.live)
-        import backends as _bk  # noqa: PLC0415
-        if _bk.route(body.live) == "ane":  # pre-warm the helper (~13s load) off-thread
-            import threading
-            threading.Thread(
-                target=lambda: _bk.ane_live_backend()(b"\x00" * 32000), daemon=True).start()
+        if backends.route(body.live) == "ane":  # pre-warm the helper (~13s load) off-thread
+            backends.ane_warm()
         return {"live": live_manager.requested}
+
+    @app.post("/live/prewarm")
+    def live_prewarm():
+        # Called on live-page load: warm the ANE helper ahead of the first record
+        # so it isn't blocked on the ~13s CoreML load. No-op unless ANE is current.
+        if live_manager is not None and backends.route(live_manager.current) == "ane":
+            backends.ane_warm()
+            return {"warming": True}
+        return {"warming": False}
 
     @app.get("/models/manage", response_class=HTMLResponse)
     def models_manage():
@@ -3271,6 +3278,8 @@ if __name__ == "__main__":  # pragma: no cover
         make=backends.make_live_backend, model=live_model, fallback=fallback,
         rtf_budget=live_rtf_budget,
         on_change=lambda m: mp.save_chosen(profile_path, m))
+    if backends.route(live_model) == "ane":  # default is ANE -> warm at boot
+        backends.ane_warm()
 
     app = create_app(
         Store("data/meetings.db"),

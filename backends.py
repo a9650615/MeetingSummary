@@ -619,6 +619,26 @@ def ane_live_backend():
     return _run
 
 
+_ANE_WARMED = {"v": False}
+
+
+def ane_warm():
+    """Pre-load the ANE helper in the background so the FIRST live utterance isn't
+    blocked on the ~13s CoreML compile/load. Idempotent + best-effort — safe to call
+    on live-page load, model selection, and at boot."""
+    import threading  # noqa: PLC0415
+    if _ANE_WARMED["v"] or ane_helper_bin() is None:
+        return
+    _ANE_WARMED["v"] = True
+
+    def _w():
+        try:
+            ane_live_backend()(b"\x00" * 32000)  # 1s silence -> spawns helper + loads model once
+        except Exception:  # noqa: BLE001
+            _ANE_WARMED["v"] = False  # let a later trigger retry
+    threading.Thread(target=_w, daemon=True).start()
+
+
 def make_batch_backend(model, language=None):
     """Batch/accurate: route to Qwen3-ASR .cpp (fast, Metal, word-aligned) or
     transformers Qwen3-ASR or whisper-MLX. callable(audio_path) -> segments.

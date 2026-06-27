@@ -473,3 +473,9 @@ def test_ingest_filename_sanitized(tmp_path, monkeypatch):
     assert r.status_code in (200, 303)
     assert (tmp_path / "data" / "uploads" / "escape.wav").exists()  # basename, inside uploads
     assert not (tmp_path / "escape.wav").exists()                   # did NOT escape
+
+
+def test_live_prewarm_noop_without_ane(tmp_path):
+    # no live_manager / non-ANE -> prewarm is a harmless no-op
+    c, _ = make_client(tmp_path)
+    assert c.post("/live/prewarm").json()["warming"] is False
