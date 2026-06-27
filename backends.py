@@ -537,6 +537,18 @@ def audiocap_bin():
     return cand if os.path.exists(cand) else None
 
 
+def floatpanel_bin():
+    """Path to the prebuilt floating control-panel app, or None. Env FLOATPANEL_BIN
+    overrides; else the repo build output."""
+    import os  # noqa: PLC0415
+    p = os.environ.get("FLOATPANEL_BIN")
+    if p and os.path.exists(p):
+        return p
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.join(here, "swift", "floatpanel", ".build", "release", "floatpanel")
+    return cand if os.path.exists(cand) else None
+
+
 def ane_live_backend():
     """Persistent ANE ASR as a live backend. Spawns the Swift helper ONCE (Qwen3-ASR
     CoreML on the Neural Engine — model loaded once, then warm/fast), and serves each

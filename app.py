@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 import asr
+import backends  # module-level: every `backends.x` call resolves (avoids per-fn import + NameError)
 from live import TwoPassSession
 from summarize import summarize
 
@@ -481,6 +482,7 @@ _INDEX = _shell("MeetingSummary", """
 <a class="btn primary" href="/live">🔴 開始 Live 即時逐字稿</a>
 <a class="btn" href="/speakers/manage">👥 語者</a>
 <a class="btn" href="/models/manage">⚙️ 設定</a>
+<button class="btn" onclick="fetch('/floatpanel/open',{method:'POST'}).then(r=>r.json()).then(j=>{if(j&&j.detail)alert(j.detail)}).catch(()=>{})" title="置頂浮動控制面板（需先在設定安裝）">🪟 浮動面板</button>
 </div>
 <h2>上傳音檔</h2>
 <div class=card>
@@ -762,13 +764,20 @@ def _models_page():
             "<div class=card style='margin-top:12px'><p class=hint>🧪 <b>ANE 省電辨識（M 系列）</b>："
             "先到下方「加速 runtime」一鍵安裝 <code>speech</code>，裝好後這裡會出現開關。</p></div>")
            if _apple_silicon() else "")
+        + ("<div class=card style='margin-top:12px'>"
+           "<label class=chk><input type=checkbox id=floatpanel_opt> "
+           "🪟 錄音時自動開啟原生懸浮控制面板</label>"
+           "<p class=hint style='margin:.6em 0 0'>開始錄音(含手動／快速錄音)時，自動開啟可置頂於其他 App 之上的"
+           "原生小窗(狀態＋計時＋停止)。需先到下方「加速 runtime」安裝 <code>floatpanel</code>。</p></div>"
+           if _apple_silicon() else "")
         + "</section>"
 
         "<section id=sec-rt><h2>加速 runtime（.cpp · Metal）</h2>"
         "<div class=card>"
         "<table class=tx id=rt><tr><th>Runtime</th><th>狀態</th><th></th></tr></table>"
         "<p class=hint style='margin:.5em 0 0'>一鍵安裝。chatllm 優先下載預編譯(免 cmake)，"
-        "下載不到才原始碼編譯；femelo 需 python≥3.11；speech = ANE 省電辨識(Qwen3-ASR CoreML，brew)。"
+        "下載不到才原始碼編譯；femelo 需 python≥3.11；speech = ANE 省電辨識(Qwen3-ASR CoreML，brew)；"
+        "audiocap = 原生系統音擷取、floatpanel = 浮動控制面板(皆為預編下載，不在本機編譯；首次用需授權「螢幕錄製」)。"
         "缺的環境會自動 brew 安裝。清除只移除編譯產物，模型權重保留。</p>"
         "</div></section>")
     script = r"""
@@ -788,7 +797,7 @@ def _models_page():
       document.getElementById('rt').innerHTML='<tr><th>Runtime</th><th>狀態</th><th></th></tr>'
         +Object.entries(d.runtimes).map(([k,ok])=>`<tr><td>${k}</td>`
           +`<td>${ok?'✅ 已安裝':'— 未安裝'}${tmsg(d.tasks[k])}</td>`
-          +`<td><button class='btn' data-rt="${k}">${ok?'重新編譯':'編譯安裝'}</button>`
+          +`<td><button class='btn' data-rt="${k}">${ok?'重新安裝':'安裝'}</button>`
           +`${ok?` <button class='btn danger' data-rtdel="${k}">清除</button>`:''}</td></tr>`).join('');
       document.querySelectorAll('#rt button[data-rtdel]').forEach(b=>b.onclick=async()=>{
         if(!confirm('清除 '+b.dataset.rtdel+' runtime？(模型權重保留,重新編譯可復原)'))return;
@@ -797,7 +806,7 @@ def _models_page():
           body:JSON.stringify({runtime:b.dataset.rtdel})});
         load();});
       document.querySelectorAll('#rt button[data-rt]').forEach(b=>b.onclick=async()=>{
-        b.disabled=true;b.textContent='編譯中…';
+        b.disabled=true;b.textContent='處理中…';
         await fetch('/models/setup',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({runtime:b.dataset.rt})});
         setTimeout(load,800);});
@@ -853,6 +862,9 @@ def _models_page():
     (function(){const d=document.getElementById('denoise_opt');if(!d)return;
       fetch('/settings/denoise').then(r=>r.json()).then(j=>d.checked=j.value==='1');
       d.onchange=()=>fetch('/settings/denoise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:d.checked?'1':'0'})});})();
+    (function(){const f=document.getElementById('floatpanel_opt');if(!f)return;
+      fetch('/settings/float_panel').then(r=>r.json()).then(j=>f.checked=j.value==='1');
+      f.onchange=()=>fetch('/settings/float_panel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:f.checked?'1':'0'})});})();
     function fmtB(b){if(b>=1e9)return (b/1e9).toFixed(2)+' GB';
       if(b>=1e6)return (b/1e6).toFixed(1)+' MB';
       if(b>=1e3)return (b/1e3).toFixed(0)+' KB';return b+' B';}
@@ -1504,6 +1516,8 @@ def _runtime_status():
         st["speech"] = shutil.which("speech") is not None  # ANE batch ASR (省電)
         import backends  # noqa: PLC0415
         st["qwen3-ane"] = backends.ane_helper_bin() is not None  # ANE live helper
+        st["audiocap"] = backends.audiocap_bin() is not None     # native system audio
+        st["floatpanel"] = backends.floatpanel_bin() is not None  # floating control panel
     return st
 
 
@@ -2105,6 +2119,23 @@ def create_app(store, *, summary_backend, asr_backend=None,
     idle = {"last": time.time(), "live": 0}
     live_active = {}  # mid -> open live connections; surfaced in /jobs (global popout)
     live_stop = set()  # mids the float control panel asked to stop (server-side)
+    _panel = {"p": None}  # the floating control-panel subprocess (singleton)
+
+    def _open_panel():
+        """Launch the native float panel if installed; idempotent (reuse if alive)."""
+        binp = backends.floatpanel_bin()
+        if not binp:
+            return False
+        p = _panel["p"]
+        if p and p.poll() is None:
+            return True  # already running
+        try:
+            _panel["p"] = subprocess.Popen(
+                [binp], start_new_session=True,
+                env={**os.environ, "MEETING_PORT": os.environ.get("MEETING_PORT", "8765")})
+            return True
+        except Exception:  # noqa: BLE001
+            return False
     idle_release_s = int(os.environ.get("LIVE_IDLE_RELEASE_S", "600"))
 
     def _touch():
@@ -2172,6 +2203,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
             live_stop.add(m)
             n += 1
         return {"stopping": n}
+
+    @app.post("/floatpanel/open")
+    def floatpanel_open():
+        # Launch the native floating control panel (detached, idempotent).
+        if not _open_panel():
+            raise HTTPException(400, "floatpanel 未安裝（設定 → 加速 runtime → 安裝）")
+        return {"opened": True}
 
     @app.post("/shutdown")
     def shutdown():
@@ -2386,12 +2424,17 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.post("/models/setup")
     def models_setup(body: SetupIn):
-        if body.runtime not in ("femelo", "chatllm"):
+        if body.runtime not in ("femelo", "chatllm", "speech", "qwen3-ane",
+                                "audiocap", "floatpanel"):
             raise HTTPException(400, "unknown runtime")
+        # native helpers are prebuilt — downloaded, not compiled on the client
+        _download_only = body.runtime in ("audiocap", "floatpanel")
 
         def _build():
             import subprocess
-            _MODEL_TASKS[body.runtime] = {"state": "running", "msg": "編譯中…(數分鐘)"}
+            _MODEL_TASKS[body.runtime] = {
+                "state": "running",
+                "msg": "下載中…" if _download_only else "安裝中…(可能數分鐘)"}
             try:
                 r = subprocess.run(["bash", "setup_runtime.sh", body.runtime],
                                    timeout=3600, capture_output=True, text=True)
@@ -2452,6 +2495,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
         conn_offset_ms = max(0, int((t0 - store.get_meeting(mid)["created_at"]) * 1000))
         live_active[mid] = live_active.get(mid, 0) + 1  # show in the global popout
         await ws.send_json({"type": "meeting", "id": mid})
+        if store.get_setting("float_panel", "0") == "1":  # auto-open native panel
+            _open_panel()
 
         # Per-track. Dual = separate tagged streams (0=mic/我, 1=system/對方);
         # otherwise one track. Frame in dual mode = [1 byte tag] + PCM.
@@ -2612,7 +2657,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         audiocap_proc = None
         if ws.query_params.get("native_sys") == "1":
             sys_tag = next((t for t, (trk, _l) in tracks.items() if trk == "system"), None)
-            binp = backends.audiocap_bin()
+            binp = _bk.audiocap_bin()
             if sys_tag is not None and binp:
                 audiocap_proc = await asyncio.create_subprocess_exec(
                     binp, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -3122,7 +3167,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         return {"deleted": name}
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
-                 "denoise": "0"}
+                 "denoise": "0", "float_panel": "0"}
 
     @app.get("/settings/{key}")
     def get_setting_route(key: str):

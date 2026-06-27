@@ -113,5 +113,37 @@ print(a[0] if a else '')" 2>/dev/null)" || true
     echo "預編譯不可用，改從原始碼編譯(需 Xcode 的 metal toolchain)…"
     bash build_qwen3_ane.sh
     ;;
-  *) echo "usage: setup_runtime.sh femelo|chatllm|speech|qwen3-ane"; exit 2 ;;
+  audiocap)
+    # Native system-audio helper (ScreenCaptureKit). DOWNLOAD-ONLY — native
+    # binaries are prebuilt in CI (release.yml), never compiled on the user's
+    # machine. build_audiocap.sh is for CI/dev only.
+    OUT="swift/audiocap/.build/release"
+    [ -f "$OUT/audiocap" ] && { echo "audiocap already installed"; exit 0; }
+    mkdir -p "$OUT"
+    url="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+      | python3 -c "import sys,json
+a=[x['browser_download_url'] for x in json.load(sys.stdin).get('assets',[]) if x['name']=='audiocap-arm64.tar.gz']
+print(a[0] if a else '')" 2>/dev/null)" || true
+    if [ -n "${url:-}" ]; then
+      echo "下載預編譯 audiocap…"
+      curl -fsSL "$url" | tar xzf - -C "$OUT" && { echo "audiocap OK (prebuilt)"; exit 0; }
+    fi
+    echo "找不到預編譯 audiocap（請更新到含預編譯資產的版本）" >&2; exit 1
+    ;;
+  floatpanel)
+    # Floating control panel (AppKit). DOWNLOAD-ONLY (prebuilt in CI).
+    OUT="swift/floatpanel/.build/release"
+    [ -f "$OUT/floatpanel" ] && { echo "floatpanel already installed"; exit 0; }
+    mkdir -p "$OUT"
+    url="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+      | python3 -c "import sys,json
+a=[x['browser_download_url'] for x in json.load(sys.stdin).get('assets',[]) if x['name']=='floatpanel-arm64.tar.gz']
+print(a[0] if a else '')" 2>/dev/null)" || true
+    if [ -n "${url:-}" ]; then
+      echo "下載預編譯 floatpanel…"
+      curl -fsSL "$url" | tar xzf - -C "$OUT" && { echo "floatpanel OK (prebuilt)"; exit 0; }
+    fi
+    echo "找不到預編譯 floatpanel（請更新到含預編譯資產的版本）" >&2; exit 1
+    ;;
+  *) echo "usage: setup_runtime.sh femelo|chatllm|speech|qwen3-ane|audiocap|floatpanel"; exit 2 ;;
 esac

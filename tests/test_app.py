@@ -451,3 +451,10 @@ def test_live_state_and_stop(tmp_path):
     c, _ = make_client(tmp_path)
     assert c.get("/live/state").json()["recording"] is False
     assert c.post("/live/stop").json()["stopping"] == 0
+
+
+def test_floatpanel_open_requires_install(tmp_path, monkeypatch):
+    import backends
+    c, _ = make_client(tmp_path)
+    monkeypatch.setattr(backends, "floatpanel_bin", lambda: None)
+    assert c.post("/floatpanel/open").status_code == 400  # not installed -> guided error
