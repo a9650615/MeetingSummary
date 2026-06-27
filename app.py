@@ -836,7 +836,7 @@ def _models_page():
       document.querySelectorAll('#oth button[data-p]').forEach(b=>b.onclick=async()=>{
         if(await del(b.dataset.p,b.dataset.n))load();});
       if(Object.values(d.tasks||{}).some(t=>t.state==='running'))setTimeout(load,3000);
-    });}
+    }).catch(()=>{const v=document.getElementById('ver');if(v)v.textContent='（無法連線伺服器）';});}
     document.getElementById('free').onclick=async()=>{
       const m=document.getElementById('updmsg');m.textContent=' 釋放中…';
       const r=await fetch('/models/free',{method:'POST'});const j=await r.json();
@@ -2333,7 +2333,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def changelog_page():
         here = os.path.dirname(os.path.abspath(__file__))
         try:
-            md = open(os.path.join(here, "CHANGELOG.md")).read()
+            with open(os.path.join(here, "CHANGELOG.md")) as _f:
+                md = _f.read()
         except Exception:
             md = "（找不到 CHANGELOG.md）"
         import updater

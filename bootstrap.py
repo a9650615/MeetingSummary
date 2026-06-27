@@ -83,7 +83,8 @@ def setup():
             state["step"] = "安裝核心套件(首次約數分鐘)…"
             if _pip(["install", "--no-input", "-r", REQ], log=True) == 0 and h:
                 try:
-                    open(os.path.join(HERE, ".venv", ".reqhash"), "w").write(h)
+                    with open(os.path.join(HERE, ".venv", ".reqhash"), "w") as _f:
+                        _f.write(h)
                 except Exception:
                     pass
         # mlx = Apple-Silicon Metal ASR; best-effort. Failure is fine — skip it.

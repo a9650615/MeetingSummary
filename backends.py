@@ -335,7 +335,16 @@ class _Qwen3CppDaemon:
                 self._proc.stdin.write(f"{language or ''}\t{tmp}\n")  # lang<TAB>path
                 self._proc.stdin.flush()
                 text = ""
-                for line in self._proc.stdout:
+                import select  # noqa: PLC0415
+                while True:  # watchdog: never block the live thread forever on a hung daemon
+                    rl, _, _ = select.select([self._proc.stdout], [], [], 30)
+                    if not rl:                       # 30s with no output -> assume hung
+                        self._proc.kill()
+                        self._proc = None            # respawn on next call
+                        return []
+                    line = self._proc.stdout.readline()
+                    if not line:                     # EOF (daemon exited)
+                        break
                     if line.startswith("QWEN3JSON:"):
                         text = json.loads(line[len("QWEN3JSON:"):]).get("text", "")
                         break
