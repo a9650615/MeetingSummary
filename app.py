@@ -934,6 +934,7 @@ _LIVE_BODY = """
     <label class=chk style="align-self:end"><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
     <label class=chk style="align-self:end" title="只錄音不辨識，零推論、不發熱；事後再「重新語音辨識」"><input type=checkbox id=reconly> 🪫 純錄音(省電·不即時辨識)</label>
     <label class=chk style="align-self:end" title="嘈雜環境降噪，於事後重新辨識時生效"><input type=checkbox id=denoise_live> 🧪 降噪(重新辨識時)</label>
+    <label class=chk style="align-self:end" title="用原生 ScreenCaptureKit 擷取系統音(對方)，免每次跳瀏覽器分享框；首次需授權螢幕錄製"><input type=checkbox id=nativesys> 🖥️ 系統音原生擷取(免分享框)</label>
   </div>
   <div class=row style="margin-top:14px">
     <button class="btn primary" id=start>開始</button>
@@ -1063,8 +1064,13 @@ function attach(stream, tag, ratio, gate){
 
 startBtn.onclick = async () => {
   const source = document.getElementById('source').value;
+  const nativeSys = document.getElementById('nativesys').checked;
   const dual = source==='dual';
-  try { streams = await getStreams(source); }
+  // native_sys: the SYSTEM track comes from ScreenCaptureKit server-side, so the
+  // browser must NOT also capture it. dual -> browser does mic only; system -> none.
+  let browserSrc = source;
+  if(nativeSys) browserSrc = (source==='dual') ? 'mic' : (source==='system' ? 'none' : source);
+  try { streams = browserSrc==='none' ? [] : await getStreams(browserSrc); }
   catch(e){ S.textContent=' 取得音源失敗: '+e.message; return; }
   // Ask for a 16 kHz context so the browser's quality resampler does the work
   // (ratio≈1, no crude decimation). Falls back to the device rate if unsupported.
@@ -1082,7 +1088,8 @@ startBtn.onclick = async () => {
   const lv = document.getElementById('lang').value;
   const lang = lv ? '&lang='+lv : '';
   const ro = document.getElementById('reconly').checked ? '&record_only=1' : '';
-  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}${lang}${ro}`);
+  const ns = document.getElementById('nativesys').checked ? '&native_sys=1' : '';
+  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}${lang}${ro}${ns}`);
   ws.binaryType='arraybuffer';
   function colored(speaker){ return COLORS[speaker]||'#444'; }
   ws.onmessage = e => {
@@ -1114,7 +1121,8 @@ startBtn.onclick = async () => {
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
   };
   ws.onopen = () => {
-    if(dual){ attach(streams[0],0,ratio,false); attach(streams[1],1,ratio,false); }  // 我/對方, continuous
+    // guard each stream: with native_sys a track may be server-sourced (no browser stream)
+    if(dual){ if(streams[0])attach(streams[0],0,ratio,false); if(streams[1])attach(streams[1],1,ratio,false); }
     else { streams.forEach(st=>attach(st,null,ratio,true)); }  // mic/system/both: gated
   };
   startBtn.disabled=true; stopBtn.disabled=false;
@@ -2578,6 +2586,36 @@ def create_app(store, *, summary_backend, asr_backend=None,
             got.set()
 
         rtask = asyncio.create_task(receiver())
+        # Native system audio (ScreenCaptureKit): when ?native_sys=1, the SERVER
+        # captures system audio via the audiocap helper and feeds it into the
+        # system/對方 track — no per-session browser "share screen + audio" dialog.
+        # Same event loop as receiver() (asyncio subprocess) -> no thread races.
+        nrtask = None
+        audiocap_proc = None
+        if ws.query_params.get("native_sys") == "1":
+            sys_tag = next((t for t, (trk, _l) in tracks.items() if trk == "system"), None)
+            binp = backends.audiocap_bin()
+            if sys_tag is not None and binp:
+                audiocap_proc = await asyncio.create_subprocess_exec(
+                    binp, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+
+                async def native_reader(tag=sys_tag, proc=audiocap_proc):
+                    try:
+                        while True:
+                            data = await proc.stdout.read(8192)
+                            if not data:
+                                break
+                            _pad_to(time.time())
+                            audio_files[tag].write(data)
+                            buffers[tag].extend(data)
+                            written[tag] += len(data)
+                            got.set()
+                    except Exception as e:  # noqa: BLE001
+                        print(f"native_sys reader stopped: {e}", file=sys.stderr)
+                nrtask = asyncio.create_task(native_reader())
+            else:
+                await ws.send_json({"type": "notice",
+                                    "msg": "原生系統音擷取不可用（缺 helper 或需螢幕錄製權限）"})
         try:
             while True:
                 await got.wait()
@@ -2606,6 +2644,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     await ws.send_json({"type": "notice", "msg": msg})
         finally:
             rtask.cancel()
+            if nrtask:
+                nrtask.cancel()
+            if audiocap_proc and audiocap_proc.returncode is None:
+                try:
+                    audiocap_proc.terminate()
+                except ProcessLookupError:
+                    pass
             _pad_to(time.time())  # equalize track lengths to the final wall-clock
             for tag, s in sessions.items():
                 for ev in await run_in_threadpool(s.flush):

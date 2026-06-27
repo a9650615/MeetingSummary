@@ -69,3 +69,12 @@ def test_denoise_file_graceful_without_speech(monkeypatch, tmp_path):
     monkeypatch.setattr("os.path.exists", lambda _p: False)
     src = str(tmp_path / "a.pcm")
     assert backends.denoise_file(src, raw_pcm=True) == src
+
+
+def test_audiocap_bin_env_override(monkeypatch, tmp_path):
+    f = tmp_path / "audiocap"
+    f.write_text("x")
+    monkeypatch.setenv("AUDIOCAP_BIN", str(f))
+    assert backends.audiocap_bin() == str(f)
+    monkeypatch.setenv("AUDIOCAP_BIN", str(tmp_path / "nope"))
+    assert backends.audiocap_bin() != str(tmp_path / "nope")  # bad path -> repo build or None

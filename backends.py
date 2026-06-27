@@ -523,6 +523,20 @@ def ane_helper_bin():
     return cand if os.path.exists(cand) else None
 
 
+def audiocap_bin():
+    """Path to the prebuilt Swift ScreenCaptureKit system-audio helper, or None.
+    Env AUDIOCAP_BIN overrides (the .app bundles it); else the repo build output.
+    Streams 16k mono int16-LE PCM of system audio to stdout (needs macOS
+    Screen-Recording permission for the launching app)."""
+    import os  # noqa: PLC0415
+    p = os.environ.get("AUDIOCAP_BIN")
+    if p and os.path.exists(p):
+        return p
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.join(here, "swift", "audiocap", ".build", "release", "audiocap")
+    return cand if os.path.exists(cand) else None
+
+
 def ane_live_backend():
     """Persistent ANE ASR as a live backend. Spawns the Swift helper ONCE (Qwen3-ASR
     CoreML on the Neural Engine — model loaded once, then warm/fast), and serves each
