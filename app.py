@@ -1372,8 +1372,10 @@ def _track_wav_file(store, mid, track):
     # and live append. Without this, merged meetings played stale/partial audio.
     key = repr(sorted((p, os.path.getsize(p), int(os.path.getmtime(p))) for p in srcs))
     keyfile = cache + ".key"
-    fresh = (os.path.exists(cache) and os.path.exists(keyfile)
-             and open(keyfile).read() == key)
+    fresh = os.path.exists(cache) and os.path.exists(keyfile)
+    if fresh:
+        with open(keyfile) as _kf:
+            fresh = _kf.read() == key
     if not fresh:
         pcm = _assemble_track(store, mid, track)
         if pcm is None:

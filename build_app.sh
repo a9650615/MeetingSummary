@@ -45,7 +45,7 @@ cat > "$APP/Contents/MacOS/launcher" <<LAUNCH
 # ready), then hands off to the real server. Reuses the dev project's venv if it
 # exists -> instant; otherwise sets up in Application Support.
 set -u
-PORT=$PORT
+PORT="\${MEETING_PORT:-$PORT}"   # runtime MEETING_PORT wins; build-time PORT is only the default
 # Already running? skip bootstrap/rsync entirely — jump straight to the page.
 if /usr/bin/curl -fsS -m 1 "http://127.0.0.1:\$PORT/health" >/dev/null 2>&1; then
   open "http://127.0.0.1:\$PORT"

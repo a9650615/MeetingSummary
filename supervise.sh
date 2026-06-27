@@ -15,11 +15,14 @@ LOG=/tmp/meeting_server.log
 # Single-instance: a 2nd supervisor would fight the 1st (each start() kills the
 # port holder) -> endless restart loop -> live dies. Refuse to start a duplicate.
 LOCK="/tmp/meeting_supervise.$PORT.pid"
-if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
-  echo "[supervise] already running (pid $(cat "$LOCK")) on port $PORT — exiting"
-  exit 0
+# Atomic create (noclobber) — TOCTOU-safe vs a near-simultaneous 2nd launch.
+if ! (set -C; echo $$ > "$LOCK") 2>/dev/null; then
+  if kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
+    echo "[supervise] already running (pid $(cat "$LOCK")) on port $PORT — exiting"
+    exit 0
+  fi
+  echo $$ > "$LOCK"   # stale lock (dead pid) -> take it over
 fi
-echo $$ > "$LOCK"
 POLL=10          # seconds between health checks
 MAX_FAILS=3      # consecutive /health failures -> restart (hang detection)
 SRV=""
