@@ -53,10 +53,13 @@ def _reqs_changed():
     # Re-run pip when requirements-app.txt changed since the last successful install.
     try:
         import hashlib
-        h = hashlib.md5(open(os.path.join(HERE, REQ), "rb").read()).hexdigest()
+        with open(os.path.join(HERE, REQ), "rb") as rf:
+            h = hashlib.md5(rf.read()).hexdigest()
         marker = os.path.join(HERE, ".venv", ".reqhash")
-        if os.path.exists(marker) and open(marker).read().strip() == h:
-            return False, h
+        if os.path.exists(marker):
+            with open(marker) as mf:
+                if mf.read().strip() == h:
+                    return False, h
         return True, h
     except Exception:
         return False, ""
@@ -161,7 +164,8 @@ def main():
     else:
         tail = ""
         try:
-            tail = open(LOG).read()[-2000:]
+            with open(LOG) as lf:
+                tail = lf.read()[-2000:]
         except Exception:
             pass
         state["error"] = ("啟動失敗 — 無法載入伺服器。\n\n=== import 錯誤 ===\n"

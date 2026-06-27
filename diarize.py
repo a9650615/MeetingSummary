@@ -243,7 +243,8 @@ def cluster_embeddings(pcm_path, segments, *, sample_rate=16000, max_secs=12,
     """One L2-normalized speaker embedding per cluster id, from up to max_secs of
     that cluster's audio (concatenated). {} on no audio. Lazy (sherpa emb model)."""
     import numpy as np  # noqa: PLC0415
-    audio = np.frombuffer(open(pcm_path, "rb").read(), dtype=np.int16)
+    with open(pcm_path, "rb") as _f:
+        audio = np.frombuffer(_f.read(), dtype=np.int16)
     ext = embedding_extractor(model, provider)
     spans = {}
     for seg in segments:
@@ -401,7 +402,8 @@ def diarize_pcm(pcm_path, *, sample_rate=16000, num_speakers=-1,
         clustering=sherpa_onnx.FastClusteringConfig(num_clusters=num_speakers),
     )
     sd = sherpa_onnx.OfflineSpeakerDiarization(config)
-    audio = np.frombuffer(open(pcm_path, "rb").read(), dtype=np.int16)
+    with open(pcm_path, "rb") as _f:
+        audio = np.frombuffer(_f.read(), dtype=np.int16)
     samples = audio.astype(np.float32) / 32768.0
     cb = None
     if on_progress:

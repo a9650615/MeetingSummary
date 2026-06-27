@@ -105,7 +105,8 @@ def qwen3_mlx_backend(model="mlx-community/Qwen3-ASR-1.7B-8bit", language=None):
         if isinstance(audio, (bytes, bytearray)):
             pcm = np.frombuffer(bytes(audio), dtype=np.int16)
         elif isinstance(audio, str) and audio.endswith(".pcm"):
-            pcm = np.frombuffer(open(audio, "rb").read(), dtype=np.int16)
+            with open(audio, "rb") as _f:
+                pcm = np.frombuffer(_f.read(), dtype=np.int16)
         elif isinstance(audio, str):
             import shutil  # noqa: PLC0415
             import subprocess  # noqa: PLC0415
@@ -446,7 +447,8 @@ def ane_speech_backend(engine="qwen3-coreml-full", model="0.6B", language=None):
         if isinstance(audio, (bytes, bytearray)):
             return np.frombuffer(bytes(audio), dtype=np.int16)
         if isinstance(audio, str) and audio.endswith(".pcm"):
-            return np.frombuffer(open(audio, "rb").read(), dtype=np.int16)
+            with open(audio, "rb") as _f:
+                return np.frombuffer(_f.read(), dtype=np.int16)
         raw = subprocess.run(
             ["ffmpeg", "-v", "error", "-i", str(audio), "-ar", "16000", "-ac", "1",
              "-f", "s16le", "-"], stdout=subprocess.PIPE, check=True).stdout
