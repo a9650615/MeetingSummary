@@ -29,31 +29,33 @@ from summarize import summarize
 # claude.ai Artifact), so a full self-styled doc is fine.
 _STYLE = """
 *{box-sizing:border-box}
-:root{--bg:#eef1f6;--surface:#fff;--surface2:#f7f8fb;--ink:#11141a;--muted:#6b7384;
- --line:#e4e7ef;--accent:#5b54e6;--accent2:#7c75ff;--accentsoft:#ecebfd;
+:root{--bg:#f5f5f7;--surface:#fff;--surface2:#f0f0f3;--ink:#1d1d1f;--muted:#86868b;
+ --line:#e3e3e8;--accent:#5b54e6;--accent2:#7c75ff;--accentsoft:#ecebfd;
  --me:#1565c0;--other:#2e7d32;--danger:#e5484d;--ok:#1e9e57;
- --radius:18px;--radius-sm:11px;--radius-lg:26px;
+ --radius:20px;--radius-sm:12px;--radius-lg:28px;
  --ease:cubic-bezier(.32,.72,0,1);
- --shadow:0 .5px 1.5px rgba(16,24,40,.05),0 8px 26px -14px rgba(16,24,40,.22);
- --shadow-lg:0 1px 2px rgba(16,24,40,.06),0 24px 60px -24px rgba(16,24,40,.3);
- --capbg:#0d1017;--capink:#f3f5fa}
+ --shadow:0 .5px 1.5px rgba(16,24,40,.04),0 6px 22px -12px rgba(16,24,40,.16);
+ --shadow-lg:0 1px 2px rgba(16,24,40,.05),0 28px 64px -22px rgba(16,24,40,.26);
+ --capbg:#1d1d1f;--capink:#f5f5f7}
 :root[data-theme=dark]{
- --bg:#0c0e13;--surface:#15181f;--surface2:#1b1f28;--ink:#e9edf4;--muted:#8b93a4;
- --line:#262b36;--accent:#8b85ff;--accent2:#a39dff;--accentsoft:#23223a;
+ --bg:#000;--surface:#1c1c1e;--surface2:#2c2c2e;--ink:#f5f5f7;--muted:#98989d;
+ --line:#38383a;--accent:#9b96ff;--accent2:#b3aeff;--accentsoft:#27263d;
  --me:#6db3ff;--other:#74d99a;--danger:#ff6b6f;
- --shadow:0 .5px 1.5px rgba(0,0,0,.5),0 10px 30px -16px rgba(0,0,0,.7);
- --shadow-lg:0 1px 2px rgba(0,0,0,.5),0 26px 64px -26px rgba(0,0,0,.8);
- --capbg:#05070b;--capink:#f3f5fa}
+ --shadow:0 .5px 1.5px rgba(0,0,0,.6),0 10px 30px -16px rgba(0,0,0,.7);
+ --shadow-lg:0 1px 2px rgba(0,0,0,.6),0 28px 66px -24px rgba(0,0,0,.85);
+ --capbg:#1c1c1e;--capink:#f5f5f7}
 body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
- font:15px/1.62 -apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Segoe UI",Roboto,sans-serif}
+ text-rendering:optimizeLegibility;
+ font:16px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang TC","Noto Sans TC","Segoe UI",Roboto,sans-serif}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-.wrap{max-width:900px;margin:0 auto;padding:20px 20px 80px}
-header.top{display:flex;align-items:center;gap:12px;margin:6px 0 22px;position:sticky;top:0;z-index:40;
- padding:10px 4px;backdrop-filter:saturate(1.4) blur(10px)}
-.brand{font-weight:800;font-size:17px;letter-spacing:-.01em}
+.wrap{max-width:920px;margin:0 auto;padding:18px 20px 96px}
+header.top{display:flex;align-items:center;gap:12px;margin:2px 0 26px;position:sticky;top:0;z-index:40;
+ padding:12px 6px;backdrop-filter:saturate(1.8) blur(20px);-webkit-backdrop-filter:saturate(1.8) blur(20px);
+ background:color-mix(in srgb,var(--bg) 72%,transparent);border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.brand{font-weight:800;font-size:18px;letter-spacing:-.02em}
 .brand .dot{color:var(--accent)}
 .spacer{flex:1}
-h1{font-size:30px;font-weight:800;letter-spacing:-.03em;margin:.1em 0 .6em;line-height:1.15}
+h1{font-size:34px;font-weight:800;letter-spacing:-.035em;margin:.1em 0 .7em;line-height:1.1}
 h2{font-size:17px;font-weight:760;margin:28px 0 13px;letter-spacing:-.02em}
 h3{font-size:12px;font-weight:760;margin:14px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
@@ -64,11 +66,12 @@ h3{font-size:12px;font-weight:760;margin:14px 0 6px;color:var(--muted);text-tran
 label.fld{display:inline-flex;flex-direction:column;gap:5px;font-size:11px;color:var(--muted);
  font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 label.chk{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink);text-transform:none}
-input[type=text],input[type=search],input[type=file],input:not([type]),select{font:inherit;
+input[type=text],input[type=search],input[type=file],input:not([type]),select,textarea{font:inherit;
  padding:.58em .7em;border:1px solid var(--line);border-radius:var(--radius-sm);
  background:var(--surface2);color:var(--ink);transition:.12s}
-input:hover,select:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
-input:focus,select:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px var(--accentsoft)}
+textarea{resize:vertical}
+input:hover,select:hover,textarea:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
+input:focus,select:focus,textarea:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px var(--accentsoft)}
 input[type=search]{-webkit-appearance:none;appearance:none}
 /* custom chevron so the native select arrow doesn't look unstyled */
 select{cursor:pointer;-webkit-appearance:none;appearance:none;padding-right:2em;
@@ -87,9 +90,9 @@ input[type=file]::file-selector-button:hover{border-color:var(--accent);color:va
 .btn:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
 .btn:active{transform:scale(.96)}
 .btn:disabled{opacity:.45;cursor:not-allowed;transform:none;border-color:var(--line);color:var(--muted)}
-.btn.primary{background:linear-gradient(180deg,var(--accent2),var(--accent));border-color:transparent;
- color:#fff;box-shadow:0 6px 16px -6px var(--accent)}
-.btn.primary:hover{filter:brightness(1.06);color:#fff}
+.btn.primary{background:var(--accent);border-color:transparent;border-radius:980px;
+ color:#fff;padding:.6em 1.3em;box-shadow:0 8px 20px -8px var(--accent)}
+.btn.primary:hover{background:var(--accent2);color:#fff;transform:translateY(-1px)}
 .btn.danger{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 35%,var(--line))}
 .btn.danger:hover{background:var(--danger);color:#fff;border-color:var(--danger)}
 .badge{display:inline-block;font-size:11px;font-weight:750;padding:.2em .65em;border-radius:999px;
