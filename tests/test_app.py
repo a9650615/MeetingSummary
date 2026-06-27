@@ -444,3 +444,10 @@ def test_screenshot_routes(tmp_path, monkeypatch):
     assert c.get(f"/meetings/{mid}/shots/{name}").status_code == 200
     c.post(f"/meetings/{mid}/shots/delete", json={"name": name})
     assert c.get(f"/meetings/{mid}/shots").json()["shots"] == []
+
+
+def test_live_state_and_stop(tmp_path):
+    # float control panel endpoints: nothing recording -> state false, stop 0
+    c, _ = make_client(tmp_path)
+    assert c.get("/live/state").json()["recording"] is False
+    assert c.post("/live/stop").json()["stopping"] == 0

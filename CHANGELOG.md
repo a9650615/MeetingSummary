@@ -2,6 +2,10 @@
 
 依語意化版本（0.x.x 為 1.0 前的快速迭代）。
 
+## 0.8.0
+- **原生浮動控制面板（float widget）**：置頂小窗，跨任何 App（Teams／Zoom…）顯示錄音狀態 + 計時，可「開始」（開啟錄音頁）/「停止」（伺服器端結束錄音並完成）。不用再切回瀏覽器看狀態。內附 `swift/floatpanel`（`build_floatpanel.sh` 編譯，依 MEETING_PORT 連線，預設 8765）。
+- 伺服器新增 `/live/state`、`/live/stop` 供面板查詢與遠端停止。
+
 ## 0.7.0
 - **原生系統音擷取（ScreenCaptureKit）**：錄音頁勾「🖥️ 系統音原生擷取」，由 App 用 macOS 原生 API 擷取系統音（對方），**免每次跳瀏覽器分享框**。來源選「系統音」=純對方；選「兩者」=我的麥克風 + 原生系統音。⚠️ 首次需到系統設定 → 隱私權與安全性 → 螢幕錄製，授權給本 App。內附 `swift/audiocap` helper（`build_audiocap.sh` 編譯）。
 

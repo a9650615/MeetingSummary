@@ -2104,6 +2104,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
     # live connection. Loaded weights lazy-reload on next use.
     idle = {"last": time.time(), "live": 0}
     live_active = {}  # mid -> open live connections; surfaced in /jobs (global popout)
+    live_stop = set()  # mids the float control panel asked to stop (server-side)
     idle_release_s = int(os.environ.get("LIVE_IDLE_RELEASE_S", "600"))
 
     def _touch():
@@ -2154,6 +2155,23 @@ def create_app(store, *, summary_backend, asr_backend=None,
         label = app_name or ("麥克風使用中" if mic else None)
         return {"meeting": bool(meeting), "app": label,
                 "recording": idle["live"] > 0}
+
+    @app.get("/live/state")
+    def live_state():
+        # For the floating control panel: is anything recording + which meeting.
+        mids = list(live_active)
+        return {"recording": bool(mids), "mid": mids[0] if mids else None,
+                "count": len(mids)}
+
+    @app.post("/live/stop")
+    def live_stop_all():
+        # Float panel "停止": ask every active live session to end (server-side);
+        # each ws_live loop sees its mid in live_stop, breaks, flushes + finalizes.
+        n = 0
+        for m in list(live_active):
+            live_stop.add(m)
+            n += 1
+        return {"stopping": n}
 
     @app.post("/shutdown")
     def shutdown():
@@ -2621,6 +2639,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 await got.wait()
                 got.clear()
                 if closed:
+                    break
+                if mid in live_stop:  # remote stop from the float control panel
+                    live_stop.discard(mid)
                     break
                 for tag, buf in buffers.items():
                     if not buf:
