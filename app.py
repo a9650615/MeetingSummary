@@ -2073,7 +2073,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "fetch('/tags').then(r=>r.json()).then(j=>{"
         "let dl=document.getElementById('tagdl');if(!dl){dl=document.createElement('datalist');"
         "dl.id='tagdl';document.body.appendChild(dl);}"
-        "dl.innerHTML=(j.tags||[]).map(t=>`<option value=\"${_esc(t)}\">`).join('');});"
+        "dl.innerHTML=(j.tags||[]).map(t=>`<option value=\"${_esc(t.name||t)}\">`).join('');});"
         # screenshots: capture screen -> attach to meeting; grid with delete
         "function loadShots(){const el=document.getElementById('shots');if(!el)return;"
         "el.style.cssText='display:flex;flex-wrap:wrap;gap:10px';"
