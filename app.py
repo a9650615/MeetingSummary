@@ -1655,16 +1655,18 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
                 w.write(f.read(bl))
         texts = []
         speaker = _TRACK_LABEL.get(track, track)  # mic->我, system->對方
-        for t in asr.transcribe(tmp, profile="accurate", track=track, backend=backend):
-            store.add_transcript(mid, "accurate", track,
-                                 t["start_ms"] + win_off_ms,
-                                 t["end_ms"] + win_off_ms, speaker, t["text"])
-            texts.append(t["text"])
-            n += 1
         try:
-            os.remove(tmp)
-        except OSError:
-            pass
+            for t in asr.transcribe(tmp, profile="accurate", track=track, backend=backend):
+                store.add_transcript(mid, "accurate", track,
+                                     t["start_ms"] + win_off_ms,
+                                     t["end_ms"] + win_off_ms, speaker, t["text"])
+                texts.append(t["text"])
+                n += 1
+        finally:
+            try:
+                os.remove(tmp)  # always clean the window temp, even if transcribe raises
+            except OSError:
+                pass
         yield {"type": "progress", "done": i + 1, "total": len(units),
                "text": " ".join(texts)[:60]}
     yield {"type": "done", "transcripts": n}
@@ -2096,8 +2098,9 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "cv.getContext('2d').drawImage(v,0,0);stream.getTracks().forEach(t=>t.stop());"
         "const blob=await new Promise(res=>cv.toBlob(res,'image/png'));"
         "const fd=new FormData();fd.append('img',blob,'shot.png');mm.textContent='上傳中…';"
-        "const r=await fetch(`/meetings/${MID}/screenshot`,{method:'POST',body:fd});"
-        "if(r.ok){mm.textContent='已擷取';loadShots();}else{mm.textContent='失敗：'+r.status;}"
+        "try{const r=await fetch(`/meetings/${MID}/screenshot`,{method:'POST',body:fd});"
+        "if(r.ok){mm.textContent='已擷取';loadShots();}else{mm.textContent='失敗：'+r.status;}}"
+        "catch(err){mm.textContent='網路錯誤：'+err.message;}"
         "setTimeout(()=>{mm.textContent='';},2500);};"
         "loadShots();")
     return _shell(html.escape(meeting["title"]), body, script=script, back=True)
@@ -2685,9 +2688,6 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 got.clear()
                 if closed:
                     break
-                if mid in live_stop:  # remote stop from the float control panel
-                    live_stop.discard(mid)
-                    break
                 for tag, buf in buffers.items():
                     if not buf:
                         continue
@@ -2708,6 +2708,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 pop_notice = getattr(live_manager.backend, "pop_notice", None)
                 if pop_notice and (msg := pop_notice()):
                     await ws.send_json({"type": "notice", "msg": msg})
+                if mid in live_stop:  # remote stop — AFTER draining this round's buffers
+                    live_stop.discard(mid)
+                    break
         finally:
             rtask.cancel()
             if nrtask:
@@ -2909,7 +2912,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if asr_backend is None:
             raise HTTPException(503, "no ASR backend configured")
         os.makedirs("data/uploads", exist_ok=True)
-        path = os.path.join("data/uploads", audio.filename)
+        # strip any directory components from the client-supplied filename — Starlette
+        # does NOT, so "../../x" / absolute paths would escape data/uploads.
+        safe = os.path.basename(audio.filename or "") or "upload"
+        path = os.path.join("data/uploads", safe)
         with open(path, "wb") as f:
             f.write(await audio.read())
         mid = store.create_meeting(title, time.time(), lang)

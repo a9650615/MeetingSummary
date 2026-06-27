@@ -57,8 +57,9 @@ class Store:
         try:
             self.db.execute("ALTER TABLE meetings ADD COLUMN notes TEXT DEFAULT ''")
             self.db.commit()
-        except sqlite3.OperationalError:
-            pass  # column already present
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise  # only ignore "column already exists"; surface real failures
 
     def set_notes(self, meeting_id, notes):
         self.db.execute("UPDATE meetings SET notes=? WHERE id=?", (notes, meeting_id))

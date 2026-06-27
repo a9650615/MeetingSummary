@@ -67,3 +67,10 @@ def test_notes_injected_and_exempt_from_grounding():
     assert "Amy" in _ground("負責人:Amy", "逐字稿無名\n負責人 Amy")
     # but a name in neither transcript nor notes is still scrubbed
     assert "Amy" not in _ground("負責人:Amy", "逐字稿無名")
+
+
+def test_ground_scrubs_indented_bracket_owner():
+    from summarize import _ground
+    # nested/indented "- [name]" bullets must also be grounded (small models emit them)
+    assert "未指定" in _ground("  - [小米] 待辦", "逐字稿沒有這個名字")
+    assert "小米" not in _ground("    - [小米] 待辦", "逐字稿沒有這個名字")

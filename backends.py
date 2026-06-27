@@ -587,7 +587,11 @@ def ane_live_backend():
     def _run(audio):
         import numpy as np  # noqa: PLC0415
         if isinstance(audio, str):
-            audio = open(audio, "rb").read() if audio.endswith(".pcm") else b""
+            if audio.endswith(".pcm"):
+                with open(audio, "rb") as _f:
+                    audio = _f.read()
+            else:
+                audio = b""
         pcm = bytes(audio)
         if len(pcm) < 640:  # <0.02s -> skip
             return []

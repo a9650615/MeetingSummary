@@ -458,3 +458,18 @@ def test_floatpanel_open_requires_install(tmp_path, monkeypatch):
     c, _ = make_client(tmp_path)
     monkeypatch.setattr(backends, "floatpanel_bin", lambda: None)
     assert c.post("/floatpanel/open").status_code == 400  # not installed -> guided error
+
+
+def test_ingest_filename_sanitized(tmp_path, monkeypatch):
+    # a path-traversal filename must not escape data/uploads
+    import app
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "m.db")
+    monkeypatch.setattr(app, "_run_upload_job", lambda *a, **k: None)  # skip bg pipeline
+    c = TestClient(create_app(store, summary_backend=lambda p: "x", asr_backend=lambda *a, **k: []))
+    r = c.post("/ingest", data={"title": "t", "kind": "minutes", "lang": "zh-TW"},
+               files={"audio": ("../../escape.wav", b"RIFFxxxx", "audio/wav")},
+               follow_redirects=False)
+    assert r.status_code in (200, 303)
+    assert (tmp_path / "data" / "uploads" / "escape.wav").exists()  # basename, inside uploads
+    assert not (tmp_path / "escape.wav").exists()                   # did NOT escape

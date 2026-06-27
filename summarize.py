@@ -51,7 +51,7 @@ def _ground(out, transcript):
     out = re.sub(r"(?P<pre>(?:期限|截止|時間|日期|舉行時間)[:：]\s*)(?P<v>[^\s,，。;；]+)",
                  label("未定"), out)
     # actions bracket owner: "- [小米] 事項"
-    out = re.sub(r"(?P<pre>^[-*]\s*\[)(?P<v>[^\]]+)\]",
+    out = re.sub(r"(?P<pre>^\s*[-*]\s*\[)(?P<v>[^\]]+)\]",
                  lambda m: m.group(0) if not made_up(m.group("v"))
                  else m.group("pre") + "未指定]", out, flags=re.M)
     return out

@@ -28,7 +28,9 @@ final class Panel: NSObject {
         }.resume()
     }
 
-    @objc func onStart() { NSWorkspace.shared.open(URL(string: base + "/live")!) }
+    @objc func onStart() {
+        if let url = URL(string: base + "/live") { NSWorkspace.shared.open(url) }
+    }
     @objc func onStop() { req("/live/stop", method: "POST") }
 
     func pollState() {
