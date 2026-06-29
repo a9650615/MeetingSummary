@@ -5,6 +5,12 @@ let package = Package(
     name: "audiocap",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "audiocap"),
+        // Embed Info.plist into the Mach-O so macOS TCC treats audiocap as its OWN
+        // Screen-Recording subject (named entry) instead of blaming the parent
+        // python process ("python3.10" in the permission list).
+        .executableTarget(name: "audiocap", linkerSettings: [
+            .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT",
+                          "-Xlinker", "__info_plist", "-Xlinker", "Info.plist"]),
+        ]),
     ]
 )
