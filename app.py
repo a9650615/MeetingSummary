@@ -2673,6 +2673,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # system/對方 track — no per-session browser "share screen + audio" dialog.
         # Same event loop as receiver() (asyncio subprocess) -> no thread races.
         nrtask = None
+        nstask = None
         audiocap_proc = None
         if ws.query_params.get("native_sys") == "1":
             sys_tag = next((t for t, (trk, _l) in tracks.items() if trk == "system"), None)
@@ -2694,7 +2695,30 @@ def create_app(store, *, summary_backend, asr_backend=None,
                             got.set()
                     except Exception as e:  # noqa: BLE001
                         print(f"native_sys reader stopped: {e}", file=sys.stderr)
+
+                async def native_stderr(proc=audiocap_proc):
+                    # Drain helper stderr; surface permission/errors to the live page
+                    # (denial -> no audio -> the consumer loop never wakes, so the
+                    # notice MUST come from here, not the main loop).
+                    try:
+                        while True:
+                            ln = await proc.stderr.readline()
+                            if not ln:
+                                break
+                            s = ln.decode("utf8", "ignore").strip()
+                            if not s or s == "READY":
+                                continue
+                            print(f"audiocap: {s}", file=sys.stderr)
+                            if any(k in s for k in ("NOPERM", "ERR", "-3801", "TCC")):
+                                try:
+                                    await ws.send_json({"type": "notice",
+                                                        "msg": "原生系統音擷取失敗：" + s[:180]})
+                                except Exception:  # noqa: BLE001
+                                    pass
+                    except Exception:  # noqa: BLE001
+                        pass
                 nrtask = asyncio.create_task(native_reader())
+                nstask = asyncio.create_task(native_stderr())
             else:
                 await ws.send_json({"type": "notice",
                                     "msg": "原生系統音擷取不可用（缺 helper 或需螢幕錄製權限）"})
@@ -2731,6 +2755,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             rtask.cancel()
             if nrtask:
                 nrtask.cancel()
+            if nstask:
+                nstask.cancel()
             if audiocap_proc and audiocap_proc.returncode is None:
                 try:
                     audiocap_proc.terminate()

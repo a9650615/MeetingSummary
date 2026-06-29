@@ -8,6 +8,7 @@
 // Run from a granted app (the packaged .app) or grant the launching process once.
 // Prints "READY" to stderr once the stream starts; "ERR <msg>" on failure.
 import AVFoundation
+import CoreGraphics
 import Foundation
 import ScreenCaptureKit
 
@@ -19,6 +20,17 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     var stream: SCStream?
 
     func start() async {
+        // Screen-Recording permission gate. CGRequest... shows the system prompt
+        // (attributed to the responsible app — the .app or the launching terminal)
+        // and persists the grant. Without it SCStream just throws -3801 forever.
+        if !CGPreflightScreenCaptureAccess() {
+            let granted = CGRequestScreenCaptureAccess()
+            if !granted {
+                fail("NOPERM 需要螢幕錄製權限：系統設定 → 隱私權與安全性 → 螢幕錄製，"
+                     + "勾選啟動本程式的 App，再重新開始錄音")
+                return
+            }
+        }
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false, onScreenWindowsOnly: false)
