@@ -9,7 +9,14 @@ import Foundation
 let port = ProcessInfo.processInfo.environment["MEETING_PORT"] ?? "8765"
 let base = "http://127.0.0.1:\(port)"
 
-final class Panel: NSObject {
+final class Panel: NSObject, NSWindowDelegate {
+    // Closing the panel window quits the process — otherwise the app lingers
+    // headless (no window) and the server's _open_panel() sees it "alive" and
+    // refuses to respawn, so the panel can never be reopened.
+    func windowWillClose(_ notification: Notification) {
+        NSApplication.shared.terminate(nil)
+    }
+
     let dot = NSTextField(labelWithString: "●")
     let status = NSTextField(labelWithString: "連線中…")
     let timer = NSTextField(labelWithString: "")
@@ -102,6 +109,7 @@ final class Panel: NSObject {
         ])
         panel.contentView = content
         panel.center()
+        panel.delegate = self   // quit on close so the panel can be reopened
         panel.makeKeyAndOrderFront(nil)
         return panel
     }

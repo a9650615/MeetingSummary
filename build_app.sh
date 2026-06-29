@@ -28,7 +28,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
   <key>CFBundleName</key><string>MeetingSummary</string>
   <key>CFBundleDisplayName</key><string>Meeting·Summary</string>
-  <key>CFBundleIdentifier</key><string>io.aift.meetingsummary</string>
+  <key>CFBundleIdentifier</key><string>io.meetingsummary.app</string>
   <key>CFBundleVersion</key><string>1.0</string>
   <key>CFBundleExecutable</key><string>launcher</string>
   <key>CFBundleIconFile</key><string>icon</string>
