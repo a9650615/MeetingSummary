@@ -65,6 +65,19 @@ class Store:
         self.db.execute("UPDATE meetings SET notes=? WHERE id=?", (notes, meeting_id))
         self.db.commit()
 
+    def append_note(self, meeting_id, line):
+        """Append a line to a meeting's notes (for the float panel's quick-note —
+        won't clobber the web textarea's full-value saves)."""
+        cur = (self.get_meeting(meeting_id) or {})
+        try:
+            existing = cur["notes"] or ""
+        except (KeyError, IndexError, TypeError):
+            existing = ""
+        new = (existing + ("\n" if existing else "") + line).strip()
+        self.db.execute("UPDATE meetings SET notes=? WHERE id=?", (new, meeting_id))
+        self.db.commit()
+        return new
+
     def add_speaker_nonmatch(self, a, b):
         """Record 'these two are NOT the same person' so the pair stops being
         suggested. Stored order-normalized (a<b) so (X,Y)==(Y,X)."""
@@ -132,6 +145,14 @@ class Store:
             "SELECT * FROM transcripts WHERE meeting_id=? ORDER BY start_ms",
             (meeting_id,),
         ).fetchall()
+
+    def latest_transcript(self, meeting_id):
+        """Most recent line (by id = insertion order) — for the float panel's live
+        caption. id, not start_ms: live finals land in order, cheap single-row read."""
+        r = self.db.execute(
+            "SELECT speaker, text FROM transcripts WHERE meeting_id=? "
+            "ORDER BY id DESC LIMIT 1", (meeting_id,)).fetchone()
+        return (f"{r['speaker']}：{r['text']}" if r and r["text"] else None) if r else None
 
     def delete_transcript(self, transcript_id):
         self.db.execute("DELETE FROM transcripts WHERE id=?", (transcript_id,))

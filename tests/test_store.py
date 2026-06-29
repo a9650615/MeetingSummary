@@ -78,3 +78,20 @@ def test_set_notes_roundtrip(tmp_path):
     assert (s.get_meeting(mid)["notes"] or "") == ""  # default empty
     s.set_notes(mid, "負責人 Amy")
     assert s.get_meeting(mid)["notes"] == "負責人 Amy"
+
+
+def test_append_note(tmp_path):
+    s = _store(tmp_path)
+    mid = s.create_meeting("m", 1.0, "zh-TW")
+    s.append_note(mid, "第一行")
+    s.append_note(mid, "第二行")
+    assert s.get_meeting(mid)["notes"] == "第一行\n第二行"
+
+
+def test_latest_transcript(tmp_path):
+    s = _store(tmp_path)
+    mid = s.create_meeting("m", 1.0, "zh-TW")
+    assert s.latest_transcript(mid) is None
+    s.add_transcript(mid, "live", "mic", 0, 1000, "我", "你好")
+    s.add_transcript(mid, "live", "mic", 1000, 2000, "我", "最新一句")
+    assert s.latest_transcript(mid) == "我：最新一句"

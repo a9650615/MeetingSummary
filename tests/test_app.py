@@ -479,3 +479,12 @@ def test_live_prewarm_noop_without_ane(tmp_path):
     # no live_manager / non-ANE -> prewarm is a harmless no-op
     c, _ = make_client(tmp_path)
     assert c.post("/live/prewarm").json()["warming"] is False
+
+
+def test_notes_append_route(tmp_path):
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    c.post(f"/meetings/{mid}/notes/append", json={"value": "a"})
+    c.post(f"/meetings/{mid}/notes/append", json={"value": "b"})
+    assert store.get_meeting(mid)["notes"] == "a\nb"
+    assert c.post("/meetings/99999/notes/append", json={"value": "x"}).status_code == 404

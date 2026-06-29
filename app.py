@@ -899,7 +899,7 @@ def _models_page():
 _LIVE_BODY = """
 <h1>🔴 Live 即時逐字稿</h1>
 <div class=card>
-  <div class=row>
+  <div class=row style="align-items:end">
     <label class=fld>來源
       <select id=source>
         <option value="mic">麥克風(我)</option>
@@ -907,57 +907,62 @@ _LIVE_BODY = """
         <option value="both">兩者(混合)</option>
         <option value="dual">分軌(我 + 對方,分開標示)</option>
       </select></label>
-    <label class=fld>辨識單元
-      <select id=unit>
-        <option value="sentence">句子(快)</option>
-        <option value="paragraph">段落(較準,等較久)</option>
-      </select></label>
-    <label class=fld>斷句 VAD
-      <select id=vad>
-        <option value="silero">silero(神經·較準·預設)</option>
-        <option value="energy">能量(快·省)</option>
-      </select></label>
-    <label class=fld>語言
-      <select id=lang>
-        <option value="">自動偵測</option>
-        <option value="zh">中文</option>
-        <option value="en">English</option>
-        <option value="ja">日本語</option>
-        <option value="ko">한국어</option>
-        <option value="yue">粵語</option>
-      </select></label>
-    <label class=fld>即時模型
-      <select id=model>
-        <optgroup label="🔧 .cpp · Metal">
-        <option value="qwen3-asr-0.6b-q4-k-m">Qwen3-ASR 0.6B(預設·快)</option>
-        <option value="qwen3-asr-1.7b">Qwen3-ASR 1.7B(chatllm·慢·備用)</option>
-        </optgroup>
-        <optgroup label="⚡ MLX · Metal/GPU">
-        <option value="mlx-community/Qwen3-ASR-1.7B-8bit">Qwen3-ASR 1.7B(準·快)</option>
-        <option value="mlx-community/whisper-small-mlx-q4">whisper small-q4(快·省)</option>
-        <option value="mlx-community/whisper-large-v3-turbo-q4">whisper turbo-q4(較準)</option>
-        <option value="mlx-community/whisper-large-v3-turbo">whisper turbo(最準·較吃)</option>
-        <option value="mlx-community/whisper-base-mlx-q4">whisper base-q4(更快)</option>
-        <option value="mlx-community/whisper-tiny-mlx-q4">whisper tiny-q4(最省)</option>
-        </optgroup>
-        <optgroup label="🐢 transformers · 慢">
-        <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR 0.6B</option>
-        </optgroup>
-      </select></label>
-    <label class=chk style="align-self:end"><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
-    <label class=chk style="align-self:end" title="只錄音不辨識，零推論、不發熱；事後再「重新語音辨識」"><input type=checkbox id=reconly> 🪫 純錄音(省電·不即時辨識)</label>
-    <label class=chk style="align-self:end" title="嘈雜環境降噪，於事後重新辨識時生效"><input type=checkbox id=denoise_live> 🧪 降噪(重新辨識時)</label>
-    <label class=chk style="align-self:end" title="用原生 ScreenCaptureKit 擷取系統音(對方)，免每次跳瀏覽器分享框；首次需授權螢幕錄製"><input type=checkbox id=nativesys> 🖥️ 系統音原生擷取(免分享框)</label>
-  </div>
-  <div class=row style="margin-top:14px">
-    <button class="btn primary" id=start>開始</button>
+    <button class="btn primary" id=start>● 開始錄音</button>
     <button class=btn id=stop disabled>停止</button>
     <button class=btn id=newsess>新 session</button>
     <span class="muted small" id=status></span>
   </div>
-  <p class=hint style="margin:.7em 0 0">
-    <span id=curmodel></span> · 精校:<b id=accmodel>-</b><br>
-    系統音/兩者會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>;兩者建議戴耳機。模型可即時切換,免重啟。</p>
+  <details style="margin-top:14px">
+    <summary style="cursor:pointer;user-select:none;font-size:13px;color:var(--muted);font-weight:600">⚙ 進階選項</summary>
+    <div class=row style="margin-top:14px">
+      <label class=fld>辨識單元
+        <select id=unit>
+          <option value="sentence">句子(快)</option>
+          <option value="paragraph">段落(較準,等較久)</option>
+        </select></label>
+      <label class=fld>斷句 VAD
+        <select id=vad>
+          <option value="silero">silero(神經·較準·預設)</option>
+          <option value="energy">能量(快·省)</option>
+        </select></label>
+      <label class=fld>語言
+        <select id=lang>
+          <option value="">自動偵測</option>
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+          <option value="yue">粵語</option>
+        </select></label>
+      <label class=fld>即時模型
+        <select id=model>
+          <optgroup label="🔧 .cpp · Metal">
+          <option value="qwen3-asr-0.6b-q4-k-m">Qwen3-ASR 0.6B(預設·快)</option>
+          <option value="qwen3-asr-1.7b">Qwen3-ASR 1.7B(chatllm·慢·備用)</option>
+          </optgroup>
+          <optgroup label="⚡ MLX · Metal/GPU">
+          <option value="mlx-community/Qwen3-ASR-1.7B-8bit">Qwen3-ASR 1.7B(準·快)</option>
+          <option value="mlx-community/whisper-small-mlx-q4">whisper small-q4(快·省)</option>
+          <option value="mlx-community/whisper-large-v3-turbo-q4">whisper turbo-q4(較準)</option>
+          <option value="mlx-community/whisper-large-v3-turbo">whisper turbo(最準·較吃)</option>
+          <option value="mlx-community/whisper-base-mlx-q4">whisper base-q4(更快)</option>
+          <option value="mlx-community/whisper-tiny-mlx-q4">whisper tiny-q4(最省)</option>
+          </optgroup>
+          <optgroup label="🐢 transformers · 慢">
+          <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR 0.6B</option>
+          </optgroup>
+        </select></label>
+    </div>
+    <div class=row style="margin-top:12px">
+      <label class=chk><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
+      <label class=chk title="只錄音不辨識，零推論、不發熱；事後再「重新語音辨識」"><input type=checkbox id=reconly> 🪫 純錄音(省電·不即時辨識)</label>
+      <label class=chk title="嘈雜環境降噪，於事後重新辨識時生效"><input type=checkbox id=denoise_live> 🧪 降噪(重新辨識時)</label>
+      <label class=chk title="用原生 ScreenCaptureKit 擷取系統音(對方)，免每次跳瀏覽器分享框；首次需授權螢幕錄製"><input type=checkbox id=nativesys onchange="if(this.checked){const s=document.getElementById('status');s.textContent=' 請求螢幕錄製權限…';fetch('/native/request-permission',{method:'POST'}).then(r=>r.json()).then(j=>{s.textContent=j.granted?' ✅ 已授權系統音擷取':' ⚠️ '+(j.msg||'未授權，請到 系統設定→螢幕錄製 開啟')}).catch(()=>{s.textContent=' ⚠️ 權限請求失敗'})}"> 🖥️ 系統音原生擷取(免分享框)</label>
+    </div>
+    <p class=hint style="margin:.7em 0 0">
+      <span id=curmodel></span> · 精校:<b id=accmodel>-</b><br>
+      系統音/兩者會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>;兩者建議戴耳機。模型可即時切換,免重啟。</p>
+  </details>
 </div>
 <div class=panel style="margin-top:10px">
   <label style="font-weight:600">📝 現場筆記
@@ -969,6 +974,8 @@ _LIVE_BODY = """
 <div class=caption id=caption></div>
 <div class=liveline id=live></div>
 <div class=tlist id=transcript></div>
+<p id=ehint class=muted style="text-align:center;margin:40px 0;font-size:14px">
+  ▲ 選好來源後按「● 開始錄音」，即時逐字稿會出現在這裡</p>
 """
 
 # Live page: browser mic -> 16 kHz Int16 PCM over websocket -> server ASR.
@@ -1078,6 +1085,7 @@ function attach(stream, tag, ratio, gate){
 
 startBtn.onclick = async () => {
   if(ws||startBtn.disabled) return;       // guard double-start during the async permission window
+  {const eh=document.getElementById('ehint');if(eh)eh.style.display='none';}
   startBtn.disabled=true;
   const source = document.getElementById('source').value;
   const nativeSys = document.getElementById('nativesys').checked;
@@ -1147,6 +1155,7 @@ document.getElementById('newsess').onclick = () => {
   session=null; mid=null;       // next 開始 starts a fresh session
   T.innerHTML=''; L.textContent=''; C.textContent='';
   if(notesEl){notesEl.value=''; noteStat.textContent='';}
+  {const eh=document.getElementById('ehint');if(eh)eh.style.display='';}
   S.textContent=' 已開新 session';
 };
 stopBtn.onclick = () => {
@@ -2201,10 +2210,45 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.get("/live/state")
     def live_state():
-        # For the floating control panel: is anything recording + which meeting.
+        # For the floating control panel: recording state + meeting title + the
+        # latest caption line, so the panel can show live progress over any app.
         mids = list(live_active)
-        return {"recording": bool(mids), "mid": mids[0] if mids else None,
-                "count": len(mids)}
+        mid = mids[0] if mids else None
+        title = caption = None
+        if mid is not None:
+            m = store.get_meeting(mid)
+            title = m["title"] if m else None
+            caption = store.latest_transcript(mid)
+        return {"recording": bool(mids), "mid": mid, "count": len(mids),
+                "title": title, "caption": caption}
+
+    @app.post("/native/request-permission")
+    def native_request_permission():
+        # Pop the macOS Screen-Recording prompt for the launching app by briefly
+        # spawning audiocap (it calls CGRequestScreenCaptureAccess). Returns the
+        # outcome so the UI can guide the user. The prompt attributes to whatever
+        # launched the server (the .app, or Terminal in dev).
+        binp = backends.audiocap_bin()
+        if not binp:
+            raise HTTPException(400, "audiocap 未安裝（設定 → 加速 runtime → 安裝）")
+        import subprocess
+        p = subprocess.Popen([binp], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        granted, msg = False, ""
+        try:
+            for _ in range(60):  # up to ~30s for the user to answer the dialog
+                line = p.stderr.readline()
+                if not line:
+                    break
+                s = line.decode("utf8", "ignore").strip()
+                if s == "READY":
+                    granted = True
+                    break
+                if s.startswith("ERR") or "NOPERM" in s:
+                    msg = s
+                    break
+        finally:
+            p.terminate()
+        return {"granted": granted, "msg": msg or ("已授權" if granted else "尚未授權")}
 
     @app.post("/live/stop")
     def live_stop_all():
@@ -3003,6 +3047,16 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
         store.set_notes(mid, body.value)
+        return {"ok": True}
+
+    @app.post("/meetings/{mid}/notes/append")
+    def append_note_route(mid: int, body: SettingIn):
+        # Float panel quick-note: append a line (doesn't clobber the web textarea).
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        line = (body.value or "").strip()
+        if line:
+            store.append_note(mid, line)
         return {"ok": True}
 
     @app.post("/meetings/{mid}/finalize")
