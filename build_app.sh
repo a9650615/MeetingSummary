@@ -62,9 +62,20 @@ else                                   # distribution: bootstrap release-update 
 fi
 export MEETING_PORT=\$PORT
 export MEETING_REPO="$REPO_SLUG"                # bootstrap polls GitHub releases
-( sleep 2; open "http://127.0.0.1:\$PORT" ) &   # browser shows the progress page right away
 cd "\$WD"
-exec /usr/bin/python3 bootstrap.py             # serves progress -> installs -> exec real server
+# Start the server DETACHED, then exit this launcher right away. The .app's main
+# process must NOT stay as a foreground server — that's why the dock icon bounced
+# forever (LaunchServices waits for a GUI app that never registers). nohup +
+# reparent-to-launchd keeps bootstrap alive after we exit; it binds the port and
+# serves the progress page, and the browser (opened below) flips to the app once
+# the real server takes over.
+nohup /usr/bin/python3 bootstrap.py >/dev/null 2>&1 &
+( for i in \$(seq 1 40); do
+    /usr/bin/curl -fsS -m 1 "http://127.0.0.1:\$PORT/" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  open "http://127.0.0.1:\$PORT" ) &
+exit 0
 LAUNCH
 chmod +x "$APP/Contents/MacOS/launcher"
 
