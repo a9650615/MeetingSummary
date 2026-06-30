@@ -595,8 +595,27 @@ def ane_live_backend():
         _ANE_HELP["proc"] = p
         return p
 
+    import select  # noqa: PLC0415
+    WIN = 29 * 16000 * 2  # 29s @ 16k mono int16 — CoreML encoder shape is fixed at 30s
+
+    def _send(p, chunk):
+        """Send one ≤29s window, watchdog the reply (30s), return text or None.
+        None means the helper hung/errored — caller kills + respawns."""
+        try:
+            p.stdin.write(struct.pack(">I", len(chunk)) + chunk)
+            p.stdin.flush()
+            rl, _, _ = select.select([p.stdout], [], [], 30)
+            if not rl:
+                return None
+            line = p.stdout.readline()
+        except Exception:
+            return None
+        try:
+            return (json.loads(line.decode("utf8", "ignore")).get("text") or "").strip()
+        except Exception:
+            return ""
+
     def _run(audio):
-        import numpy as np  # noqa: PLC0415
         if isinstance(audio, str):
             if audio.endswith(".pcm"):
                 with open(audio, "rb") as _f:
@@ -606,33 +625,28 @@ def ane_live_backend():
         pcm = bytes(audio)
         if len(pcm) < 640:  # <0.02s -> skip
             return []
-        import select  # noqa: PLC0415
-        line = b""
+        # Slice long input (a long live utterance / the stop-flush of accumulated
+        # system audio) into ≤29s windows so we never exceed the CoreML encoder's
+        # 3000-mel-frame (30s) fixed shape; transcribe each + join. General + safe
+        # for any length (mirrors the batch ANE path).
+        texts = []
         with _ANE_HELP["lock"]:
             p = _ensure()
-            try:
-                p.stdin.write(struct.pack(">I", len(pcm)) + pcm)
-                p.stdin.flush()
-                # Watchdog: never block the live/flush thread forever on a hung helper
-                # (that deadlocks this lock for every later call). 30s no output -> kill
-                # + respawn next time (mirrors the .cpp daemon).
-                rl, _, _ = select.select([p.stdout], [], [], 30)
-                if not rl:
-                    p.kill()
+            for i in range(0, len(pcm), WIN):
+                ch = pcm[i:i + WIN]
+                if len(ch) < 640:
+                    continue
+                t = _send(p, ch)
+                if t is None:  # hung/errored -> kill + respawn next call, stop here
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
                     _ANE_HELP["proc"] = None
-                    return []
-                line = p.stdout.readline()
-            except Exception:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
-                _ANE_HELP["proc"] = None  # force respawn next call
-                return []
-        try:
-            text = (json.loads(line.decode("utf8", "ignore")).get("text") or "").strip()
-        except Exception:
-            text = ""
+                    break
+                if t:
+                    texts.append(t)
+        text = " ".join(texts).strip()
         return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
     return _run
 
