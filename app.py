@@ -2258,24 +2258,24 @@ def create_app(store, *, summary_backend, asr_backend=None,
         audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
                        for tag, lbl in tracks.items()}
 
-        # Live multi-speaker (?diarize=1): per-track online voiceprint clustering
-        # on each finalized utterance. Skip the 我/mic track (single person).
+        # Live multi-speaker (?diarize=1): per-track online voiceprint clustering on
+        # each finalized utterance, PLUS recognition of voices the user already named
+        # in past meetings (match the global speakers table -> real name live; unknown
+        # voices stay 說話者N). Skip the 我/mic track (single person).
         if ws.query_params.get("diarize") == "1":
             try:
                 import diarize as diar
                 extractor = diar.embedding_extractor()
                 thr = float(os.environ.get("LIVE_DIAR_THRESHOLD", "0.4"))
-                min_bytes = int(1.2 * 16000) * 2  # <1.2s -> too short, reuse last
-
-                def make_fn(tr):
-                    def fn(audio):
-                        if len(audio) < min_bytes and tr.centroids:
-                            return f"說話者{tr.last_id + 1}"  # don't spawn on a blip
-                        return f"說話者{tr.assign(extractor(audio)) + 1}"
-                    return fn
+                try:
+                    gthr = float(store.get_setting("speaker_threshold", "0.62"))
+                except (ValueError, TypeError):
+                    gthr = 0.62
+                rows = store.list_speakers()  # known voiceprints, read-only for live
                 for tag, (trk, spk) in tracks.items():
                     if spk != "我":
-                        sessions[tag].speaker_fn = make_fn(diar.SpeakerTracker(threshold=thr))
+                        sessions[tag].speaker_fn = diar.live_speaker_labeler(
+                            extractor, rows, session_threshold=thr, match_threshold=gthr)
             except Exception as e:
                 print(f"live diarize unavailable: {e}", file=sys.stderr)
 

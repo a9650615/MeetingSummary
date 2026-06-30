@@ -348,6 +348,40 @@ def _is_placeholder(name):
     return bool(re.match(r"^(我|對方|說話者)\d+$", (name or "").strip()))
 
 
+def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
+                         match_threshold=0.62, min_secs=1.2, sample_rate=16000):
+    """Factory for the LIVE per-utterance speaker label fn: fn(pcm_bytes) -> label.
+
+    Recognizes voices the user already NAMED in past meetings (cosine-match the
+    utterance embedding against the global speakers table) so live captions show
+    real names; unknown voices get a session-local 說話者N. Read-only on the DB —
+    live utterances are short + noisy, so enrollment/persistence is left to the
+    post-meeting /diarize pass + 人工命名 (事後命名,自動記住). Only HUMAN-named
+    voiceprints are matched (auto placeholders like 說話者5 are skipped), so live
+    never shows a meaningless cross-meeting placeholder.
+
+    speakers = store.list_speakers() rows (id, name, centroid bytes, count)."""
+    import numpy as np  # noqa: PLC0415
+    tr = SpeakerTracker(threshold=session_threshold)
+    known = [(r["name"], np.frombuffer(r["centroid"], dtype=np.float32))
+             for r in speakers
+             if r["centroid"] and not _is_placeholder(r["name"])]
+    min_bytes = int(min_secs * sample_rate) * 2
+
+    def fn(audio):
+        if len(audio) < min_bytes and tr.centroids:
+            return f"說話者{tr.last_id + 1}"          # too short -> reuse last, don't spawn
+        emb = np.asarray(extractor(audio), dtype=np.float32)
+        if known:
+            e = emb / (np.linalg.norm(emb) + 1e-9)
+            name, _sim = match_speaker(e, known, match_threshold)
+            if name is not None:
+                return name                          # recognized a named voice
+        return f"說話者{tr.assign(emb) + 1}"           # unknown -> session-local cluster
+
+    return fn
+
+
 def similar_speaker_pairs(rows, threshold=0.5, dismissed=()):
     """Global-speaker pairs whose voiceprints are close enough to maybe be the SAME
     person but didn't auto-merge — surfaced as 'might be a duplicate, merge?'

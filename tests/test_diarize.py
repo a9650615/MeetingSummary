@@ -134,3 +134,30 @@ def test_similar_pairs_skips_two_unnamed():
     names = {frozenset((p["a"], p["b"])) for p in pairs}
     assert frozenset(("我3", "對方5")) not in names      # two un-named -> skipped
     assert any("Alice" in (p["a"], p["b"]) for p in pairs)  # named pair kept
+
+
+def _spk_row(name, vec):
+    v = np.asarray(vec, dtype=np.float32)
+    v = v / np.linalg.norm(v)
+    return {"id": 1, "name": name, "centroid": v.tobytes(), "count": 1}
+
+
+def test_live_labeler_recognizes_named_voice_and_falls_back():
+    alice = np.array([1.0, 0, 0, 0], dtype=np.float32)
+    bob = np.array([0, 1.0, 0, 0], dtype=np.float32)
+    rows = [_spk_row("Alice", alice)]
+    cur = {"v": None}
+    fn = diarize.live_speaker_labeler(lambda a: cur["v"], rows,
+                                      match_threshold=0.62, min_secs=0)
+    cur["v"] = alice
+    assert fn(b"x" * 4000) == "Alice"          # matches the named global voiceprint
+    cur["v"] = bob
+    assert fn(b"x" * 4000) == "說話者1"          # unknown voice -> session-local label
+
+
+def test_live_labeler_skips_placeholder_globals():
+    alice = np.array([1.0, 0, 0, 0], dtype=np.float32)
+    rows = [_spk_row("說話者5", alice)]               # auto placeholder, never human-named
+    fn = diarize.live_speaker_labeler(lambda a: alice, rows,
+                                      match_threshold=0.62, min_secs=0)
+    assert fn(b"x" * 4000) == "說話者1"               # placeholder not used as a live name
