@@ -785,6 +785,10 @@ startBtn.onclick = async () => {
     if(dual){ if(streams[0])attach(streams[0],0,ratio,false); if(streams[1])attach(streams[1],1,ratio,false); }
     else { streams.forEach(st=>attach(st,null,ratio,true)); }  // mic/system/both: gated
   };
+  // Null ws + re-arm start on ANY close (manual stop, server-side float-panel stop,
+  // dropped connection). Without this, the stale closed socket stays truthy and the
+  // start guard `if(ws)` blocks every restart until a page reload.
+  ws.onclose = () => { ws=null; startBtn.disabled=false; stopBtn.disabled=true; };
   startBtn.disabled=true; stopBtn.disabled=false;
 };
 document.getElementById('newsess').onclick = () => {
@@ -799,6 +803,7 @@ stopBtn.onclick = () => {
   nodes.forEach(n=>n.disconnect()); nodes=[];
   streams.forEach(st => st.getTracks().forEach(t=>t.stop()));
   if(ws) ws.close();
+  ws=null;                          // synchronous: don't wait for onclose, else a fast stop->start is blocked
   if(ctx) ctx.close();
   S.textContent += mid ? ` 已停止。可到首頁對 #${mid} 產生摘要。` : ' 已停止。';
   startBtn.disabled=false; stopBtn.disabled=true;
