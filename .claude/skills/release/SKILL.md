@@ -1,75 +1,67 @@
 ---
 name: release
 description: >-
-  Cut and publish a new version of MeetingSummary. Use whenever the user wants to
-  release / ship / publish a version, bump the version, tag a release, or "出新版 /
-  發佈 / 發版 / 上版". Runs the full gated flow: bump VERSION, write the zh-TW
-  CHANGELOG entry, run pytest, commit + push main, tag vX.Y.Z (triggers the
-  macOS CD that builds the .app + prebuilt chatllm and attaches them to the
-  GitHub Release), then verify the release assets. Proactively invoke this — do
-  NOT hand-run the git/tag steps — whenever a chunk of work is done and the user
-  signals it should go out.
+  Record shipped work and batch-publish versions of MeetingSummary. Two modes:
+  (A) after EVERY change, commit + add one terse user-facing line under
+  "## 未發佈" in CHANGELOG (no version, no tag); (B) cut a release — promote
+  未發佈 to vX.Y.Z, bump VERSION, run pytest, tag (triggers macOS CD) — which
+  happens AUTOMATICALLY once enough has accumulated, on a critical fix, or when
+  the user says 發佈/出版/ship. Invoke proactively; never hand-run git/tag steps.
 ---
 
 # Release MeetingSummary
 
-Pre-1.0 semver (`0.x.x`). Tag push to `v*` triggers `.github/workflows/release.yml`
-on a macOS runner: it checks `VERSION == tag`, builds the `.app`, builds + packages
-the prebuilt `chatllm-runtime-arm64.tar.gz`, and attaches both to the GitHub Release.
+Pre-1.0 semver (`0.x.x`). A tag push `v*` triggers `.github/workflows/release.yml`
+(macOS): checks `VERSION == tag`, builds the `.app` + prebuilt helpers, attaches
+them to the GitHub Release. **Releasing = tagging.** Plain commits to `main` do
+NOT release — they accumulate.
 
-## Checklist (do in order; stop on any failure)
+## Don't release per change. Batch. (Don't make the user ask.)
 
-1. **Pick the version.** Read `VERSION`. Default bump = **patch** (`0.1.6 → 0.1.7`).
-   Bump minor only if the user says so or the change is a notable feature set.
-   Never reuse or skip a number. Call it `X.Y.Z` below.
+The old habit (bump+tag every fix) spammed versions. Instead:
 
-2. **Draft the CHANGELOG entry.** `git log $(git describe --tags --abbrev=0)..HEAD
-   --oneline` to see what's shipped since the last tag. Add a new section at the
-   **top** of `CHANGELOG.md`, directly under the intro line:
-   ```
-   ## X.Y.Z
-   - <zh-TW bullet, user-facing, what changed + why it matters>
-   ```
-   Match the existing voice: concise zh-TW, technical terms kept, one bullet per
-   real change. Don't list internal churn.
+### Mode A — record a change (EVERY change, automatically)
+1. Commit + push `main`. Commit message MAY carry technical detail (it's for the
+   repo). Author stays `a9650615` — never override.
+2. Prepend ONE terse, **user-facing** line under a `## 未發佈` heading at the top of
+   `CHANGELOG.md` (create the heading if absent). No VERSION change, no tag.
 
-3. **Write `VERSION`** = `X.Y.Z` (single line, trailing newline).
+### Mode B — cut a release (decide this YOURSELF; don't wait to be reminded)
+Release when ANY holds:
+- `## 未發佈` has **~5+ lines**, or
+- a **notable feature** just landed (worth its own version), or
+- a **critical / blocking fix** users need now → release immediately, don't batch, or
+- the user says 發佈 / 出版 / 上版 / ship.
 
-4. **Gate: tests must pass.** `.venv/bin/python -m pytest -q`. If anything fails,
-   STOP and fix before releasing — never tag a red build.
+Then run the gated flow.
 
-5. **Commit.** Stage all, commit with a `type(scope): summary` subject + a short
-   body of the real changes. The git author is already `a9650615`
-   (`13378242+a9650615@users.noreply.github.com`) — **never override it**; the repo
-   must show only that contributor.
+## Release flow (Mode B — in order; stop on any failure)
+1. **Version.** Read `VERSION`. Default = **patch**; **minor** for a notable feature.
+   Never reuse/skip a number.
+2. **Promote 未發佈** → rename the heading to `## X.Y.Z`; tidy bullets (merge dups,
+   keep terse — see voice).
+3. **Write `VERSION`** = `X.Y.Z` (one line + trailing newline).
+4. **Gate: tests pass** — `.venv/bin/python -m pytest -q`. Red → STOP + fix. Never
+   tag a red build.
+5. **Commit** (`release: vX.Y.Z`), **push main**, then `git tag vX.Y.Z && git push
+   origin vX.Y.Z`. `VERSION` must equal the tag (sans `v`) or CD fails its check.
+6. **Verify CD** (~10 min; chatllm build is slow — poll, don't assume failure):
+   `gh run list … release.yml` → `gh run watch <id> --exit-status`.
+7. **Confirm assets**: `gh release view vX.Y.Z … --json assets` — expect
+   `MeetingSummary-vX.Y.Z.zip` (+ usually the prebuilt helper tarballs, best-effort).
 
-6. **Push main, then tag.**
-   ```
-   git push origin main
-   git tag vX.Y.Z && git push origin vX.Y.Z
-   ```
-   `VERSION` must equal the tag (without the `v`) or CD fails its own check.
-
-7. **Verify CD.** The release job can take **~10 min** (the chatllm cmake build is
-   the slow step). Watch it:
-   ```
-   rid=$(gh run list -R a9650615/MeetingSummary --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')
-   gh run watch "$rid" -R a9650615/MeetingSummary --exit-status
-   ```
-   If `gh run watch` times out, poll `gh run view "$rid" --json status,conclusion`
-   instead of assuming failure — the long step is normal.
-
-8. **Confirm assets.** The release must carry the installer zip and (best-effort)
-   the chatllm runtime:
-   ```
-   gh release view vX.Y.Z -R a9650615/MeetingSummary --json assets -q '.assets[]|"\(.name) \(.size)b"'
-   ```
-   Expect `MeetingSummary-vX.Y.Z.zip` and usually `chatllm-runtime-arm64.tar.gz`.
-   The chatllm prebuild is best-effort in CI — if it's missing, the release still
-   stands (users fall back to source build); note it to the user.
+## CHANGELOG voice — for USERS, not engineers
+Shown in-app (設定 → 更新紀錄). Keep it short — it's not a commit log.
+- **One short line per user-visible change.** Lead with what they'll notice. zh-TW.
+- **NO engineering detail**: no file/function/API names (ScreenCaptureKit, asyncio,
+  setsid, Info.plist…), line counts, internal mechanism, or "(根因: …)". That goes
+  in the commit, not here.
+- `### 新增 / ### 改善 / ### 修正` headings only when a version has several items.
+- Internal-only work (refactors with no user effect): omit, or one line —
+  「內部結構整理，提升穩定性」.
+- Good: 「修正點 App 後偶爾打不開」. Bad: 「bootstrap setsid() 脫離 .app process
+  group，避免 launcher 結束時被 reap」.
 
 ## Notes
-- Updating is manual for end users (設定 → 檢查更新 → 更新並重啟). Releasing here only
-  publishes; it does not push updates to anyone.
-- Don't bump/tag for docs-only or experiment commits unless the user asks.
-- One tag per version; if a tag already exists, pick the next patch.
+- End-user update is manual (設定 → 檢查更新 → 更新並重啟); tagging only publishes.
+- One tag per version; if a tag exists, take the next patch.

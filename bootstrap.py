@@ -180,8 +180,21 @@ def main():
     # BEFORE binding — else the venv/mlx install would be x86 and fail.
     if _is_apple_silicon_hw() and platform.machine() == "x86_64":
         os.execvp("arch", ["arch", "-arm64", sys.executable, os.path.abspath(__file__)])
+    # Detach into our own session so the server survives the .app launcher exiting.
+    # The launcher backgrounds us then exits; LaunchServices then reaps the .app's
+    # process group — which would kill this server (nohup blocks SIGHUP, not the
+    # group reap). setsid() puts us in a fresh session, immune to that. (No-op /
+    # harmless if we're already a session leader, e.g. run straight from a shell.)
+    try:
+        os.setsid()
+    except OSError:
+        pass
     srv = _bind()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # Open the browser ourselves (we're in the surviving session) — the launcher
+    # has already exited, so it can't. The progress page shows now, then reloads to
+    # the app once the real server takes over.
+    subprocess.run(["open", f"http://127.0.0.1:{PORT}"], capture_output=True)
     setup()
     # Can the real server even import? If yes, hand off. If not, it's a genuine
     # failure -> show the log on the page (don't exec a doomed server / hang silently).
