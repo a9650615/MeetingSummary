@@ -2588,11 +2588,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 print(f"silero vad unavailable, using energy: {e}", file=sys.stderr)
                 return None
 
-        # ANE live (省電): skip the MLX whisper-small interim entirely — that's the
-        # GPU draw during live. Final-only on the Neural Engine = minimal GPU.
+        # ANE live: run the interim preview ON THE ANE helper too (not the MLX
+        # whisper-small interim, which would spin the GPU). interim transcribes only
+        # the recent ~8s tail with adaptive duty pacing, so the warm ANE (RTF ~0.15)
+        # keeps up — giving GPU-like live captions (字幕邊說邊跳) while staying off
+        # the GPU. Non-ANE keeps the lightweight MLX interim.
         import backends as _bk  # noqa: PLC0415
         ane_live = _bk.route(live_manager.current) == "ane"
-        interim_be = None if ane_live else live_interim_backend
+        interim_be = live_manager if ane_live else live_interim_backend
         sessions = {tag: TwoPassSession(
             backend=live_manager, interim_backend=interim_be,
             sample_rate=16000, silence_ms=sil,
