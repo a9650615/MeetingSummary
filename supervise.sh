@@ -60,6 +60,17 @@ start_watch
 fails=0
 while true; do
   sleep "$POLL"
+  # Heartbeat the single-instance lock. The startup guard is TOCTOU-racy: a 2nd
+  # supervisor can slip past during the 1st's restart gap (lock momentarily stale),
+  # then its start() pkills the healthy app -> flap war -> app intermittently
+  # unreachable. Re-check ownership each loop: if the lock now names a different
+  # LIVE pid, I'm the duplicate -> bow out (don't kill its app, just leave).
+  owner=$(cat "$LOCK" 2>/dev/null || true)
+  if [ -n "$owner" ] && [ "$owner" != "$$" ] && kill -0 "$owner" 2>/dev/null; then
+    echo "[supervise] another instance (pid $owner) owns port $PORT — exiting"
+    kill -9 "$SRV" "$WATCH" 2>/dev/null; exit 0
+  fi
+  [ "$owner" = "$$" ] || echo $$ > "$LOCK"   # missing/stale -> reclaim
   # keep the watcher alive too — it had no respawn, so a single crash killed
   # meeting detection for the whole session.
   kill -0 "$WATCH" 2>/dev/null || { echo "[supervise] watcher died — restarting"; start_watch; }
