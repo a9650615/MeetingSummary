@@ -2808,7 +2808,15 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     pass
             _pad_to(time.time())  # equalize track lengths to the final wall-clock
             for tag, s in sessions.items():
-                for ev in await run_in_threadpool(s.flush):
+                # Timeout the final flush: a wedged backend must NOT hang stop forever
+                # (that left idle["live"] > 0 = "stop didn't stop" + a stuck thread that
+                # blocks later operations). The backend's own watchdog reaps the thread.
+                try:
+                    evs = await asyncio.wait_for(run_in_threadpool(s.flush), timeout=15)
+                except Exception as e:  # noqa: BLE001  (TimeoutError or backend error)
+                    print(f"live flush skipped ({tag}): {e}", file=sys.stderr)
+                    evs = []
+                for ev in evs:
                     if ev["kind"] == "final":  # audio-position offset, not wall-clock
                         spk = ev.get("speaker") or tracks[tag][1]
                         store.add_transcript(mid, "live", tracks[tag][0],

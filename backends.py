@@ -606,11 +606,29 @@ def ane_live_backend():
         pcm = bytes(audio)
         if len(pcm) < 640:  # <0.02s -> skip
             return []
+        import select  # noqa: PLC0415
+        line = b""
         with _ANE_HELP["lock"]:
             p = _ensure()
-            p.stdin.write(struct.pack(">I", len(pcm)) + pcm)
-            p.stdin.flush()
-            line = p.stdout.readline()
+            try:
+                p.stdin.write(struct.pack(">I", len(pcm)) + pcm)
+                p.stdin.flush()
+                # Watchdog: never block the live/flush thread forever on a hung helper
+                # (that deadlocks this lock for every later call). 30s no output -> kill
+                # + respawn next time (mirrors the .cpp daemon).
+                rl, _, _ = select.select([p.stdout], [], [], 30)
+                if not rl:
+                    p.kill()
+                    _ANE_HELP["proc"] = None
+                    return []
+                line = p.stdout.readline()
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+                _ANE_HELP["proc"] = None  # force respawn next call
+                return []
         try:
             text = (json.loads(line.decode("utf8", "ignore")).get("text") or "").strip()
         except Exception:
