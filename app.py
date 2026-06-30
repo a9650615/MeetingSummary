@@ -2274,8 +2274,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 rows = store.list_speakers()  # known voiceprints, read-only for live
                 for tag, (trk, spk) in tracks.items():
                     if spk != "我":
-                        sessions[tag].speaker_fn = diar.live_speaker_labeler(
+                        labeler = diar.live_speaker_labeler(
                             extractor, rows, session_threshold=thr, match_threshold=gthr)
+                        # splitter labels each piece itself (owns the labeler), so a
+                        # single-speaker utterance returns one piece = the normal case,
+                        # and a multi-speaker one is split per turn. No separate
+                        # speaker_fn needed.
+                        sessions[tag].splitter = (
+                            lambda a, t, lf=labeler: diar.split_live_utterance(a, t, lf))
             except Exception as e:
                 print(f"live diarize unavailable: {e}", file=sys.stderr)
 

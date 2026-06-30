@@ -382,6 +382,43 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
     return fn
 
 
+def split_live_utterance(audio, text, label_fn, *, window_s=1.5,
+                         sample_rate=16000, min_piece=0.6):
+    """Split ONE finalized live utterance into per-speaker pieces when >1 speaker
+    alternates within it (paragraph mode / no silence gap between turns). Labels
+    ~window_s windows via label_fn(window_bytes), merges consecutive same-speaker
+    windows, then cuts `text` by each piece's time fraction (punctuation-snapped,
+    reusing the offline splitter). Returns [(speaker, text, rel_start_ms,
+    rel_end_ms)] — exactly one piece when a single speaker holds the utterance (so
+    the caller can treat it as the normal one-line case).
+
+    label_fn = live_speaker_labeler(...): it owns the embedding + naming, so this
+    stays a pure timeline-segmentation step (no model/sherpa import here)."""
+    win_bytes = int(window_s * sample_rate) * 2
+    total_s = len(audio) / (sample_rate * 2)
+    total_ms = int(total_s * 1000)
+    if win_bytes <= 0 or len(audio) < 2 * win_bytes:   # too short to hold a turn change
+        return [(label_fn(audio), text, 0, total_ms)]
+    segments, pos = [], 0
+    while pos < len(audio):
+        chunk = bytes(audio[pos:pos + win_bytes])
+        if len(chunk) < win_bytes // 2 and segments:
+            segments[-1]["end"] = total_s              # tail remnant -> extend last window
+            break
+        st = pos / (sample_rate * 2)
+        segments.append({"start": st, "end": min(total_s, st + window_s),
+                         "speaker": label_fn(chunk)})
+        pos += win_bytes
+    pieces = _speaker_pieces(0.0, total_s, segments, min_piece=min_piece)
+    if len(pieces) <= 1:
+        spk = pieces[0][0] if pieces else (segments[0]["speaker"] if segments else None)
+        return [(spk, text, 0, total_ms)]
+    dur = total_s or 1.0
+    texts = _split_text(text, [(pe - ps) / dur for _, ps, pe in pieces])
+    return [(spk, txt, int(ps * 1000), int(pe * 1000))
+            for (spk, ps, pe), txt in zip(pieces, texts)]
+
+
 def similar_speaker_pairs(rows, threshold=0.5, dismissed=()):
     """Global-speaker pairs whose voiceprints are close enough to maybe be the SAME
     person but didn't auto-merge — surfaced as 'might be a duplicate, merge?'

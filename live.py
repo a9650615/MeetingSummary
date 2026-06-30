@@ -273,10 +273,15 @@ class TwoPassSession:
                  frame_ms=30, silence_ms=400, max_utt_s=15.0, interim_s=1.2,
                  interim_tail_s=8.0, min_speech_ms=250, rms_threshold=80,
                  speech_factor=2.0, track="mic", speaker_fn=None, speech_fn=None,
+                 splitter=None,
                  interim_duty=0.75, interim_min_s=1.0, interim_max_s=3.0, clock=None):
         self.final_backend = backend
         self.interim_backend = interim_backend
         self.speaker_fn = speaker_fn  # optional audio_bytes -> live speaker label
+        # optional (audio_bytes, text) -> [(speaker, text, rel_start_ms, rel_end_ms)]:
+        # when one finalized utterance holds >1 speaker (e.g. paragraph mode, no
+        # silence gap), split it so each person's words land on their own line.
+        self.splitter = splitter
         self.speech_fn = speech_fn    # optional frame_bytes -> bool (silero); else energy VAD
         self.sr = sample_rate
         self.track = track
@@ -343,15 +348,42 @@ class TwoPassSession:
         # But STILL advance the committed-byte clock by their length: the audio
         # file keeps those bytes, so skipping them would make every later
         # timestamp drift ahead of the audio (worse with paragraph-size windows).
+        # Returns a LIST of events ([] / one / many) — the splitter can fan one
+        # utterance into one line per speaker.
         if not self._enough_speech():
             self._committed_bytes += len(self._utt)
             self._reset_utt()
-            return None
+            return []
         audio = bytes(self._utt)
         text = self._text(self.final_backend, audio)
         offset_ms = round(self._committed_bytes / (self.sr * 2) * 1000)
         end_ms = round((self._committed_bytes + len(audio)) / (self.sr * 2) * 1000)
         self._committed_bytes += len(audio)
+        # Within-utterance split (multi-speaker in one VAD segment) takes precedence
+        # over the single-label speaker_fn. The splitter labels every piece itself
+        # (it owns the embedding), so use its pieces whenever it returns any — a
+        # single piece is just the normal one-speaker case; >1 means a real split.
+        if text and self.splitter:
+            try:
+                parts = self.splitter(audio, text)
+            except Exception:
+                parts = None
+            if parts:
+                self._reset_utt()
+                multi = len(parts) > 1
+                evs = []
+                for pspk, ptext, rs, re in parts:
+                    if not ptext:
+                        continue
+                    e = {"kind": "final", "text": ptext, "track": self.track,
+                         "start_ms": offset_ms + rs, "end_ms": offset_ms + re,
+                         "profile": "live"}
+                    if pspk:
+                        e["speaker"] = pspk
+                    if multi:
+                        e["split"] = True
+                    evs.append(e)
+                return evs
         spk = None
         if text and self.speaker_fn:
             try:
@@ -360,12 +392,12 @@ class TwoPassSession:
                 spk = None
         self._reset_utt()
         if not text:
-            return None
+            return []
         ev = {"kind": "final", "text": text, "track": self.track,
               "start_ms": offset_ms, "end_ms": end_ms, "profile": "live"}
         if spk:
             ev["speaker"] = spk
-        return ev
+        return [ev]
 
     def feed(self, pcm, want_interim=True):
         self._utt.extend(pcm)
@@ -381,9 +413,9 @@ class TwoPassSession:
             else:
                 self._silence_run += 1
                 if self._has_speech and self._silence_run >= self.silence_frames:
-                    events.append(self._finalize())
+                    events.extend(self._finalize())
         if self._has_speech and len(self._utt) >= self.max_bytes:
-            events.append(self._finalize())
+            events.extend(self._finalize())
         # interim only once there's real sustained speech (no work on blips/silence)
         if (want_interim and self.interim_backend and self._enough_speech()
                 and len(self._utt) - self._last_interim_len >= self._interim_dyn):
@@ -409,8 +441,7 @@ class TwoPassSession:
 
     def flush(self):
         if self._has_speech:
-            e = self._finalize()
-            return [e] if e else []
+            return self._finalize()
         return []
 
 

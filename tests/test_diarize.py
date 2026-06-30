@@ -161,3 +161,25 @@ def test_live_labeler_skips_placeholder_globals():
     fn = diarize.live_speaker_labeler(lambda a: alice, rows,
                                       match_threshold=0.62, min_secs=0)
     assert fn(b"x" * 4000) == "說話者1"               # placeholder not used as a live name
+
+
+def test_split_live_utterance_single_speaker_one_piece():
+    audio = b"\x01\x00" * (16000 * 4)                  # 4s, one voice
+    parts = diarize.split_live_utterance(audio, "完整的一句話。", lambda a: "Alice",
+                                         window_s=1.5)
+    assert len(parts) == 1
+    assert parts[0][0] == "Alice"
+    assert parts[0][1] == "完整的一句話。"
+
+
+def test_split_live_utterance_splits_two_speakers():
+    audio = b"\x01\x00" * (16000 * 6)                  # 6s -> 4 windows of 1.5s
+    calls = {"n": 0}
+    def lf(a):                                         # first half Alice, then Bob
+        i = calls["n"]; calls["n"] += 1
+        return "Alice" if i < 2 else "Bob"
+    parts = diarize.split_live_utterance(audio, "你好嗎。我很好。", lf, window_s=1.5)
+    assert [p[0] for p in parts] == ["Alice", "Bob"]   # one line per speaker, in order
+    assert parts[0][2] == 0                            # first piece starts at 0
+    assert parts[-1][3] <= 6000                         # last ends within the utterance
+    assert "".join(p[1] for p in parts).replace(" ", "") == "你好嗎。我很好。"
