@@ -2782,6 +2782,15 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     buf.clear()
                     if rec["on"]:
                         continue  # 純錄音: PCM already saved; skip ASR (no inference)
+                    # Backpressure: if ASR fell behind (e.g. continuous system audio
+                    # vs a saturated ANE), transcribe only the most recent ~45s — the
+                    # full audio is already on disk for re-transcribe. Bounds per-feed
+                    # work so the consumer can't backlog into a hang / un-stoppable loop.
+                    MAXB = 45 * 16000 * 2
+                    if len(chunk) > MAXB:
+                        print(f"live ASR backlog {len(chunk)//32000}s -> trim (audio saved)",
+                              file=sys.stderr)
+                        chunk = chunk[-MAXB:]
                     want_interim = len(chunk) <= interim_lag_bytes
                     try:
                         events = await run_in_threadpool(
@@ -2797,6 +2806,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     await ws.send_json({"type": "notice", "msg": msg})
                 if mid in live_stop:  # remote stop — AFTER draining this round's buffers
                     live_stop.discard(mid)
+                    if audiocap_proc and audiocap_proc.returncode is None:
+                        try:  # cut the native audio source so it stops feeding
+                            audiocap_proc.terminate()
+                        except ProcessLookupError:
+                            pass
                     break
         finally:
             rtask.cancel()
