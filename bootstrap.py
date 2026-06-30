@@ -146,13 +146,41 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def _health_ok():
+    try:
+        import urllib.request
+        r = urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=1)
+        return json.load(r).get("status") == "ok"
+    except Exception:
+        return False
+
+
+def _bind():
+    """Bind the port, reclaiming it from a stale/stuck holder. We only get here when
+    the launcher's /health probe failed, so a bound port means a dead-but-bound or
+    hung previous server — clicking the icon must still open the app, not crash on
+    'Address already in use'. If a concurrent launch already brought up a HEALTHY
+    server (race), defer to it (open browser + exit)."""
+    import time
+    try:
+        return http.server.HTTPServer(("127.0.0.1", PORT), H)
+    except OSError:
+        if _health_ok():                       # someone else won the race + is healthy
+            subprocess.run(["open", f"http://127.0.0.1:{PORT}"])
+            sys.exit(0)
+        subprocess.run(f"lsof -ti tcp:{PORT} | xargs kill -9", shell=True,
+                       capture_output=True)    # stale holder -> reclaim
+        time.sleep(0.6)
+        return http.server.HTTPServer(("127.0.0.1", PORT), H)
+
+
 def main():
     import platform
     # On Apple Silicon but launched under Rosetta (x86_64)? Re-exec natively arm64
     # BEFORE binding — else the venv/mlx install would be x86 and fail.
     if _is_apple_silicon_hw() and platform.machine() == "x86_64":
         os.execvp("arch", ["arch", "-arm64", sys.executable, os.path.abspath(__file__)])
-    srv = http.server.HTTPServer(("127.0.0.1", PORT), H)
+    srv = _bind()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     setup()
     # Can the real server even import? If yes, hand off. If not, it's a genuine
