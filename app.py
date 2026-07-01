@@ -808,6 +808,13 @@ stopBtn.onclick = () => {
   S.textContent += mid ? ` 已停止。可到首頁對 #${mid} 產生摘要。` : ' 已停止。';
   startBtn.disabled=false; stopBtn.disabled=true;
 };
+// Auto-check 系統音原生擷取 if audiocap is installed and permission already granted.
+fetch('/native/capability').then(r=>r.json()).then(j=>{
+  if(j.audiocap && j.granted){
+    document.getElementById('nativesys').checked=true;
+    document.getElementById('status').textContent=' ✅ 原生系統音可用，已自動啟用';
+  }
+}).catch(()=>{});
 """
 
 _LIVE = _shell("Live · MeetingSummary", _LIVE_BODY, script=_LIVE_JS, back=True)
@@ -1862,6 +1869,30 @@ def create_app(store, *, summary_backend, asr_backend=None,
             caption = store.latest_transcript(mid)
         return {"recording": bool(mids), "mid": mid, "count": len(mids),
                 "title": title, "caption": caption}
+
+    @app.get("/native/capability")
+    def native_capability():
+        # Non-prompting probe: is audiocap installed AND Screen-Recording already granted?
+        # Uses --check mode (CGPreflightScreenCaptureAccess only — no dialog).
+        import subprocess
+        binp = backends.audiocap_bin()
+        if not binp:
+            return {"audiocap": False, "granted": False}
+        try:
+            p = subprocess.Popen(
+                [binp, "--check"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            try:
+                out, _ = p.communicate(timeout=3)
+                granted = out.strip() == b"GRANTED"
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.communicate()
+                granted = False
+        except Exception:
+            granted = False
+        return {"audiocap": True, "granted": granted}
 
     @app.post("/native/request-permission")
     def native_request_permission():

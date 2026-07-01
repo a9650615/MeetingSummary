@@ -129,6 +129,16 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
 }
 
 if #available(macOS 13.0, *) {
+    // --check: non-prompting preflight probe. Prints GRANTED/DENIED, exits 0/1.
+    if CommandLine.arguments.contains("--check") {
+        if CGPreflightScreenCaptureAccess() {
+            print("GRANTED")
+            exit(0)
+        } else {
+            print("DENIED")
+            exit(1)
+        }
+    }
     let cap = Capturer()
     Task { await cap.start() }
     RunLoop.main.run()
