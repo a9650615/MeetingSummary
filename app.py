@@ -679,26 +679,30 @@ const GATE=0.006;       // lower gate so quiet speech still transmits
 // gate=true: silence-gate + pre-roll (perf, single-track). gate=false: send
 // continuous so both dual tracks share one wall-clock timeline (else each track's
 // gated/compressed clock drifts vs the other -> 我/對方 timestamps don't line up).
+// box-average resample (cheap anti-alias; nearest-sample decimation aliases HF
+// -> garbled consonants/英文) then send. Shared by attach + attachMixed.
+function toPcm16(input, ratio){
+  const outLen = Math.floor(input.length/ratio);
+  const pcm = new Int16Array(outLen);
+  for(let i=0;i<outLen;i++){
+    const a = Math.floor(i*ratio), b = Math.floor((i+1)*ratio);
+    let sum=0, n=0;
+    for(let j=a;j<b && j<input.length;j++){ sum+=input[j]; n++; }
+    const s = Math.max(-1,Math.min(1, n ? sum/n : 0));
+    pcm[i] = s*32767;
+  }
+  return pcm;
+}
+function sendPcm(pcm, tag){
+  if(tag===null){ ws.send(pcm.buffer); }
+  else { const b=new Uint8Array(1+pcm.byteLength); b[0]=tag;
+         b.set(new Uint8Array(pcm.buffer),1); ws.send(b.buffer); }
+}
 function attach(stream, tag, ratio, gate){
   const node = ctx.createScriptProcessor(4096,1,1);
   ctx.createMediaStreamSource(stream).connect(node);
   let hangover = 0, pre = [];
-  function sendFloat(input){
-    const outLen = Math.floor(input.length/ratio);
-    const pcm = new Int16Array(outLen);
-    for(let i=0;i<outLen;i++){
-      // box-average the source block (cheap anti-alias) instead of nearest-sample
-      // decimation — picking every Nth sample aliases HF -> garbled consonants/英文.
-      const a = Math.floor(i*ratio), b = Math.floor((i+1)*ratio);
-      let sum=0, n=0;
-      for(let j=a;j<b && j<input.length;j++){ sum+=input[j]; n++; }
-      const s = Math.max(-1,Math.min(1, n ? sum/n : 0));
-      pcm[i] = s*32767;
-    }
-    if(tag===null){ ws.send(pcm.buffer); }
-    else { const b=new Uint8Array(1+pcm.byteLength); b[0]=tag;
-           b.set(new Uint8Array(pcm.buffer),1); ws.send(b.buffer); }
-  }
+  function sendFloat(input){ sendPcm(toPcm16(input, ratio), tag); }
   node.onaudioprocess = ev => {
     if(ws.readyState!==1) return;
     const input = ev.inputBuffer.getChannelData(0);
@@ -714,6 +718,24 @@ function attach(stream, tag, ratio, gate){
       return;
     }
     sendFloat(input);
+  };
+  node.connect(gain);
+  nodes.push(node);
+}
+
+// 混合(both): sum mic + system in Web Audio into ONE ungated, continuous track.
+// Must NOT silence-gate — gating the system stream cuts the other party during
+// pauses (電腦音訊斷斷續續); and two separate gated senders on one wall-clock
+// track clobber each other. One node, summed inputs, sent every block.
+function attachMixed(streamList, ratio){
+  const node = ctx.createScriptProcessor(4096,1,1);
+  streamList.forEach(st=>{
+    const g = ctx.createGain(); g.gain.value = 0.8;   // headroom vs summing to clip
+    ctx.createMediaStreamSource(st).connect(g); g.connect(node);
+  });
+  node.onaudioprocess = ev => {
+    if(ws.readyState!==1) return;
+    sendPcm(toPcm16(ev.inputBuffer.getChannelData(0), ratio), null);
   };
   node.connect(gain);
   nodes.push(node);
@@ -783,7 +805,8 @@ startBtn.onclick = async () => {
   ws.onopen = () => {
     // guard each stream: with native_sys a track may be server-sourced (no browser stream)
     if(dual){ if(streams[0])attach(streams[0],0,ratio,false); if(streams[1])attach(streams[1],1,ratio,false); }
-    else { streams.forEach(st=>attach(st,null,ratio,true)); }  // mic/system/both: gated
+    else if(source==='both' && streams.length>1){ attachMixed(streams,ratio); }  // 混合: one ungated track
+    else { streams.forEach(st=>attach(st,null,ratio,true)); }  // mic/system single: gated
   };
   // Null ws + re-arm start on ANY close (manual stop, server-side float-panel stop,
   // dropped connection). Without this, the stale closed socket stays truthy and the
