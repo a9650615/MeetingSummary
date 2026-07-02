@@ -1,6 +1,7 @@
 """Store: SQLite metadata for meetings/segments/transcripts/summaries.
 Schema per docs spec §4. Audio bytes live on disk under data/."""
 import sqlite3
+import threading
 from pathlib import Path
 
 
@@ -46,12 +47,14 @@ CREATE TABLE IF NOT EXISTS speaker_nonmatches(a TEXT, b TEXT, PRIMARY KEY(a, b))
 class Store:
     def __init__(self, db_path):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        # ponytail: single shared connection across FastAPI's threadpool;
-        # sqlite serializes writes by default. Per-request connections only
-        # if write contention ever shows up (single-user local app — unlikely).
+        # A single sqlite3 connection stepped concurrently from multiple
+        # threads (FastAPI's threadpool) corrupts the C-level cursor state —
+        # confirmed by a stress repro that reliably segfaulted CPython within
+        # seconds. Each thread now gets its own lazily-opened connection
+        # (self.db is a property, see below); WAL lets readers proceed
+        # without waiting on the writer.
         self.db_path = str(db_path)
-        self.db = sqlite3.connect(db_path, check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
+        self._local = threading.local()
         self.db.executescript(_SCHEMA)
         # ponytail: idempotent column add for DBs created before notes existed.
         try:
@@ -60,6 +63,24 @@ class Store:
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
                 raise  # only ignore "column already exists"; surface real failures
+
+    def _connect(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    @property
+    def db(self):
+        """The calling thread's own connection, opened on first use. Every
+        existing call site does `self.db.execute(...)` / `self.db.commit()`
+        unchanged — only the connection each thread sees is now private."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._connect()
+            self._local.conn = conn
+        return conn
 
     def set_notes(self, meeting_id, notes):
         self.db.execute("UPDATE meetings SET notes=? WHERE id=?", (notes, meeting_id))
