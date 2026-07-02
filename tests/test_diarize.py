@@ -183,3 +183,71 @@ def test_split_live_utterance_splits_two_speakers():
     assert parts[0][2] == 0                            # first piece starts at 0
     assert parts[-1][3] <= 6000                         # last ends within the utterance
     assert "".join(p[1] for p in parts).replace(" ", "") == "你好嗎。我很好。"
+
+
+def _labeler_with_peek(fn, peek):
+    """A label_fn double exposing .peek, like live_speaker_labeler's real fn."""
+    fn.peek = peek
+    return fn
+
+
+def test_split_live_utterance_uncertain_peek_never_spawns_mid_utterance():
+    # Regression for the runaway-說話者N bug: split_live_utterance used to call
+    # the full (match-or-spawn) label_fn independently on every ~1.5s window, so
+    # a single real speaker's noisy windows could each spawn a fresh 說話者N.
+    # peek() returning None ('no confident opinion') on every window must NOT
+    # fragment the utterance or invoke the real decision more than once.
+    audio = b"\x01\x00" * (16000 * 6)                  # 6s -> 4 windows
+    calls = {"n": 0}
+    def fn(a):
+        calls["n"] += 1
+        return "說話者1"
+    lf = _labeler_with_peek(fn, lambda a: None)         # always uncertain
+    parts = diarize.split_live_utterance(audio, "這應該只有一個人講話。", lf, window_s=1.5)
+    assert len(parts) == 1                              # never fragmented
+    assert calls["n"] == 1                               # decided ONCE, on the full utterance
+    assert parts[0][0] == "說話者1"
+
+
+def test_split_live_utterance_confident_peek_splits_and_commits_once_per_piece():
+    # A window that CONFIDENTLY names a different already-established identity
+    # still produces a real split — and the real label_fn is called once per
+    # detected PIECE (full-quality audio), not once per raw window.
+    audio = b"\x01\x00" * (16000 * 6)                  # 6s -> 4 windows: A,A,B,B
+    commits = []
+    def fn(a):
+        commits.append(len(a))
+        return "Alice" if len(commits) == 1 else "Bob"
+    def peek(chunk):
+        label = "Alice" if peek.n < 2 else "Bob"
+        peek.n += 1
+        return label
+    peek.n = 0
+    lf = _labeler_with_peek(fn, peek)
+    parts = diarize.split_live_utterance(audio, "你好嗎。我很好。", lf, window_s=1.5)
+    assert [p[0] for p in parts] == ["Alice", "Bob"]
+    assert len(commits) == 2                            # one commit per piece, not per window
+
+
+def test_live_speaker_labeler_promotes_session_cluster_to_named_voice():
+    # A short, noisy single utterance from a NAMED speaker can land just under
+    # match_threshold and spawn a session-local 說話者N. As that same cluster
+    # accumulates more of the SAME speaker's utterances, its running-mean
+    # centroid gets less noisy; once it crosses match_threshold, the cluster is
+    # retroactively promoted to the real name for this and all future
+    # occurrences (fixes named voices going permanently unrecognized).
+    dim = 16
+    rng = np.random.default_rng(0)
+    alice_dir = rng.normal(size=dim)
+    alice_dir /= np.linalg.norm(alice_dir)
+
+    def extractor(_audio):
+        v = alice_dir + 0.7 * rng.normal(size=dim)
+        return v / np.linalg.norm(v)
+
+    rows = [_spk_row("Alice", alice_dir)]
+    fn = diarize.live_speaker_labeler(extractor, rows, session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=0)
+    labels = [fn(b"x" * 4000) for _ in range(8)]
+    assert labels[0] != "Alice"                         # first noisy sample: no individual match
+    assert labels[-3:] == ["Alice", "Alice", "Alice"]    # promoted, and stays promoted

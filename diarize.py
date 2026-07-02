@@ -367,38 +367,121 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
              for r in speakers
              if r["centroid"] and not _is_placeholder(r["name"])]
     min_bytes = int(min_secs * sample_rate) * 2
+    promoted = {}  # session id -> name, once that cluster's running centroid matches
+
+    def _label_for(sid):
+        return promoted.get(sid, f"說話者{sid + 1}")
 
     def fn(audio):
         if len(audio) < min_bytes and tr.centroids:
-            return f"說話者{tr.last_id + 1}"          # too short -> reuse last, don't spawn
+            return _label_for(tr.last_id)            # too short -> reuse last, don't spawn
         emb = np.asarray(extractor(audio), dtype=np.float32)
         if known:
             e = emb / (np.linalg.norm(emb) + 1e-9)
             name, _sim = match_speaker(e, known, match_threshold)
             if name is not None:
                 return name                          # recognized a named voice
-        return f"說話者{tr.assign(emb) + 1}"           # unknown -> session-local cluster
+        sid = tr.assign(emb)
+        if sid not in promoted and known:
+            # A short single utterance's own embedding can land just under
+            # match_threshold by noise even for a truly named voice (measured:
+            # separate short utterances from the SAME speaker don't always
+            # individually clear 0.62). But tr's running-mean centroid for this
+            # cluster gets less noisy as more of that speaker's utterances
+            # accumulate into it — so retry the named match against THAT refined
+            # centroid; once it crosses match_threshold, "promote" the cluster so
+            # this and all its future occurrences resolve to the real name
+            # (past occurrences already emitted stay as 說話者N — no retroactive
+            # rewrite here, that's the post-meeting /diarize pass's job).
+            name, _sim = match_speaker(tr.centroids[sid], known, match_threshold)
+            if name is not None:
+                promoted[sid] = name
+                return name
+        return _label_for(sid)                       # unknown -> session-local cluster
 
+    def peek(audio):
+        # STATE-FREE identity guess for split_live_utterance's turn-boundary
+        # detection ONLY: returns a label when CONFIDENT (matches a named voice,
+        # or an ALREADY-ESTABLISHED session cluster from an earlier fn() commit),
+        # else None meaning "no opinion" — the caller treats that as a
+        # continuation of whichever speaker is already talking, NOT a new one.
+        # Crucially this NEVER spawns and never updates tr's centroids: letting
+        # every noisy 1.5s window independently run the full fn() (match-or-spawn)
+        # was the runaway-說話者N bug — a real speaker's own windows regularly
+        # dropped below both the 0.62 named and 0.4 session thresholds by chance,
+        # each spawning a brand-new cluster. Tried comparing raw window embeddings
+        # to each other / to a running mean instead of gating on confidence: still
+        # over-split a genuine single-speaker monologue in the majority of trials
+        # (short-window cosine noise dominates the signal). Defaulting uncertainty
+        # to "same speaker" instead is far cheaper than a spurious split — new
+        # identities are only ever created by fn() committing on a full
+        # utterance/piece, never by peek().
+        if len(audio) < min_bytes:
+            return None
+        emb = np.asarray(extractor(audio), dtype=np.float32)
+        e = emb / (np.linalg.norm(emb) + 1e-9)
+        if known:
+            name, _sim = match_speaker(e, known, match_threshold)
+            if name is not None:
+                return name
+        if tr.centroids:
+            sims = [float(c @ e) for c in tr.centroids]
+            best = max(range(len(sims)), key=sims.__getitem__)
+            if sims[best] >= tr.threshold:
+                return _label_for(best)
+        return None
+
+    fn.peek = peek
     return fn
+
+
+def _group_by_peek(segments):
+    """Assign local integer group ids from each window's '_peek' identity
+    (consumed here, not persisted): None ('no confident opinion') extends the
+    CURRENT group rather than starting a new one — bias toward NOT splitting,
+    since peek() never spawns and a genuinely distinct speaker still gets
+    detected once they cross a confidence threshold peek() trusts. A boundary is
+    only cut when a window confidently names a DIFFERENT identity than the last
+    confident one seen."""
+    gid, last_confident = 0, None
+    for seg in segments:
+        peeked = seg.pop("_peek", None)
+        if peeked is not None and last_confident is not None and peeked != last_confident:
+            gid += 1
+        if peeked is not None:
+            last_confident = peeked
+        seg["speaker"] = gid
 
 
 def split_live_utterance(audio, text, label_fn, *, window_s=1.5,
                          sample_rate=16000, min_piece=0.6):
     """Split ONE finalized live utterance into per-speaker pieces when >1 speaker
-    alternates within it (paragraph mode / no silence gap between turns). Labels
-    ~window_s windows via label_fn(window_bytes), merges consecutive same-speaker
-    windows, then cuts `text` by each piece's time fraction (punctuation-snapped,
-    reusing the offline splitter). Returns [(speaker, text, rel_start_ms,
-    rel_end_ms)] — exactly one piece when a single speaker holds the utterance (so
-    the caller can treat it as the normal one-line case).
+    alternates within it (paragraph mode / no silence gap between turns).
 
-    label_fn = live_speaker_labeler(...): it owns the embedding + naming, so this
-    stays a pure timeline-segmentation step (no model/sherpa import here)."""
+    Segmentation and identity are deliberately two separate steps: this used to
+    call the full label_fn (match-or-spawn) independently on every ~window_s
+    slice, but a single 1.5s window's embedding is noisy enough that a real
+    speaker's OWN windows regularly fell below both the named-match and
+    session-cluster thresholds by chance — spawning a fresh 說話者N on nearly
+    every window (see live_speaker_labeler). Instead: if label_fn exposes a
+    state-free `.peek(chunk)` (live_speaker_labeler does), use it to find turn
+    BOUNDARIES only where a window CONFIDENTLY names an already-established
+    identity different from the current one (peek never spawns; an unconfident
+    window just extends the current speaker rather than starting a new one).
+    The real label_fn is then called ONCE per detected piece on that piece's
+    full (longer, cleaner) audio — identity is decided at utterance-piece
+    quality, not single-window quality. label_fn without `.peek` (e.g. test
+    doubles) falls back to the original per-window-is-the-decision behaviour.
+
+    Returns [(speaker, text, rel_start_ms, rel_end_ms)] — exactly one piece when a
+    single speaker holds the utterance (so the caller can treat it as the normal
+    one-line case)."""
     win_bytes = int(window_s * sample_rate) * 2
     total_s = len(audio) / (sample_rate * 2)
     total_ms = int(total_s * 1000)
     if win_bytes <= 0 or len(audio) < 2 * win_bytes:   # too short to hold a turn change
         return [(label_fn(audio), text, 0, total_ms)]
+    peek = getattr(label_fn, "peek", None)
     segments, pos = [], 0
     while pos < len(audio):
         chunk = bytes(audio[pos:pos + win_bytes])
@@ -406,17 +489,32 @@ def split_live_utterance(audio, text, label_fn, *, window_s=1.5,
             segments[-1]["end"] = total_s              # tail remnant -> extend last window
             break
         st = pos / (sample_rate * 2)
-        segments.append({"start": st, "end": min(total_s, st + window_s),
-                         "speaker": label_fn(chunk)})
+        seg = {"start": st, "end": min(total_s, st + window_s)}
+        if peek is not None:
+            seg["_peek"] = peek(chunk)
+        else:
+            seg["speaker"] = label_fn(chunk)
+        segments.append(seg)
         pos += win_bytes
+    if peek is not None:
+        _group_by_peek(segments)
     pieces = _speaker_pieces(0.0, total_s, segments, min_piece=min_piece)
     if len(pieces) <= 1:
+        if peek is not None:
+            return [(label_fn(audio), text, 0, total_ms)]  # one turn -> decide on full audio
         spk = pieces[0][0] if pieces else (segments[0]["speaker"] if segments else None)
         return [(spk, text, 0, total_ms)]
     dur = total_s or 1.0
     texts = _split_text(text, [(pe - ps) / dur for _, ps, pe in pieces])
-    return [(spk, txt, int(ps * 1000), int(pe * 1000))
-            for (spk, ps, pe), txt in zip(pieces, texts)]
+    if peek is None:
+        return [(spk, txt, int(ps * 1000), int(pe * 1000))
+                for (spk, ps, pe), txt in zip(pieces, texts)]
+    out = []
+    for (_gid, ps, pe), txt in zip(pieces, texts):
+        piece_audio = bytes(audio[int(ps * sample_rate) * 2:int(pe * sample_rate) * 2])
+        spk = label_fn(piece_audio) if piece_audio else None
+        out.append((spk, txt, int(ps * 1000), int(pe * 1000)))
+    return out
 
 
 def similar_speaker_pairs(rows, threshold=0.5, dismissed=()):
