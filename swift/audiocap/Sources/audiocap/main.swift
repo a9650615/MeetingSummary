@@ -107,8 +107,17 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
+        // Unlike the startup preflight (fail(), gated by fatalOnFail so --both
+        // can degrade to mic-only if screen-recording was never granted), a
+        // stream that WAS running and then died (e.g. SCStreamErrorDomain
+        // -3805 on display sleep/lock/WindowServer hiccup) always exits the
+        // whole process -- even in --both mode, even if mic keeps working.
+        // That keeps server-side supervision simple: any exit = respawn the
+        // one helper with the same args, rather than tracking per-source
+        // liveness inside a still-running process.
         isRunning = false
-        fail("stopped \(error)")
+        FileHandle.standardError.write("ERR stopped \(error)\n".data(using: .utf8)!)
+        exit(1)
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer,

@@ -14,6 +14,7 @@ import time
 from fastapi.testclient import TestClient
 
 import backends
+import live_session
 import recorder
 from app import create_app
 from store import Store
@@ -89,10 +90,14 @@ def test_live_start_requires_a_live_backend(tmp_path):
         assert r.status_code == 400
 
 
-def test_live_start_runs_end_to_end_and_self_stops(tmp_path, monkeypatch):
-    # Helper emits one framed mic frame then exits (EOF) -- the session must
-    # end itself (like a crash/permission-loss would), close its PCM file, and
-    # clear live_active, with no explicit /live/stop needed.
+def test_live_start_runs_end_to_end_and_gives_up_after_repeated_crashes(tmp_path, monkeypatch):
+    # Helper emits one framed mic frame then exits (EOF) every single time it's
+    # spawned -- a helper that can never stay up. The supervisor retries a few
+    # times (fast, no delay here) then gives up, which must end the session
+    # like an explicit /live/stop: close the PCM file, clear live_active.
+    monkeypatch.setattr(live_session, "NATIVE_RESTART_BACKOFF_S", (0,))
+    monkeypatch.setattr(live_session, "NATIVE_MAX_FAST_FAILS", 2)
+    monkeypatch.setattr(live_session, "NATIVE_FAST_FAIL_WINDOW_S", 5.0)
     frame = struct.pack("<BI", recorder.TRACK_MIC, 2) + b"\x00\x00"
     script = "import sys\n" f"sys.stdout.buffer.write({frame!r})\n"
     app, store = _make_app(tmp_path, monkeypatch, script)
@@ -106,11 +111,54 @@ def test_live_start_runs_end_to_end_and_self_stops(tmp_path, monkeypatch):
         assert c.get("/live/state").json()["recording"] is True
 
         assert _wait_until(lambda: c.get("/live/state").json()["recording"] is False)
+        # give-up notice would only still be readable if state were polled
+        # before live_active clears; the important, durable assertion is below.
 
     assert store.get_meeting(mid) is not None
     seg_dirs = list((tmp_path / "data").glob(f"{mid}-*"))
     assert seg_dirs, "no segment dir created for the native session"
     assert (seg_dirs[0] / "mic.pcm").read_bytes() != b""
+
+
+def test_live_start_respawns_after_a_crash_and_keeps_recording(tmp_path, monkeypatch):
+    # First invocation of the helper dies after one frame (simulating a
+    # transient SCStream drop); every invocation after that streams
+    # continuously. The supervisor must respawn it (with the SAME args) and
+    # keep feeding the same pump -- the session should NOT end, a restart
+    # notice should show up, and mic.pcm should end up with MORE than the
+    # single crashed attempt's frame once the respawned helper keeps going.
+    monkeypatch.setattr(live_session, "NATIVE_RESTART_BACKOFF_S", (0,))
+    monkeypatch.setattr(live_session, "NATIVE_MAX_FAST_FAILS", 50)
+    monkeypatch.setattr(live_session, "NATIVE_FAST_FAIL_WINDOW_S", 0.01)  # this crash won't count as "fast"
+    script = (
+        "import os, struct, sys, time\n"
+        "n = int(open('runs.txt').read()) if os.path.exists('runs.txt') else 0\n"
+        "open('runs.txt', 'w').write(str(n + 1))\n"
+        f"frame = struct.pack('<BI', {recorder.TRACK_MIC}, 2) + b'\\x00\\x00'\n"
+        "if n == 0:\n"
+        "    sys.stdout.buffer.write(frame)\n"        # first spawn: one frame, then exit
+        "else:\n"
+        "    while True:\n"                            # every respawn after: keeps streaming
+        "        sys.stdout.buffer.write(frame)\n"
+        "        sys.stdout.buffer.flush()\n"
+        "        time.sleep(0.02)\n"
+    )
+    app, store = _make_app(tmp_path, monkeypatch, script)
+
+    with TestClient(app) as c:
+        r = c.post("/live/start", json={"source": "mic"})
+        mid = r.json()["id"]
+
+        assert _wait_until(lambda: "重啟" in (c.get("/live/state").json().get("notice") or ""))
+        assert c.get("/live/state").json()["recording"] is True  # still going, not given up
+
+        seg_dir = next((tmp_path / "data").glob(f"{mid}-*"))
+        assert _wait_until(lambda: (seg_dir / "mic.pcm").stat().st_size > 2)
+
+        c.post("/live/stop")
+        assert _wait_until(lambda: c.get("/live/state").json()["recording"] is False)
+
+    assert store.get_meeting(mid) is not None
 
 
 def test_live_stop_terminates_a_running_native_session(tmp_path, monkeypatch):
@@ -187,6 +235,12 @@ def test_meeting_transcripts_after_returns_only_newer_rows(tmp_path):
 
 
 def test_live_start_both_tracks_creates_two_pcm_files(tmp_path, monkeypatch):
+    # Helper dies right after its one frame, every time it's respawned -- the
+    # supervisor retries (fast, no delay here) then gives up and ends the
+    # session, same as the old immediate-EOF-ends-session behavior did.
+    monkeypatch.setattr(live_session, "NATIVE_RESTART_BACKOFF_S", (0,))
+    monkeypatch.setattr(live_session, "NATIVE_MAX_FAST_FAILS", 2)
+    monkeypatch.setattr(live_session, "NATIVE_FAST_FAIL_WINDOW_S", 5.0)
     frame = (struct.pack("<BI", recorder.TRACK_MIC, 2) + b"\x00\x00" +
              struct.pack("<BI", recorder.TRACK_SYSTEM, 2) + b"\x00\x00")
     script = "import sys\n" f"sys.stdout.buffer.write({frame!r})\n"

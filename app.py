@@ -2146,50 +2146,62 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if store.get_setting("float_panel", "0") == "1":
             _open_panel()
 
-        async def _reader():
-            await live_session.pump_framed_stdout(proc.stdout, pump)
-            # Helper stream ended (crashed / permission lost) — end the session
-            # like an explicit /live/stop rather than leaving it "recording" forever.
+        async def _notify(msg):
+            sess = native_sessions.get(mid)
+            if sess is not None:
+                sess["notice"] = msg
+
+        async def _on_stderr_line(s):
+            print(f"audiocap (native /live/start {mid}): {s}", file=sys.stderr)
+            if any(k in s for k in ("NOPERM", "ERR", "-3801", "TCC")):
+                await _notify(s[:180])
+
+        async def _on_give_up():
+            # /live/start is native-only -- there's no other source to fall back
+            # to, so a helper that can't stay up ends the session like an
+            # explicit /live/stop (audio captured so far is still finalized).
             live_stop.add(mid)
             pump.got.set()
 
-        async def _stderr():
-            try:
-                while True:
-                    ln = await proc.stderr.readline()
-                    if not ln:
-                        break
-                    s = ln.decode("utf8", "ignore").strip()
-                    if not s or s == "READY":
-                        continue
-                    print(f"audiocap (native /live/start {mid}): {s}", file=sys.stderr)
-                    if any(k in s for k in ("NOPERM", "ERR", "-3801", "TCC")):
-                        sess = native_sessions.get(mid)
-                        if sess is not None:
-                            sess["notice"] = s[:180]
-            except Exception:  # noqa: BLE001
-                pass
+        async def _spawn():
+            return await asyncio.create_subprocess_exec(
+                binp, flag, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+
+        label, perm_hint = {
+            "mic": ("麥克風擷取", "麥克風權限"),
+            "system": ("系統音擷取", "螢幕錄製權限"),
+            "both": ("音訊擷取", "螢幕錄製/麥克風權限"),
+        }[source]
+        supervisor = live_session.NativeCaptureSupervisor(
+            spawn=_spawn, reader_fn=live_session.pump_framed_stdout, pump=pump,
+            initial_proc=proc, on_stderr_line=_on_stderr_line, on_notice=_notify,
+            on_give_up=_on_give_up, label=label, perm_hint=perm_hint,
+            # Read live_session's module constants at CALL time (not as bound
+            # defaults) so tests can monkeypatch them to keep retries fast.
+            backoff=live_session.NATIVE_RESTART_BACKOFF_S,
+            max_fast_fails=live_session.NATIVE_MAX_FAST_FAILS,
+            fast_fail_window=live_session.NATIVE_FAST_FAIL_WINDOW_S)
 
         def _should_stop():
-            if mid in live_stop:  # explicit /live/stop OR the helper stream ended (see _reader)
+            if mid in live_stop:  # explicit /live/stop OR the supervisor gave up (see _on_give_up)
                 live_stop.discard(mid)
                 return True
             return False
 
         async def _on_stop():
-            if proc.returncode is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
+            supervisor.terminate()
 
         def _pop_notice():
             fn = getattr(live_manager.backend, "pop_notice", None)
             return fn() if fn else None
 
         async def _run():
-            rtask = asyncio.create_task(_reader())
-            stask = asyncio.create_task(_stderr())
+            # Peek-only (no discard) -- consume()'s _should_stop owns discarding
+            # mid from live_stop; this is just a defensive check so a helper
+            # crash that races an in-flight stop doesn't trigger one pointless
+            # respawn before the supervisor task gets cancelled below.
+            suptask = asyncio.create_task(
+                supervisor.run(should_stop=lambda: mid in live_stop))
             try:
                 await live_session.consume(
                     pump, sessions, tracks, rec_on=lambda: False,
@@ -2198,13 +2210,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     interim_lag_bytes=int(2 * live_interim_s * 16000) * 2,
                     pop_notice=_pop_notice, on_stop=_on_stop)
             finally:
-                rtask.cancel()
-                stask.cancel()
-                if proc.returncode is None:
-                    try:
-                        proc.terminate()
-                    except ProcessLookupError:
-                        pass
+                suptask.cancel()
+                supervisor.terminate()
                 pump.pad_to(time.time())
                 await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
                 for f in audio_files.values():
@@ -2634,49 +2641,55 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # captures system audio via the audiocap helper and feeds it into the
         # system/對方 track — no per-session browser "share screen + audio" dialog.
         # Same event loop as receiver() (asyncio subprocess) -> no thread races.
-        nrtask = None
-        nstask = None
-        audiocap_proc = None
+        suptask = None
+        native_sup = None
         if ws.query_params.get("native_sys") == "1":
             sys_tag = next((t for t, (trk, _l) in tracks.items() if trk == "system"), None)
             binp = _bk.audiocap_bin()
             if sys_tag is not None and binp:
-                audiocap_proc = await asyncio.create_subprocess_exec(
-                    binp, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                # dual = mic still comes from the browser, so a dead system track
+                # just goes silent (with a notice); system-only = it's the WHOLE
+                # session's audio, so giving up must end the session like a
+                # remote /live/stop, or nothing would ever feed the pump again.
+                only_source = not dual
 
-                async def native_reader(tag=sys_tag, proc=audiocap_proc):
-                    try:
-                        while True:
-                            data = await proc.stdout.read(8192)
-                            if not data:
-                                break
-                            pump.feed(tag, data)
-                    except Exception as e:  # noqa: BLE001
-                        print(f"native_sys reader stopped: {e}", file=sys.stderr)
+                async def _spawn():
+                    return await asyncio.create_subprocess_exec(
+                        binp, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
 
-                async def native_stderr(proc=audiocap_proc):
+                async def _on_stderr_line(s):
                     # Drain helper stderr; surface permission/errors to the live page
                     # (denial -> no audio -> the consumer loop never wakes, so the
                     # notice MUST come from here, not the main loop).
+                    print(f"audiocap: {s}", file=sys.stderr)
+                    if any(k in s for k in ("NOPERM", "ERR", "-3801", "TCC")):
+                        try:
+                            await ws.send_json({"type": "notice",
+                                                "msg": "原生系統音擷取失敗：" + s[:180]})
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                async def _on_native_notice(msg):
                     try:
-                        while True:
-                            ln = await proc.stderr.readline()
-                            if not ln:
-                                break
-                            s = ln.decode("utf8", "ignore").strip()
-                            if not s or s == "READY":
-                                continue
-                            print(f"audiocap: {s}", file=sys.stderr)
-                            if any(k in s for k in ("NOPERM", "ERR", "-3801", "TCC")):
-                                try:
-                                    await ws.send_json({"type": "notice",
-                                                        "msg": "原生系統音擷取失敗：" + s[:180]})
-                                except Exception:  # noqa: BLE001
-                                    pass
+                        await ws.send_json({"type": "notice", "msg": msg})
                     except Exception:  # noqa: BLE001
                         pass
-                nrtask = asyncio.create_task(native_reader())
-                nstask = asyncio.create_task(native_stderr())
+
+                async def _on_native_give_up():
+                    if only_source:
+                        live_stop.add(mid)
+                        pump.got.set()
+
+                native_sup = live_session.NativeCaptureSupervisor(
+                    spawn=_spawn,
+                    reader_fn=lambda r, p, tag=sys_tag: live_session.pump_raw_stdout(r, p, tag),
+                    pump=pump, on_stderr_line=_on_stderr_line, on_notice=_on_native_notice,
+                    on_give_up=_on_native_give_up, label="系統音擷取",
+                    backoff=live_session.NATIVE_RESTART_BACKOFF_S,
+                    max_fast_fails=live_session.NATIVE_MAX_FAST_FAILS,
+                    fast_fail_window=live_session.NATIVE_FAST_FAIL_WINDOW_S)
+                suptask = asyncio.create_task(
+                    native_sup.run(should_stop=lambda: closed or mid in live_stop))
             else:
                 await ws.send_json({"type": "notice",
                                     "msg": "原生系統音擷取不可用（缺 helper 或需螢幕錄製權限）"})
@@ -2688,11 +2701,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             return False
 
         async def _on_stop():
-            if audiocap_proc and audiocap_proc.returncode is None:
-                try:  # cut the native audio source so it stops feeding
-                    audiocap_proc.terminate()
-                except ProcessLookupError:
-                    pass
+            if native_sup:
+                native_sup.terminate()  # cut the native audio source so it stops feeding
 
         def _pop_notice():
             fn = getattr(live_manager.backend, "pop_notice", None)
@@ -2709,15 +2719,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 should_abort=lambda: closed)
         finally:
             rtask.cancel()
-            if nrtask:
-                nrtask.cancel()
-            if nstask:
-                nstask.cancel()
-            if audiocap_proc and audiocap_proc.returncode is None:
-                try:
-                    audiocap_proc.terminate()
-                except ProcessLookupError:
-                    pass
+            if suptask:
+                suptask.cancel()
+            if native_sup:
+                native_sup.terminate()
             pump.pad_to(time.time())  # equalize track lengths to the final wall-clock
             await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
             for f in audio_files.values():

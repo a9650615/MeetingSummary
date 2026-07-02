@@ -98,6 +98,151 @@ def test_pump_framed_stdout_ignores_unknown_track():
     assert pump.buffers[recorder.TRACK_MIC] == bytearray()
 
 
+def test_pump_raw_stdout_feeds_the_given_tag():
+    async def run():
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"\x01\x02\x03")
+        reader.feed_eof()
+        pump = live_session.WallClockPump({"t": ("system", "對方")}, {"t": io.BytesIO()}, time.time())
+        await live_session.pump_raw_stdout(reader, pump, "t")
+        return pump
+
+    pump = asyncio.run(run())
+    assert bytes(pump.buffers["t"]) == b"\x01\x02\x03"
+
+
+# --- NativeCaptureSupervisor ----------------------------------------------
+
+class FakeHelperProc:
+    """Stand-in for asyncio.subprocess.Process: stdout/stderr are real
+    StreamReaders (so reader_fn/the supervisor's stderr drain work unchanged),
+    terminate() just marks it dead."""
+
+    def __init__(self, out=b"", err=()):
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_data(out)
+        self.stdout.feed_eof()
+        self.stderr = asyncio.StreamReader()
+        for line in err:
+            self.stderr.feed_data(line.encode() + b"\n")
+        self.stderr.feed_eof()
+        self.returncode = None
+
+    def terminate(self):
+        self.returncode = -15
+
+
+async def _drain_to_pump(stdout, pump, tag="t"):
+    while True:
+        data = await stdout.read(8192)
+        if not data:
+            break
+        pump.feed(tag, data)
+
+
+def test_supervisor_respawns_on_death_and_keeps_feeding(monkeypatch):
+    # Freeze the wall clock pump.feed() reads: real time elapses between the
+    # two fake helpers' writes (event-loop scheduling, the backoff sleep),
+    # and pad_to() would otherwise insert a few bytes of real silence for
+    # that gap -- frozen time keeps the byte comparison below exact.
+    monkeypatch.setattr(live_session.time, "time", lambda: 1000.0)
+
+    async def run():
+        pump = live_session.WallClockPump({"t": ("mic", "我")}, {"t": io.BytesIO()}, live_session.time.time())
+        procs = [FakeHelperProc(out=b"\x00\x00"), FakeHelperProc(out=b"\x11\x11")]
+        spawned = []
+
+        async def spawn():
+            p = procs.pop(0)
+            spawned.append(p)
+            return p
+
+        notices = []
+
+        async def on_notice(msg):
+            notices.append(msg)
+
+        sup = live_session.NativeCaptureSupervisor(
+            spawn=spawn, reader_fn=_drain_to_pump, pump=pump, on_notice=on_notice,
+            backoff=(0,), max_fast_fails=5, fast_fail_window=5.0)
+        result = await asyncio.wait_for(
+            sup.run(should_stop=lambda: len(spawned) >= 2), timeout=2)
+        return result, pump.buffers["t"], notices
+
+    result, buf, notices = asyncio.run(run())
+    assert result == "stopped"
+    assert bytes(buf) == b"\x00\x00\x11\x11"          # frames from BOTH the dead and the respawned proc
+    assert any("重啟" in n for n in notices)
+
+
+def test_supervisor_gives_up_after_max_fast_fails():
+    async def run():
+        pump = live_session.WallClockPump({"t": ("mic", "我")}, {"t": io.BytesIO()}, time.time())
+
+        async def spawn():
+            return FakeHelperProc(out=b"")  # dies immediately, every time
+
+        gave_up = []
+
+        async def on_give_up():
+            gave_up.append(True)
+
+        sup = live_session.NativeCaptureSupervisor(
+            spawn=spawn, reader_fn=_drain_to_pump, pump=pump, on_give_up=on_give_up,
+            backoff=(0,), max_fast_fails=3, fast_fail_window=5.0)
+        result = await asyncio.wait_for(sup.run(should_stop=lambda: False), timeout=2)
+        return result, gave_up, sup.gave_up
+
+    result, gave_up, flag = asyncio.run(run())
+    assert result == "gave_up"
+    assert gave_up == [True]
+    assert flag is True
+
+
+def test_supervisor_does_not_respawn_once_should_stop():
+    async def run():
+        pump = live_session.WallClockPump({"t": ("mic", "我")}, {"t": io.BytesIO()}, time.time())
+        spawn_count = []
+
+        async def spawn():
+            spawn_count.append(1)
+            return FakeHelperProc(out=b"")
+
+        sup = live_session.NativeCaptureSupervisor(spawn=spawn, reader_fn=_drain_to_pump, pump=pump)
+        result = await sup.run(should_stop=lambda: True)
+        return result, spawn_count
+
+    result, spawn_count = asyncio.run(run())
+    assert result == "stopped"
+    assert spawn_count == [1]  # the initial spawn ran once -- no respawn attempted
+
+
+def test_supervisor_terminate_before_any_spawn_is_a_noop():
+    sup = live_session.NativeCaptureSupervisor(spawn=None, reader_fn=None, pump=None)
+    sup.terminate()  # must not raise -- nothing to terminate yet
+
+
+def test_supervisor_forwards_stderr_lines():
+    async def run():
+        pump = live_session.WallClockPump({"t": ("mic", "我")}, {"t": io.BytesIO()}, time.time())
+        proc = FakeHelperProc(out=b"", err=["READY", "ERR NOPERM 需要螢幕錄製權限"])
+        lines = []
+
+        async def spawn():
+            return proc
+
+        async def on_stderr_line(s):
+            lines.append(s)
+
+        sup = live_session.NativeCaptureSupervisor(
+            spawn=spawn, reader_fn=_drain_to_pump, pump=pump, on_stderr_line=on_stderr_line)
+        await sup.run(should_stop=lambda: True)
+        return lines
+
+    lines = asyncio.run(run())
+    assert lines == ["ERR NOPERM 需要螢幕錄製權限"]  # READY is filtered out
+
+
 # --- consume() -----------------------------------------------------------
 
 def test_consume_feeds_session_and_emits_finals():

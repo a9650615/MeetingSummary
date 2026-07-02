@@ -71,6 +71,137 @@ async def pump_framed_stdout(stream_reader, pump):
         pump.feed(track, payload)
 
 
+async def pump_raw_stdout(stream_reader, pump, tag):
+    """Legacy unframed audiocap stdout (system-audio-only, no CLI flags) ->
+    pump, on a single fixed tag. Used by /ws/live's native_sys branch, which
+    only ever wants ONE native track (system) — the browser supplies mic
+    itself via getUserMedia, so there's no framing/demuxing to do here."""
+    while True:
+        data = await stream_reader.read(8192)
+        if not data:
+            break
+        pump.feed(tag, data)
+
+
+# Restart policy for a native audiocap helper that dies mid-session. macOS can
+# kill ScreenCaptureKit's SCStream at any time (SCStreamErrorDomain -3805 is
+# the common one — display sleep, screen lock, a WindowServer hiccup), which
+# now exits the whole helper (see swift/audiocap's didStopWithError) so
+# supervision only ever has to deal with "the process exited, respawn it".
+NATIVE_RESTART_BACKOFF_S = (0, 1, 2, 3, 3)   # delay before each successive respawn
+NATIVE_MAX_FAST_FAILS = 5                     # consecutive "died soon after spawn" -> give up
+NATIVE_FAST_FAIL_WINDOW_S = 8.0               # a death sooner than this counts as "fast"
+
+
+class NativeCaptureSupervisor:
+    """Owns a native audiocap subprocess and respawns it (same argv) if it
+    exits while the session is still active, so a transient SCStream death
+    doesn't silently kill a track (or, if it's the only source, stall the
+    whole recording) for the rest of the meeting. WallClockPump.pad_to keeps
+    the resumed track wall-clock aligned across the gap automatically.
+
+    `spawn()` is an async callable returning a NEW asyncio.subprocess.Process
+    each call (same args) — pass `initial_proc` to reuse a process the caller
+    already spawned (e.g. so launch failure can still raise synchronously)
+    instead of spawning a redundant first attempt.
+
+    Backoff: instant retry, then progressively longer waits (NATIVE_RESTART_
+    BACKOFF_S). Gives up once NATIVE_MAX_FAST_FAILS consecutive deaths each
+    happen within NATIVE_FAST_FAIL_WINDOW_S of their own spawn — a revoked
+    permission fails immediately every time, while a transient drop typically
+    runs fine for a while first, so genuinely-intermittent failures across a
+    long meeting won't trip the give-up path even after several restarts."""
+
+    def __init__(self, spawn, reader_fn, pump, *, initial_proc=None,
+                 on_stderr_line=None, on_notice=None, on_give_up=None,
+                 backoff=NATIVE_RESTART_BACKOFF_S, max_fast_fails=NATIVE_MAX_FAST_FAILS,
+                 fast_fail_window=NATIVE_FAST_FAIL_WINDOW_S, label="音訊擷取",
+                 perm_hint="螢幕錄製權限"):
+        self.spawn = spawn
+        self.reader_fn = reader_fn
+        self.pump = pump
+        self.on_stderr_line = on_stderr_line
+        self.on_notice = on_notice
+        self.on_give_up = on_give_up
+        self.backoff = backoff
+        self.max_fast_fails = max_fast_fails
+        self.fast_fail_window = fast_fail_window
+        self.label = label
+        self.perm_hint = perm_hint
+        self.proc = initial_proc
+        self.gave_up = False
+
+    async def run(self, should_stop):
+        """Runs until should_stop() is true right after a death (checked
+        AFTER the dead helper's stdout hits EOF, so a stop requested moments
+        before a coincidental crash still short-circuits a pointless respawn)
+        or until give-up. Returns "stopped" | "gave_up"."""
+        fails = 0
+        proc = self.proc
+        while True:
+            if proc is None:
+                proc = await self.spawn()
+            self.proc = proc
+            spawned_at = time.time()
+            stderr_task = (asyncio.create_task(self._drain_stderr(proc))
+                           if self.on_stderr_line else None)
+            try:
+                await self.reader_fn(proc.stdout, self.pump)
+            finally:
+                if stderr_task:
+                    # A helper's most useful diagnostic line (NOPERM/-3805/etc)
+                    # often arrives right as it dies -- give the drain a brief
+                    # bounded chance to catch up to stderr's own EOF before
+                    # cutting it off, so the notice below reflects why.
+                    try:
+                        await asyncio.wait_for(stderr_task, timeout=0.5)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        stderr_task.cancel()
+            proc = None  # next loop respawns (or exits) -- this one is dead
+            if should_stop():
+                return "stopped"
+            alive_s = time.time() - spawned_at
+            fails = fails + 1 if alive_s < self.fast_fail_window else 1
+            if fails >= self.max_fast_fails:
+                self.gave_up = True
+                if self.on_notice:
+                    await self.on_notice(
+                        f"{self.label}多次失敗，已停止（請檢查{self.perm_hint}）")
+                if self.on_give_up:
+                    await self.on_give_up()
+                return "gave_up"
+            delay = self.backoff[min(fails - 1, len(self.backoff) - 1)]
+            if self.on_notice:
+                await self.on_notice(f"{self.label}中斷，已自動重啟")
+            if delay:
+                await asyncio.sleep(delay)
+
+    def terminate(self):
+        """Kill whichever process is currently running (best-effort, e.g. on
+        an explicit /live/stop) — idempotent, safe to call after it already
+        exited or after run() has been cancelled."""
+        if self.proc and self.proc.returncode is None:
+            try:
+                self.proc.terminate()
+            except ProcessLookupError:
+                pass
+
+    async def _drain_stderr(self, proc):
+        try:
+            while True:
+                ln = await proc.stderr.readline()
+                if not ln:
+                    break
+                s = ln.decode("utf8", "ignore").strip()
+                if not s or s == "READY":
+                    continue
+                await self.on_stderr_line(s)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001  (best-effort log/notice plumbing)
+            pass
+
+
 def make_speech_fn(vad_mode=None):
     """Silero VAD per track (own RNN state); None -> energy fallback. silero
     is the default — it endpoints far better than energy RMS (which reads
