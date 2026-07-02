@@ -29,6 +29,27 @@ def parse_frames(stream):
         yield track, payload
 
 
+async def aiter_frames(reader):
+    """Async counterpart to parse_frames, for anything with an asyncio-style
+    `await reader.readexactly(n)` (asyncio.StreamReader — e.g. a subprocess's
+    stdout — or a fake in tests). Same truncated-tail handling: the helper
+    dying mid-frame raises IncompleteReadError, which just ends the stream
+    rather than propagating."""
+    import asyncio
+
+    while True:
+        try:
+            header = await reader.readexactly(_HEADER.size)
+        except asyncio.IncompleteReadError:
+            return
+        track, length = _HEADER.unpack(header)
+        try:
+            payload = await reader.readexactly(length)
+        except asyncio.IncompleteReadError:
+            return
+        yield track, payload
+
+
 class SegmentWriter:
     """Append-only writer for one segment's two PCM tracks. Manifest is
     written on construction so a crash leaves recoverable metadata."""

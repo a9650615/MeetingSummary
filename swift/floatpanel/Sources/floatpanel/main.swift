@@ -4,14 +4,15 @@
 // quick-note field that appends to the meeting notes. Talks to the local
 // server; honors MEETING_PORT (default 8765).
 //
-// Native-start gap: mic capture uses the browser's getUserMedia and system
-// audio (even with the native ScreenCaptureKit helper) is driven by a
-// WebSocket the /live page's JS opens — there is no server endpoint today
-// that starts a recording without that page. So 開始錄音 here still opens
-// /live in the browser; the source picker's value is passed as a `source`
-// query param so the page can preselect it once it reads that param (it
-// does not yet — see app.py's _LIVE_JS). Until then this is a same-value
-// convenience, not a behavior change.
+// Browserless start: 開始錄音 calls POST /live/start directly when the server
+// reports native_start[source] == true (audiocap installed + the relevant
+// permission already granted — see /native/capability). The server spawns
+// audiocap itself and feeds it straight into the live pipeline, so no /live
+// page or getUserMedia is involved. If native start isn't available for the
+// chosen source (e.g. mic permission not granted yet, or audiocap missing),
+// this falls back to opening /live in the browser like before — the first
+// browser mic use, or a manual "螢幕錄製" grant + retry, is what flips
+// native_start to true afterwards.
 import AppKit
 import Combine
 import Foundation
@@ -41,25 +42,33 @@ final class Model: ObservableObject {
     @Published var note = ""
     @Published var hint = ""
     @Published var source: Source = .mic
-    @Published var systemAudioReady = false  // audiocap installed + permission granted
+    // Additive /native/capability field: which sources /live/start can drive
+    // right now (audiocap installed + the relevant permission already granted).
+    @Published var nativeStart: [String: Bool] = ["mic": false, "system": false, "both": false]
+    // A native session can fail AFTER /live/start already returned 200 (e.g.
+    // mic access denied when audiocap actually opens the input stream) — the
+    // HTTP call alone can't tell us that, so /live/state carries a best-effort
+    // notice for whatever's currently recording.
+    @Published var liveNotice = ""
     var mid: Int?
     var startedAt: Date?
 
     private func req(_ path: String, method: String = "GET", json: [String: Any]? = nil,
-                     done: ((Data?) -> Void)? = nil) {
+                     done: ((Data?, Int) -> Void)? = nil) {
         guard let url = URL(string: base + path) else { return }
         var r = URLRequest(url: url); r.httpMethod = method; r.timeoutInterval = 4
         if let j = json {
             r.setValue("application/json", forHTTPHeaderField: "Content-Type")
             r.httpBody = try? JSONSerialization.data(withJSONObject: j)
         }
-        URLSession.shared.dataTask(with: r) { d, _, _ in
-            DispatchQueue.main.async { done?(d) }
+        URLSession.shared.dataTask(with: r) { d, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            DispatchQueue.main.async { done?(d, code) }
         }.resume()
     }
 
     func poll() {
-        req("/live/state") { [weak self] data in
+        req("/live/state") { [weak self] data, _ in
             guard let self = self else { return }
             guard let d = data,
                   let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
@@ -72,6 +81,7 @@ final class Model: ObservableObject {
             self.recording = rec
             self.mid = o["mid"] as? Int
             self.title = rec ? ((o["title"] as? String) ?? "錄音中") : "待機"
+            self.liveNotice = (o["notice"] as? String) ?? ""
             if let lines = o["captions"] as? [String] {
                 self.captions = lines
             } else if let one = o["caption"] as? String, !one.isEmpty {
@@ -83,10 +93,12 @@ final class Model: ObservableObject {
     }
 
     func pollCapability() {
-        req("/native/capability") { [weak self] data in
+        req("/native/capability") { [weak self] data, _ in
             guard let self = self, let d = data,
                   let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
-            self.systemAudioReady = (o["audiocap"] as? Bool ?? false) && (o["granted"] as? Bool ?? false)
+            if let ns = o["native_start"] as? [String: Bool] {
+                self.nativeStart = ns  // absent on an old server -> stays all-false (safe default)
+            }
         }
     }
 
@@ -97,8 +109,24 @@ final class Model: ObservableObject {
     }
 
     func start() {
+        guard nativeStart[source.rawValue] ?? false else {
+            openInBrowser()
+            return
+        }
+        req("/live/start", method: "POST", json: ["source": source.rawValue]) { [weak self] _, code in
+            guard let self = self else { return }
+            if code != 200 {
+                self.openInBrowser()  // server declined (e.g. lost permission mid-flight) -> fall back
+            }
+            // success: no local state flip needed -- the next poll() picks up
+            // recording=true from /live/state, same as a browser session.
+        }
+    }
+
+    private func openInBrowser() {
         if let u = URL(string: base + "/live?source=\(source.rawValue)") { NSWorkspace.shared.open(u) }
     }
+
     func stop() { req("/live/stop", method: "POST") }
 
     func saveNote() {
@@ -131,10 +159,17 @@ struct PanelView: View {
                     ForEach(Source.allCases) { s in Text(s.label).tag(s) }
                 }
                 .pickerStyle(.segmented).labelsHidden()
-                if m.source != .mic && !m.systemAudioReady {
-                    Text("系統音需在瀏覽器分享畫面時勾選「分享音訊」（未偵測到原生擷取權限）")
+                if !(m.nativeStart[m.source.rawValue] ?? false) {
+                    Text(m.source == .mic
+                        ? "尚未偵測到麥克風權限，將於瀏覽器開啟（首次使用會請求授權）"
+                        : "尚未偵測到原生系統音擷取權限，將於瀏覽器分享畫面時勾選「分享音訊」")
                         .font(.caption2).foregroundStyle(.orange)
                 }
+            }
+            if !m.liveNotice.isEmpty {
+                // e.g. mic/screen-recording denied AFTER /live/start already
+                // returned success — this is the only place that shows up.
+                Text("⚠️ " + m.liveNotice).font(.caption2).foregroundStyle(.orange).lineLimit(2)
             }
             captionList
             TextField("現場筆記… (Enter 記下)", text: $m.note)

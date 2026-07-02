@@ -23,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 
 import asr
 import backends  # module-level: every `backends.x` call resolves (avoids per-fn import + NameError)
-from live import TwoPassSession
+import live_session  # shared pipeline plumbing: /ws/live (browser) + /live/start (native)
 from summarize import summarize
 
 from webassets import (  # static CSS/JS/PWA assets (presentation, no logic)
@@ -901,6 +901,11 @@ _LIVE = _shell("Live · MeetingSummary", _LIVE_BODY, script=_LIVE_JS, back=True)
 class MeetingIn(BaseModel):
     title: str
     lang: str = "zh-TW"
+
+
+class LiveStartIn(BaseModel):
+    source: str = "mic"       # mic | system | both
+    diarize: bool = False
 
 
 class SummaryIn(BaseModel):
@@ -1866,6 +1871,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
     idle = {"last": time.time(), "live": 0}
     live_active = {}  # mid -> open live connections; surfaced in /jobs (global popout)
     live_stop = set()  # mids the float control panel asked to stop (server-side)
+    native_sessions = {}  # mid -> {"proc": audiocap Popen, "task": asyncio.Task, "notice": str|None}
+    # for a browserless /live/start recording — pump/task kept alive here (else GC'd)
     _panel = {"p": None}  # the floating control-panel subprocess (singleton)
 
     def _open_panel():
@@ -1938,41 +1945,61 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def live_state():
         # For the floating control panel: recording state + meeting title + the
         # latest caption line, so the panel can show live progress over any app.
+        # Works the same whether the session is a browser /ws/live connection or
+        # a native /live/start one — both just register in live_active.
         mids = list(live_active)
         mid = mids[0] if mids else None
         title = caption = None
         captions = []
+        notice = None
         if mid is not None:
             m = store.get_meeting(mid)
             title = m["title"] if m else None
             caption = store.latest_transcript(mid)
             captions = store.recent_transcripts(mid, 3)
+            sess = native_sessions.get(mid)
+            if sess is not None:
+                notice = sess["notice"]
         return {"recording": bool(mids), "mid": mid, "count": len(mids),
-                "title": title, "caption": caption, "captions": captions}
+                "title": title, "caption": caption, "captions": captions, "notice": notice}
 
     @app.get("/native/capability")
     def native_capability():
-        # Non-prompting probe: is audiocap installed AND Screen-Recording already granted?
-        # Uses --check mode (CGPreflightScreenCaptureAccess only — no dialog).
+        # Non-prompting probes: is audiocap installed, and is Screen-Recording /
+        # microphone access already granted? --check / --check-mic only preflight
+        # (CGPreflightScreenCaptureAccess / AVCaptureDevice.authorizationStatus) —
+        # no dialog. mic_granted + native_start are ADDITIVE (old panel builds that
+        # only read audiocap/granted keep working unchanged).
         import subprocess
+
+        def _probe(flag):
+            try:
+                p = subprocess.Popen([binp, flag], stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL)
+                try:
+                    out, _ = p.communicate(timeout=3)
+                    return out.strip() == b"GRANTED"
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.communicate()
+                    return False
+            except Exception:
+                return False
+
         binp = backends.audiocap_bin()
         if not binp:
-            return {"audiocap": False, "granted": False}
-        try:
-            p = subprocess.Popen(
-                [binp, "--check"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            )
-            try:
-                out, _ = p.communicate(timeout=3)
-                granted = out.strip() == b"GRANTED"
-            except subprocess.TimeoutExpired:
-                p.kill()
-                p.communicate()
-                granted = False
-        except Exception:
-            granted = False
-        return {"audiocap": True, "granted": granted}
+            return {"audiocap": False, "granted": False, "mic_granted": False,
+                    "native_start": {"mic": False, "system": False, "both": False}}
+        granted = _probe("--check")
+        mic_granted = _probe("--check-mic")
+        # native_start.mic doesn't gate on mic_granted: unlike Screen-Recording
+        # (which throws forever if you spawn cold without it — must be
+        # bootstrapped ahead via /native/request-permission), the mic TCC
+        # prompt fires reliably the first time audiocap actually opens the
+        # input stream. So mic is attemptable as soon as audiocap exists;
+        # system (and therefore both) still needs the real grant already.
+        return {"audiocap": True, "granted": granted, "mic_granted": mic_granted,
+                "native_start": {"mic": True, "system": granted, "both": granted}}
 
     @app.post("/native/request-permission")
     def native_request_permission():
@@ -2002,10 +2029,141 @@ def create_app(store, *, summary_backend, asr_backend=None,
             p.terminate()
         return {"granted": granted, "msg": msg or ("已授權" if granted else "尚未授權")}
 
+    @app.post("/live/start")
+    async def live_start(body: LiveStartIn):
+        # Browserless recording: the floatpanel's 開始 calls this directly — no
+        # /live page, no getUserMedia. The server spawns audiocap itself (framed
+        # <track><len><payload> protocol — recorder.py) and demuxes it straight
+        # into the SAME pipeline /ws/live uses (live_session.py), so a native
+        # session is a first-class citizen of live_active/live_stop/live_state,
+        # not a parallel code path.
+        if live_manager is None:
+            raise HTTPException(400, "no live backend")
+        source = body.source if body.source in ("mic", "system", "both") else "mic"
+        binp = backends.audiocap_bin()
+        if not binp:
+            raise HTTPException(400, "audiocap 未安裝（設定 → 加速 runtime → 安裝）")
+
+        import recorder  # noqa: PLC0415
+        flag = {"mic": "--mic", "system": "--system", "both": "--both"}[source]
+        t0 = time.time()
+        title = time.strftime("錄音 %Y-%m-%d %H:%M", time.localtime(t0))
+        mid = store.create_meeting(title, t0, "zh-TW")
+        conn_offset_ms = 0  # native sessions always start a fresh meeting, never resume
+        audio_dir = f"data/{mid}-{int(t0)}"
+        os.makedirs(audio_dir, exist_ok=True)
+        store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
+                          started_at=t0, duration_s=0, origin="recorded")
+
+        if source == "mic":
+            tracks = {recorder.TRACK_MIC: ("mic", "我")}
+        elif source == "system":
+            tracks = {recorder.TRACK_SYSTEM: ("system", "對方")}
+        else:
+            tracks = {recorder.TRACK_MIC: ("mic", "我"),
+                      recorder.TRACK_SYSTEM: ("system", "對方")}
+        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb") for tag, lbl in tracks.items()}
+
+        live_manager.set_language(None)  # auto-detect, same default as a fresh ws_live session
+        sessions = live_session.build_track_sessions(
+            tracks, live_manager=live_manager, live_interim_backend=live_interim_backend,
+            silence_ms=live_silence_ms, min_speech_ms=live_min_speech_ms,
+            interim_s=live_interim_s, max_utt_s=live_max_utt_s,
+            rms_threshold=live_rms_threshold, interim_duty=live_interim_duty)
+        if body.diarize:
+            live_session.enable_diarization(sessions, tracks, store)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binp, flag, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        except Exception as e:
+            for f in audio_files.values():
+                f.close()
+            raise HTTPException(400, f"audiocap 啟動失敗: {e}") from e
+
+        pump = live_session.WallClockPump(tracks, audio_files, t0)
+        idle["live"] += 1  # block idle-release while recording, like ws_live
+        live_active[mid] = 1
+        native_sessions[mid] = {"proc": proc, "task": None, "notice": None}
+        if store.get_setting("float_panel", "0") == "1":
+            _open_panel()
+
+        async def _reader():
+            await live_session.pump_framed_stdout(proc.stdout, pump)
+            # Helper stream ended (crashed / permission lost) — end the session
+            # like an explicit /live/stop rather than leaving it "recording" forever.
+            live_stop.add(mid)
+            pump.got.set()
+
+        async def _stderr():
+            try:
+                while True:
+                    ln = await proc.stderr.readline()
+                    if not ln:
+                        break
+                    s = ln.decode("utf8", "ignore").strip()
+                    if not s or s == "READY":
+                        continue
+                    print(f"audiocap (native /live/start {mid}): {s}", file=sys.stderr)
+                    if any(k in s for k in ("NOPERM", "ERR", "-3801", "TCC")):
+                        sess = native_sessions.get(mid)
+                        if sess is not None:
+                            sess["notice"] = s[:180]
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _should_stop():
+            if mid in live_stop:  # explicit /live/stop OR the helper stream ended (see _reader)
+                live_stop.discard(mid)
+                return True
+            return False
+
+        async def _on_stop():
+            if proc.returncode is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+
+        def _pop_notice():
+            fn = getattr(live_manager.backend, "pop_notice", None)
+            return fn() if fn else None
+
+        async def _run():
+            rtask = asyncio.create_task(_reader())
+            stask = asyncio.create_task(_stderr())
+            try:
+                await live_session.consume(
+                    pump, sessions, tracks, rec_on=lambda: False,
+                    emit=live_session.make_store_emit(mid, conn_offset_ms, store),
+                    should_stop=_should_stop,
+                    interim_lag_bytes=int(2 * live_interim_s * 16000) * 2,
+                    pop_notice=_pop_notice, on_stop=_on_stop)
+            finally:
+                rtask.cancel()
+                stask.cancel()
+                if proc.returncode is None:
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
+                pump.pad_to(time.time())
+                await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
+                for f in audio_files.values():
+                    f.close()
+                idle["live"] = max(0, idle["live"] - 1)
+                live_active.pop(mid, None)
+                native_sessions.pop(mid, None)
+                _touch()
+
+        native_sessions[mid]["task"] = asyncio.create_task(_run())
+        return {"id": mid, "source": source}
+
     @app.post("/live/stop")
     def live_stop_all():
         # Float panel "停止": ask every active live session to end (server-side);
-        # each ws_live loop sees its mid in live_stop, breaks, flushes + finalizes.
+        # each ws_live loop (browser) or /live/start task (native) sees its mid
+        # in live_stop, breaks, flushes + finalizes.
         n = 0
         for m in list(live_active):
             live_stop.add(m)
@@ -2327,35 +2485,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
         maxu = max(5.0, min(40.0, float(q.get("max_utt_s") or live_max_utt_s)))
         live_manager.set_language(q.get("lang") or None)  # ""/absent -> auto-detect
 
-        def _mk_speech_fn():  # silero VAD per track (own RNN state); None -> energy
-            # silero is the DEFAULT now — neural VAD endpoints far better than energy
-            # RMS (energy reads soft trailing syllables as silence -> cuts words). Only
-            # ?vad=energy opts out; missing/broken model falls back to energy.
-            if q.get("vad") == "energy":
-                return None
-            try:
-                from live import SileroVad
-                return SileroVad("models/silero_vad_v4.onnx")
-            except Exception as e:
-                print(f"silero vad unavailable, using energy: {e}", file=sys.stderr)
-                return None
-
-        # ANE live: run the interim preview ON THE ANE helper too (not the MLX
-        # whisper-small interim, which would spin the GPU). interim transcribes only
-        # the recent ~8s tail with adaptive duty pacing, so the warm ANE (RTF ~0.15)
-        # keeps up — giving GPU-like live captions (字幕邊說邊跳) while staying off
-        # the GPU. Non-ANE keeps the lightweight MLX interim.
         import backends as _bk  # noqa: PLC0415
-        ane_live = _bk.route(live_manager.current) == "ane"
-        interim_be = live_manager if ane_live else live_interim_backend
-        sessions = {tag: TwoPassSession(
-            backend=live_manager, interim_backend=interim_be,
-            sample_rate=16000, silence_ms=sil,
-            min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
-            max_utt_s=maxu, rms_threshold=live_rms_threshold,
-            interim_duty=live_interim_duty,
-            track=lbl[0], speech_fn=_mk_speech_fn()) for tag, lbl in tracks.items()}
-        buffers = {tag: bytearray() for tag in tracks}
+        sessions = live_session.build_track_sessions(
+            tracks, live_manager=live_manager, live_interim_backend=live_interim_backend,
+            silence_ms=sil, min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
+            max_utt_s=maxu, rms_threshold=live_rms_threshold, interim_duty=live_interim_duty,
+            vad_mode=q.get("vad"))
 
         # Save raw audio per track for the post-meeting diarization/playback pass.
         # Unique dir per connection (id + start ts): SQLite recycles deleted ids
@@ -2374,27 +2509,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # in past meetings (match the global speakers table -> real name live; unknown
         # voices stay 說話者N). Skip the 我/mic track (single person).
         if ws.query_params.get("diarize") == "1":
-            try:
-                import diarize as diar
-                extractor = diar.embedding_extractor()
-                thr = float(os.environ.get("LIVE_DIAR_THRESHOLD", "0.4"))
-                try:
-                    gthr = float(store.get_setting("speaker_threshold", "0.62"))
-                except (ValueError, TypeError):
-                    gthr = 0.62
-                rows = store.list_speakers()  # known voiceprints, read-only for live
-                for tag, (trk, spk) in tracks.items():
-                    if spk != "我":
-                        labeler = diar.live_speaker_labeler(
-                            extractor, rows, session_threshold=thr, match_threshold=gthr)
-                        # splitter labels each piece itself (owns the labeler), so a
-                        # single-speaker utterance returns one piece = the normal case,
-                        # and a multi-speaker one is split per turn. No separate
-                        # speaker_fn needed.
-                        sessions[tag].splitter = (
-                            lambda a, t, lf=labeler: diar.split_live_utterance(a, t, lf))
-            except Exception as e:
-                print(f"live diarize unavailable: {e}", file=sys.stderr)
+            # splitter labels each piece itself (owns the labeler), so a
+            # single-speaker utterance returns one piece = the normal case, and a
+            # multi-speaker one is split per turn. No separate speaker_fn needed.
+            live_session.enable_diarization(sessions, tracks, store)
 
         async def _emit(ev, label):
             track, speaker = label
@@ -2412,33 +2530,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
             else:
                 await ws.send_json({"type": "interim", **ev, "speaker": speaker})
 
-        # Wall-clock continuous recording: on every received chunk, pad EVERY track
-        # with silence up to now-t0, then append the chunk to its track. This makes
-        # all tracks the same length (= session duration) and on one shared clock,
-        # regardless of when each browser stream starts or how it's gated — so 我/對方
-        # timestamps and lengths line up. File + session buffer get the same bytes, so
-        # committed-bytes == file position == wall-clock (seek/highlight aligned).
+        # Wall-clock continuous recording: WallClockPump pads EVERY track with
+        # silence up to now-t0 on each feed, so all tracks stay the same length
+        # (= session duration) and on one shared clock, regardless of when each
+        # browser stream starts or how it's gated — so 我/對方 timestamps and
+        # lengths line up. Shared with the native /live/start pipeline.
         # ponytail: no lag-drop — it broke the invariant; small-q4 keeps up. Add a
         # smarter back-pressure cap only if a slow model makes the buffer balloon.
-        got = asyncio.Event()
+        pump = live_session.WallClockPump(tracks, audio_files, t0)
         closed = False
         # 純錄音 (record-only): capture + save PCM but run NO ASR — zero inference,
         # zero heat (for "電腦快炸" / quick capture). Re-transcribe later. Hot-
         # toggleable mid-recording via a {type:'mode'} control message.
         rec = {"on": ws.query_params.get("record_only") == "1"}
         interim_lag_bytes = int(2 * live_interim_s * 16000) * 2
-        written = {tag: 0 for tag in tracks}  # bytes laid down per track (wall-clock)
-
-        def _pad_to(now):
-            target = int((now - t0) * 16000) * 2
-            for tag in tracks:
-                gap = target - written[tag]
-                gap -= gap % 2
-                if gap > 0:
-                    sil = bytes(gap)
-                    audio_files[tag].write(sil)
-                    buffers[tag].extend(sil)
-                    written[tag] += gap
 
         async def receiver():
             nonlocal closed
@@ -2460,17 +2565,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     if data is None:
                         continue
                     tag, pcm = (data[0], data[1:]) if dual else (0, data)
-                    if tag not in buffers:
-                        continue
-                    _pad_to(time.time())          # keep all tracks at wall-clock
-                    audio_files[tag].write(pcm)
-                    buffers[tag].extend(pcm)
-                    written[tag] += len(pcm)
-                    got.set()
+                    pump.feed(tag, pcm)          # pads all tracks to wall-clock, wakes consumer
             except WebSocketDisconnect:
                 pass
             closed = True
-            got.set()
+            pump.got.set()
 
         rtask = asyncio.create_task(receiver())
         # Native system audio (ScreenCaptureKit): when ?native_sys=1, the SERVER
@@ -2493,11 +2592,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                             data = await proc.stdout.read(8192)
                             if not data:
                                 break
-                            _pad_to(time.time())
-                            audio_files[tag].write(data)
-                            buffers[tag].extend(data)
-                            written[tag] += len(data)
-                            got.set()
+                            pump.feed(tag, data)
                     except Exception as e:  # noqa: BLE001
                         print(f"native_sys reader stopped: {e}", file=sys.stderr)
 
@@ -2527,49 +2622,33 @@ def create_app(store, *, summary_backend, asr_backend=None,
             else:
                 await ws.send_json({"type": "notice",
                                     "msg": "原生系統音擷取不可用（缺 helper 或需螢幕錄製權限）"})
+
+        def _should_stop():
+            if mid in live_stop:  # remote stop — checked AFTER draining this round's buffers
+                live_stop.discard(mid)
+                return True
+            return False
+
+        async def _on_stop():
+            if audiocap_proc and audiocap_proc.returncode is None:
+                try:  # cut the native audio source so it stops feeding
+                    audiocap_proc.terminate()
+                except ProcessLookupError:
+                    pass
+
+        def _pop_notice():
+            fn = getattr(live_manager.backend, "pop_notice", None)
+            return fn() if fn else None
+
+        async def _on_notice(msg):
+            await ws.send_json({"type": "notice", "msg": msg})
+
         try:
-            while True:
-                await got.wait()
-                got.clear()
-                if closed:
-                    break
-                for tag, buf in buffers.items():
-                    if not buf:
-                        continue
-                    chunk = bytes(buf)
-                    buf.clear()
-                    if rec["on"]:
-                        continue  # 純錄音: PCM already saved; skip ASR (no inference)
-                    # Backpressure: if ASR fell behind (e.g. continuous system audio
-                    # vs a saturated ANE), transcribe only the most recent ~45s — the
-                    # full audio is already on disk for re-transcribe. Bounds per-feed
-                    # work so the consumer can't backlog into a hang / un-stoppable loop.
-                    MAXB = 45 * 16000 * 2
-                    if len(chunk) > MAXB:
-                        print(f"live ASR backlog {len(chunk)//32000}s -> trim (audio saved)",
-                              file=sys.stderr)
-                        chunk = chunk[-MAXB:]
-                    want_interim = len(chunk) <= interim_lag_bytes
-                    try:
-                        events = await run_in_threadpool(
-                            sessions[tag].feed, chunk, want_interim)
-                        for ev in events:
-                            await _emit(ev, tracks[tag])
-                    except WebSocketDisconnect:
-                        raise
-                    except Exception as e:  # transient ASR error -> keep going
-                        print(f"live consumer error (continuing): {e}", file=sys.stderr)
-                pop_notice = getattr(live_manager.backend, "pop_notice", None)
-                if pop_notice and (msg := pop_notice()):
-                    await ws.send_json({"type": "notice", "msg": msg})
-                if mid in live_stop:  # remote stop — AFTER draining this round's buffers
-                    live_stop.discard(mid)
-                    if audiocap_proc and audiocap_proc.returncode is None:
-                        try:  # cut the native audio source so it stops feeding
-                            audiocap_proc.terminate()
-                        except ProcessLookupError:
-                            pass
-                    break
+            await live_session.consume(
+                pump, sessions, tracks, rec_on=lambda: rec["on"], emit=_emit,
+                should_stop=_should_stop, interim_lag_bytes=interim_lag_bytes,
+                on_notice=_on_notice, pop_notice=_pop_notice, on_stop=_on_stop,
+                should_abort=lambda: closed)
         finally:
             rtask.cancel()
             if nrtask:
@@ -2581,23 +2660,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     audiocap_proc.terminate()
                 except ProcessLookupError:
                     pass
-            _pad_to(time.time())  # equalize track lengths to the final wall-clock
-            for tag, s in sessions.items():
-                # Timeout the final flush: a wedged backend must NOT hang stop forever
-                # (that left idle["live"] > 0 = "stop didn't stop" + a stuck thread that
-                # blocks later operations). The backend's own watchdog reaps the thread.
-                try:
-                    evs = await asyncio.wait_for(run_in_threadpool(s.flush), timeout=15)
-                except Exception as e:  # noqa: BLE001  (TimeoutError or backend error)
-                    print(f"live flush skipped ({tag}): {e}", file=sys.stderr)
-                    evs = []
-                for ev in evs:
-                    if ev["kind"] == "final":  # audio-position offset, not wall-clock
-                        spk = ev.get("speaker") or tracks[tag][1]
-                        store.add_transcript(mid, "live", tracks[tag][0],
-                                             ev["start_ms"] + conn_offset_ms,
-                                             ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
-                                             spk, ev["text"])
+            pump.pad_to(time.time())  # equalize track lengths to the final wall-clock
+            await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
             for f in audio_files.values():
                 f.close()
             idle["live"] = max(0, idle["live"] - 1)

@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import struct
@@ -5,6 +6,7 @@ import struct
 import wave
 
 from recorder import (
+    aiter_frames,
     parse_frames,
     pcm_duration_s,
     pcm_to_wav,
@@ -72,6 +74,33 @@ def test_record_stream_writes_both_tracks(tmp_path):
     )
     assert (tmp_path / "system.pcm").read_bytes() == b"\x01\x02"
     assert (tmp_path / "mic.pcm").read_bytes() == b"\xaa\xbb"
+
+
+def test_aiter_frames_yields_tagged_payloads():
+    # Async counterpart of parse_frames, fed from a real asyncio.StreamReader —
+    # the same type an audiocap subprocess's stdout is (asyncio.subprocess.PIPE).
+    async def run():
+        reader = asyncio.StreamReader()
+        reader.feed_data(frame(TRACK_SYSTEM, b"\x01\x02") + frame(TRACK_MIC, b"\x03\x04\x05"))
+        reader.feed_eof()
+        return [f async for f in aiter_frames(reader)]
+
+    assert asyncio.run(run()) == [
+        (TRACK_SYSTEM, b"\x01\x02"),
+        (TRACK_MIC, b"\x03\x04\x05"),
+    ]
+
+
+def test_aiter_frames_stops_on_truncated_tail():
+    async def run():
+        reader = asyncio.StreamReader()
+        good = frame(TRACK_SYSTEM, b"\xaa\xbb")
+        truncated = struct.pack("<BI", TRACK_MIC, 10) + b"\x01\x02"
+        reader.feed_data(good + truncated)
+        reader.feed_eof()
+        return [f async for f in aiter_frames(reader)]
+
+    assert asyncio.run(run()) == [(TRACK_SYSTEM, b"\xaa\xbb")]
 
 
 def test_pcm_to_wav_roundtrips(tmp_path):

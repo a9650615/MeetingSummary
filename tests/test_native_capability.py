@@ -22,11 +22,12 @@ def test_capability_no_helper(tmp_path, monkeypatch):
     r = client.get("/native/capability")
     assert r.status_code == 200
     body = r.json()
-    assert body == {"audiocap": False, "granted": False}
+    assert body == {"audiocap": False, "granted": False, "mic_granted": False,
+                     "native_start": {"mic": False, "system": False, "both": False}}
 
 
 def test_capability_helper_granted(tmp_path, monkeypatch, tmp_path_factory):
-    # audiocap present, --check exits 0 and prints GRANTED.
+    # audiocap present, --check/--check-mic both exit 0 and print GRANTED.
     fake_bin = tmp_path_factory.mktemp("bin") / "audiocap"
     fake_bin.write_text("#!/bin/sh\necho GRANTED\nexit 0\n")
     fake_bin.chmod(0o755)
@@ -35,11 +36,12 @@ def test_capability_helper_granted(tmp_path, monkeypatch, tmp_path_factory):
     r = client.get("/native/capability")
     assert r.status_code == 200
     body = r.json()
-    assert body == {"audiocap": True, "granted": True}
+    assert body == {"audiocap": True, "granted": True, "mic_granted": True,
+                     "native_start": {"mic": True, "system": True, "both": True}}
 
 
 def test_capability_helper_denied(tmp_path, monkeypatch, tmp_path_factory):
-    # audiocap present, --check exits 1 and prints DENIED.
+    # audiocap present, --check/--check-mic both exit 1 and print DENIED.
     fake_bin = tmp_path_factory.mktemp("bin") / "audiocap"
     fake_bin.write_text("#!/bin/sh\necho DENIED\nexit 1\n")
     fake_bin.chmod(0o755)
@@ -48,7 +50,11 @@ def test_capability_helper_denied(tmp_path, monkeypatch, tmp_path_factory):
     r = client.get("/native/capability")
     assert r.status_code == 200
     body = r.json()
-    assert body == {"audiocap": True, "granted": False}
+    # native_start.mic stays True even when mic_granted is False: the mic TCC
+    # prompt is reliable on first real use, unlike screen-recording, so mic
+    # start is attemptable as soon as audiocap exists (see native_capability).
+    assert body == {"audiocap": True, "granted": False, "mic_granted": False,
+                     "native_start": {"mic": True, "system": False, "both": False}}
 
 
 def test_capability_helper_timeout(tmp_path, monkeypatch, tmp_path_factory):
@@ -72,3 +78,4 @@ def test_capability_helper_timeout(tmp_path, monkeypatch, tmp_path_factory):
     body = r.json()
     assert body["audiocap"] is True
     assert body["granted"] is False
+    assert body["mic_granted"] is False
