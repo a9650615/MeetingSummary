@@ -140,6 +140,52 @@ def test_live_stop_terminates_a_running_native_session(tmp_path, monkeypatch):
     assert store.get_meeting(mid) is not None
 
 
+def test_live_state_includes_started_at_for_attach_on_load(tmp_path, monkeypatch):
+    # /live page attach-on-load needs the session's real start time (not
+    # page-load time) to show a correct elapsed timer after a refresh.
+    script = (
+        "import struct, sys, time\n"
+        f"frame = struct.pack('<BI', {recorder.TRACK_MIC}, 2) + b'\\x00\\x00'\n"
+        "while True:\n"
+        "    sys.stdout.buffer.write(frame)\n"
+        "    sys.stdout.buffer.flush()\n"
+        "    time.sleep(0.05)\n"
+    )
+    app, store = _make_app(tmp_path, monkeypatch, script)
+
+    with TestClient(app) as c:
+        t0 = time.time()
+        r = c.post("/live/start", json={"source": "mic"})
+        mid = r.json()["id"]
+        st = c.get("/live/state").json()
+        assert st["mid"] == mid
+        assert st["started_at"] == store.get_meeting(mid)["created_at"]
+        assert abs(st["started_at"] - t0) < 5  # sanity: not None, roughly "now"
+
+        c.post("/live/stop")
+        assert _wait_until(lambda: c.get("/live/state").json()["recording"] is False)
+
+    # idle: no active session -> no started_at
+    assert c.get("/live/state").json()["started_at"] is None
+
+
+def test_meeting_transcripts_after_returns_only_newer_rows(tmp_path):
+    store = Store(tmp_path / "m.db")
+    app = create_app(store, summary_backend=lambda p: "x", asr_backend=None)
+    mid = store.create_meeting("t", time.time(), "zh-TW")
+    id1 = store.add_transcript(mid, "live", "mic", 0, 100, "我", "hello")
+    store.add_transcript(mid, "live", "mic", 100, 200, "我", "world")
+
+    with TestClient(app) as c:
+        rows = c.get(f"/meetings/{mid}/transcripts").json()["rows"]
+        assert [r["text"] for r in rows] == ["hello", "world"]
+
+        rows_after = c.get(f"/meetings/{mid}/transcripts?after={id1}").json()["rows"]
+        assert [r["text"] for r in rows_after] == ["world"]
+
+        assert c.get("/meetings/999999/transcripts").status_code == 404
+
+
 def test_live_start_both_tracks_creates_two_pcm_files(tmp_path, monkeypatch):
     frame = (struct.pack("<BI", recorder.TRACK_MIC, 2) + b"\x00\x00" +
              struct.pack("<BI", recorder.TRACK_SYSTEM, 2) + b"\x00\x00")

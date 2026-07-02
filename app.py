@@ -633,6 +633,17 @@ const C=document.getElementById('caption'), L=document.getElementById('live');
 const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
 const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
 const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
+function colored(speaker){ return COLORS[speaker]||'#444'; }
+function appendFinalLine(speaker, text, tstr){
+  const line=document.createElement('div'); line.className='tline';
+  const ts=document.createElement('span'); ts.className='ts'; ts.textContent=tstr;
+  const bd=document.createElement('span');
+  if(speaker){const w=document.createElement('b'); w.className='who';
+    w.style.color=colored(speaker); w.textContent=speaker+'：'; bd.appendChild(w);}
+  bd.appendChild(document.createTextNode(text));
+  line.appendChild(ts); line.appendChild(bd);
+  T.insertAdjacentElement('afterbegin', line);  // newest on top, below #live
+}
 
 // Native floatpanel opens /live?source=<mic|system|both> — honor it on load.
 {const q=new URLSearchParams(location.search).get('source');
@@ -653,6 +664,40 @@ function recUiStop(){
   startBtn.style.display=''; stopBtn.style.display='none';
   const rs=document.getElementById('recstatus'); if(rs) rs.style.display='none';
   const ml=document.getElementById('miclevel'); if(ml) ml.style.display='none';
+}
+// Attach-on-load: pick up a session already recording server-side (started from
+// the floatpanel, or from another still-open /live tab) instead of showing idle
+// UI after a refresh. Read-only: no getUserMedia, no websocket, no new meeting —
+// just polls /live/state + /meetings/{mid}/transcripts and renders like normal.
+let attached=false, attachTimer=null, attachLastId=0;
+function enterAttached(st){
+  attached=true; mid=st.mid; session=st.mid; attachLastId=0;
+  {const eh=document.getElementById('ehint'); if(eh) eh.style.display='none';}
+  T.innerHTML=''; L.textContent=''; C.textContent=st.caption||'';
+  S.textContent=' session #'+mid+' 錄製中(已連接現有錄音)…';
+  recUiStart();
+  if(st.started_at) recStart = st.started_at*1000;  // real session start, not page-load time
+  pollAttached();
+}
+function exitAttached(){
+  attached=false; mid=null; session=null;
+  clearTimeout(attachTimer); attachTimer=null;
+  recUiStop();
+}
+function pollAttached(){
+  if(!attached) return;
+  fetch('/meetings/'+mid+'/transcripts?after='+attachLastId).then(r=>r.json()).then(j=>{
+    (j.rows||[]).forEach(row=>{
+      attachLastId=row.id;
+      appendFinalLine(row.speaker, row.text, (row.start_ms/1000).toFixed(1)+'s');
+    });
+  }).catch(()=>{});
+  fetch('/live/state').then(r=>r.json()).then(st=>{
+    if(!attached) return;             // exited (e.g. 停止 clicked) while this was in flight
+    if(!st.recording || st.mid!==mid){ exitAttached(); return; }
+    if(st.caption) C.textContent = st.caption;
+    attachTimer=setTimeout(pollAttached, 2000);
+  }).catch(()=>{ if(attached) attachTimer=setTimeout(pollAttached, 2000); });
 }
 // Cheap mic-level meter: RMS from the same PCM already flowing through
 // onaudioprocess, painted onto a small CSS bar (no canvas/waveform). Throttled
@@ -797,9 +842,15 @@ function attachMixed(streamList, ratio){
 }
 
 startBtn.onclick = async () => {
-  if(ws||startBtn.disabled) return;       // guard double-start during the async permission window
-  {const eh=document.getElementById('ehint');if(eh)eh.style.display='none';}
+  if(ws||attached||startBtn.disabled) return;  // guard double-start during the async permission window
   startBtn.disabled=true;
+  // Another session may have started (another tab, or the floatpanel) since this
+  // page loaded — attach to it instead of spawning a parallel recording.
+  try {
+    const st = await fetch('/live/state').then(r=>r.json());
+    if(st.recording){ enterAttached(st); startBtn.disabled=false; return; }
+  } catch(e){ /* state probe failed -- fall through to a normal start */ }
+  {const eh=document.getElementById('ehint');if(eh)eh.style.display='none';}
   const source = document.getElementById('source').value;
   const nativeSys = document.getElementById('nativesys').checked;
   const dual = source==='dual';
@@ -828,7 +879,6 @@ startBtn.onclick = async () => {
   const ns = document.getElementById('nativesys').checked ? '&native_sys=1' : '';
   ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}${lang}${ro}${ns}`);
   ws.binaryType='arraybuffer';
-  function colored(speaker){ return COLORS[speaker]||'#444'; }
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
     if(m.type==='meeting'){ mid=m.id; session=m.id;  // bind session to this meeting
@@ -843,14 +893,7 @@ startBtn.onclick = async () => {
       const sp=m.speaker||'';
       C.textContent = m.text;
       const tstr = m.ts ? new Date(m.ts*1000).toLocaleTimeString() : (m.start_ms/1000).toFixed(1)+'s';
-      const line=document.createElement('div'); line.className='tline';
-      const ts=document.createElement('span'); ts.className='ts'; ts.textContent=tstr;
-      const bd=document.createElement('span');
-      if(sp){const w=document.createElement('b'); w.className='who';
-        w.style.color=colored(sp); w.textContent=sp+'：'; bd.appendChild(w);}
-      bd.appendChild(document.createTextNode(m.text));
-      line.appendChild(ts); line.appendChild(bd);
-      T.insertAdjacentElement('afterbegin', line);  // newest on top, below #live
+      appendFinalLine(sp, m.text, tstr);
       L.textContent='';                             // utterance committed
     }
     else if(m.type==='notice'){ S.textContent=' ⚡ '+m.msg;
@@ -877,6 +920,14 @@ document.getElementById('newsess').onclick = () => {
   S.textContent=' 已開新 session';
 };
 stopBtn.onclick = () => {
+  if(attached){
+    const m=mid;
+    fetch('/live/stop',{method:'POST'}).finally(()=>{
+      exitAttached();
+      S.textContent = m ? ` 已停止。可到首頁對 #${m} 產生摘要。` : ' 已停止。';
+    });
+    return;
+  }
   clearTimeout(noteTimer); saveNotes();  // flush any pending notes edit
   nodes.forEach(n=>n.disconnect()); nodes=[];
   streams.forEach(st => st.getTracks().forEach(t=>t.stop()));
@@ -893,6 +944,10 @@ fetch('/native/capability').then(r=>r.json()).then(j=>{
     document.getElementById('status').textContent=' ✅ 原生系統音可用，已自動啟用';
   }
 }).catch(()=>{});
+// Page load / refresh: a session may already be recording server-side (native
+// /live/start from the floatpanel, or another still-open /live tab) -- attach
+// to it instead of showing the idle 開始錄音 state.
+fetch('/live/state').then(r=>r.json()).then(st=>{ if(st.recording) enterAttached(st); }).catch(()=>{});
 """
 
 _LIVE = _shell("Live · MeetingSummary", _LIVE_BODY, script=_LIVE_JS, back=True)
@@ -1952,16 +2007,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
         title = caption = None
         captions = []
         notice = None
+        started_at = None
         if mid is not None:
             m = store.get_meeting(mid)
             title = m["title"] if m else None
+            started_at = m["created_at"] if m else None  # session start epoch, for /live attach-on-load's timer
             caption = store.latest_transcript(mid)
             captions = store.recent_transcripts(mid, 3)
             sess = native_sessions.get(mid)
             if sess is not None:
                 notice = sess["notice"]
         return {"recording": bool(mids), "mid": mid, "count": len(mids),
-                "title": title, "caption": caption, "captions": captions, "notice": notice}
+                "title": title, "caption": caption, "captions": captions, "notice": notice,
+                "started_at": started_at}
 
     @app.get("/native/capability")
     def native_capability():
@@ -2905,6 +2963,15 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if line:
             store.append_note(mid, line)
         return {"ok": True}
+
+    @app.get("/meetings/{mid}/transcripts")
+    def meeting_transcripts_after(mid: int, after: int = 0):
+        # For the /live page's attach-on-load: polls this to pick up finals that
+        # landed in the store from a session it didn't itself open a websocket
+        # for (native /live/start, or a session started in another tab).
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        return {"rows": _rows(store.transcripts_after(mid, after))}
 
     @app.post("/meetings/{mid}/finalize")
     def finalize_meeting(mid: int):

@@ -162,6 +162,14 @@ class Store:
             "ORDER BY id DESC LIMIT ?", (meeting_id, limit)).fetchall()
         return [f"{r['speaker']}：{r['text']}" for r in reversed(rows) if r["text"]]
 
+    def transcripts_after(self, meeting_id, after_id=0):
+        """Finalized lines with id > after_id, oldest first — for the /live page's
+        attach-on-load polling (pick up a session already recording server-side).
+        id order = insertion order, same rationale as recent_transcripts."""
+        return self.db.execute(
+            "SELECT * FROM transcripts WHERE meeting_id=? AND id>? ORDER BY id",
+            (meeting_id, after_id)).fetchall()
+
     def delete_transcript(self, transcript_id):
         self.db.execute("DELETE FROM transcripts WHERE id=?", (transcript_id,))
         self.db.commit()
