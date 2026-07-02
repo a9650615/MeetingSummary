@@ -21,6 +21,16 @@ import SwiftUI
 let port = ProcessInfo.processInfo.environment["MEETING_PORT"] ?? "8765"
 let base = "http://127.0.0.1:\(port)"
 
+// Single-instance guard: the server's in-memory Popen handle forgets us across
+// its restarts (we're detached via start_new_session), and nothing stops a
+// manual second launch — so hold an flock on a per-port lock file and quietly
+// exit if another panel already owns it. Lock auto-releases when we die.
+let lockPath = NSTemporaryDirectory() + "meetingsummary-floatpanel-\(port).lock"
+let lockFd = open(lockPath, O_CREAT | O_RDWR, 0o644)
+if lockFd < 0 || flock(lockFd, LOCK_EX | LOCK_NB) != 0 {
+    exit(0)  // another instance is running; it already shows the window
+}
+
 enum Source: String, CaseIterable, Identifiable {
     case mic, system, both
     var id: String { rawValue }
