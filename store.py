@@ -154,6 +154,14 @@ class Store:
             "ORDER BY id DESC LIMIT 1", (meeting_id,)).fetchone()
         return (f"{r['speaker']}：{r['text']}" if r and r["text"] else None) if r else None
 
+    def recent_transcripts(self, meeting_id, limit=3):
+        """Last `limit` finalized lines, oldest first — for the native panel's
+        multi-line live captions. Same id-order rationale as latest_transcript."""
+        rows = self.db.execute(
+            "SELECT speaker, text FROM transcripts WHERE meeting_id=? "
+            "ORDER BY id DESC LIMIT ?", (meeting_id, limit)).fetchall()
+        return [f"{r['speaker']}：{r['text']}" for r in reversed(rows) if r["text"]]
+
     def delete_transcript(self, transcript_id):
         self.db.execute("DELETE FROM transcripts WHERE id=?", (transcript_id,))
         self.db.commit()

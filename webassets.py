@@ -122,7 +122,16 @@ ul.meetings.picking .mact{display:none}
 .caption:empty{display:none}  /* no ugly black bar before the first caption */
 .liveline{color:var(--muted);font-size:17px;min-height:1.5em;margin:6px 2px 14px}
 .liveline:empty{display:none}
-.tline{padding:9px 2px;border-bottom:1px solid var(--line);display:flex;gap:12px}
+/* /live: prominent primary action + simple recording feedback (timer + pulsing dot + level bar) */
+.live-actionrow{display:flex;flex-wrap:wrap;align-items:center;gap:14px}
+.livebig{font-size:16px;padding:.85em 1.75em}
+.live-status{display:inline-flex;align-items:center;gap:9px;font-weight:750;color:var(--danger)}
+.live-dot{width:10px;height:10px;border-radius:50%;background:var(--danger);animation:livepulse 1.4s ease-in-out infinite}
+@keyframes livepulse{0%,100%{opacity:1}50%{opacity:.4}}
+.live-timer{font-variant-numeric:tabular-nums;font-size:15px}
+.live-level{width:110px;height:5px;border-radius:999px;background:var(--surface2);overflow:hidden}
+.live-level i{display:block;height:100%;width:0%;background:var(--accent);transition:width .08s linear}
+.tline{padding:11px 2px;border-bottom:1px solid var(--line);display:flex;gap:12px;line-height:1.55}
 .tline:last-child{border:0}
 .tline .ts{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap;padding-top:3px}
 .tline .who{font-weight:750}

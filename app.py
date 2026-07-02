@@ -535,7 +535,16 @@ def _models_page():
 _LIVE_BODY = """
 <h1>🔴 Live 即時逐字稿</h1>
 <div class=card>
-  <div class=row style="align-items:end">
+  <div class=live-actionrow>
+    <button class="btn primary livebig" id=start>● 開始錄音</button>
+    <button class="btn danger livebig" id=stop disabled style="display:none">■ 停止錄音</button>
+    <span class=live-status id=recstatus style="display:none">
+      <span class=live-dot></span>
+      <span class=live-timer id=rectimer>00:00</span>
+    </span>
+    <div class=live-level id=miclevel style="display:none"><i></i></div>
+  </div>
+  <div class=row style="margin-top:14px;align-items:end">
     <label class=fld>來源
       <select id=source>
         <option value="mic">麥克風(我)</option>
@@ -543,9 +552,6 @@ _LIVE_BODY = """
         <option value="both">兩者(混合)</option>
         <option value="dual">分軌(我 + 對方,分開標示)</option>
       </select></label>
-    <button class="btn primary" id=start>● 開始錄音</button>
-    <button class=btn id=stop disabled>停止</button>
-    <button class=btn id=newsess>新 session</button>
     <span class="muted small" id=status></span>
   </div>
   <details style="margin-top:14px">
@@ -595,12 +601,16 @@ _LIVE_BODY = """
       <label class=chk title="嘈雜環境降噪，於事後重新辨識時生效"><input type=checkbox id=denoise_live> 🧪 降噪(重新辨識時)</label>
       <label class=chk title="用原生 ScreenCaptureKit 擷取系統音(對方)，免每次跳瀏覽器分享框；首次需授權螢幕錄製"><input type=checkbox id=nativesys onchange="if(this.checked){const s=document.getElementById('status');s.textContent=' 請求螢幕錄製權限…';fetch('/native/request-permission',{method:'POST'}).then(r=>r.json()).then(j=>{s.textContent=j.granted?' ✅ 已授權系統音擷取':' ⚠️ '+(j.msg||'未授權，請到 系統設定→螢幕錄製 開啟')}).catch(()=>{s.textContent=' ⚠️ 權限請求失敗'})}"> 🖥️ 系統音原生擷取(免分享框)</label>
     </div>
+    <div class=row style="margin-top:12px">
+      <button class="btn small" id=newsess>🔄 新 session</button>
+    </div>
     <p class=hint style="margin:.7em 0 0">
-      <span id=curmodel></span> · 精校:<b id=accmodel>-</b><br>
-      系統音/兩者會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>;兩者建議戴耳機。模型可即時切換,免重啟。</p>
+      <span id=curmodel></span> · 精校:<b id=accmodel>-</b>
+      <span id=sharehint style="display:none"><br>系統音/兩者會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>;兩者建議戴耳機。</span>
+      模型可即時切換,免重啟。</p>
   </details>
 </div>
-<div class=panel style="margin-top:10px">
+<div class=card style="margin-top:10px">
   <label style="font-weight:600">📝 現場筆記
     <span class="muted small" style="font-weight:400">— 邊開會邊記，會成為摘要的可信參考（人名／日期／決議）</span></label>
   <textarea id=notes rows=3 placeholder="例：負責人 Amy、下次 7/3 前交初稿…（自動儲存）"
@@ -623,6 +633,49 @@ const C=document.getElementById('caption'), L=document.getElementById('live');
 const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
 const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
 const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
+
+// Native floatpanel opens /live?source=<mic|system|both> — honor it on load.
+{const q=new URLSearchParams(location.search).get('source');
+ if(['mic','system','both','dual'].includes(q)) document.getElementById('source').value=q;}
+// Recording state feedback: swap start/stop, run an mm:ss timer + pulsing dot.
+let recTimer=null, recStart=0;
+function fmtElapsed(s){s=Math.floor(s);return String(s/60|0).padStart(2,'0')+':'+String(s%60).padStart(2,'0');}
+function recUiStart(){
+  startBtn.style.display='none'; stopBtn.style.display='';
+  const rs=document.getElementById('recstatus'); if(rs) rs.style.display='inline-flex';
+  const ml=document.getElementById('miclevel'); if(ml) ml.style.display='';
+  recStart=Date.now(); clearInterval(recTimer);
+  const t=document.getElementById('rectimer'); if(t) t.textContent='00:00';
+  recTimer=setInterval(()=>{ if(t) t.textContent=fmtElapsed((Date.now()-recStart)/1000); },1000);
+}
+function recUiStop(){
+  clearInterval(recTimer); recTimer=null;
+  startBtn.style.display=''; stopBtn.style.display='none';
+  const rs=document.getElementById('recstatus'); if(rs) rs.style.display='none';
+  const ml=document.getElementById('miclevel'); if(ml) ml.style.display='none';
+}
+// Cheap mic-level meter: RMS from the same PCM already flowing through
+// onaudioprocess, painted onto a small CSS bar (no canvas/waveform). Throttled
+// to ~4-5 DOM writes/s so a small buffer at a high device sample rate can't
+// spam layout — the RMS math itself is unthrottled (a few adds, negligible).
+const levelBar=document.querySelector('#miclevel i');
+let _lvLast=0;
+function rmsOf(input){ let sum=0; for(let i=0;i<input.length;i++) sum+=input[i]*input[i]; return Math.sqrt(sum/input.length); }
+function pushLevel(rms){
+  const now=Date.now(); if(now-_lvLast<220) return; _lvLast=now;
+  if(levelBar) levelBar.style.width=Math.min(100, rms*400)+'%';
+}
+// Share-window hint only makes sense when the browser will actually prompt for
+// a screen/tab share (system or both, and not using native system-audio capture).
+function updateShareHint(){
+  const src=document.getElementById('source').value;
+  const native=document.getElementById('nativesys').checked;
+  const el=document.getElementById('sharehint');
+  if(el) el.style.display=(src==='system'||src==='both')&&!native ? '' : 'none';
+}
+document.getElementById('source').addEventListener('change', updateShareHint);
+document.getElementById('nativesys').addEventListener('change', updateShareHint);
+updateShareHint();
 const notesEl=document.getElementById('notes'), noteStat=document.getElementById('notestatus');
 let noteTimer;
 function saveNotes(){
@@ -706,9 +759,9 @@ function attach(stream, tag, ratio, gate){
   node.onaudioprocess = ev => {
     if(ws.readyState!==1) return;
     const input = ev.inputBuffer.getChannelData(0);
-    if(!gate){ sendFloat(input); return; }  // continuous (dual): one shared clock
-    let sum=0; for(let i=0;i<input.length;i++) sum+=input[i]*input[i];
-    const rms = Math.sqrt(sum/input.length);
+    if(!gate){ pushLevel(rmsOf(input)); sendFloat(input); return; }  // continuous (dual): one shared clock
+    const rms = rmsOf(input);
+    pushLevel(rms);
     if(rms > GATE){
       if(hangover===0){ pre.forEach(sendFloat); pre=[]; }  // flush pre-roll: save the onset
       hangover = 18;                                       // ~1.5s tail so finals fire
@@ -735,7 +788,9 @@ function attachMixed(streamList, ratio){
   });
   node.onaudioprocess = ev => {
     if(ws.readyState!==1) return;
-    sendPcm(toPcm16(ev.inputBuffer.getChannelData(0), ratio), null);
+    const input = ev.inputBuffer.getChannelData(0);
+    pushLevel(rmsOf(input));
+    sendPcm(toPcm16(input, ratio), null);
   };
   node.connect(gain);
   nodes.push(node);
@@ -811,8 +866,8 @@ startBtn.onclick = async () => {
   // Null ws + re-arm start on ANY close (manual stop, server-side float-panel stop,
   // dropped connection). Without this, the stale closed socket stays truthy and the
   // start guard `if(ws)` blocks every restart until a page reload.
-  ws.onclose = () => { ws=null; startBtn.disabled=false; stopBtn.disabled=true; };
-  startBtn.disabled=true; stopBtn.disabled=false;
+  ws.onclose = () => { ws=null; startBtn.disabled=false; stopBtn.disabled=true; recUiStop(); };
+  startBtn.disabled=true; stopBtn.disabled=false; recUiStart();
 };
 document.getElementById('newsess').onclick = () => {
   session=null; mid=null;       // next 開始 starts a fresh session
@@ -829,7 +884,7 @@ stopBtn.onclick = () => {
   ws=null;                          // synchronous: don't wait for onclose, else a fast stop->start is blocked
   if(ctx) ctx.close();
   S.textContent += mid ? ` 已停止。可到首頁對 #${mid} 產生摘要。` : ' 已停止。';
-  startBtn.disabled=false; stopBtn.disabled=true;
+  startBtn.disabled=false; stopBtn.disabled=true; recUiStop();
 };
 // Auto-check 系統音原生擷取 if audiocap is installed and permission already granted.
 fetch('/native/capability').then(r=>r.json()).then(j=>{
@@ -1580,8 +1635,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         + ((f"<div class=hint style='margin:-6px 0 12px'>🔁 本場認得："
             + "、".join(html.escape(n) for n in recognized)
             + " <a href='/speakers/manage'>管理語者</a></div>") if recognized else "")
-        + audio_card +
-        "<div class=card><h2 style='margin-top:0'>摘要</h2>"
+        + "<div class=card><h2 style='margin-top:0'>摘要</h2>"
         "<label class='muted small'>📝 筆記（摘要的可信參考：人名／日期／決議，自動儲存）</label>"
         "<textarea id=mnotes rows=2 placeholder='補充重點…' "
         "style='width:100%;box-sizing:border-box;font:inherit;padding:8px;"
@@ -1604,12 +1658,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<p class=hint style='margin:.6em 0 0'>※ 摘要只在按下按鈕時才產生。停止錄音不會自動完成。"
         "「多人分群」用聲紋把每條音軌(我/對方)各自拆成多位說話者(會後處理,需先有錄音)。</p>"
         f"<div id=out>{sums}</div></div>"
-        "<div class=card><div class=setrow style='margin-bottom:8px'>"
-        "<h2 style='margin:0'>截圖</h2>"
-        "<button class=btn id=shot>📸 截圖（擷取畫面）</button>"
-        "<span class='muted small' id=shotmsg></span></div>"
-        "<div id=shots class=shotgrid></div>"
-        "<p class=hint style='margin:.6em 0 0'>由瀏覽器擷取畫面（如投影片）附加到此會議；會跳出分享畫面選擇（瀏覽器自己的權限，免額外授權）。</p></div>"
+        + audio_card +
         "<div class=card><h2 style='margin-top:0'>逐字稿</h2>"
         "<div class=row style='margin-bottom:10px'>"
         "<select id=remodel>"
@@ -1640,7 +1689,13 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<button class=btn id=retr>重新語音辨識</button>"
         "<span class='muted small' id=remsg></span></div>"
         "<table class=tx><tr><th>時間</th><th>說話者</th><th>內容</th></tr>"
-        f"{rows}</table></div>")
+        f"{rows}</table></div>"
+        "<div class=card><div class=setrow style='margin-bottom:8px'>"
+        "<h2 style='margin:0'>截圖</h2>"
+        "<button class=btn id=shot>📸 截圖（擷取畫面）</button>"
+        "<span class='muted small' id=shotmsg></span></div>"
+        "<div id=shots class=shotgrid></div>"
+        "<p class=hint style='margin:.6em 0 0'>由瀏覽器擷取畫面（如投影片）附加到此會議；會跳出分享畫面選擇（瀏覽器自己的權限，免額外授權）。</p></div>")
     script = (
         "function _mdEsc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}"
         "function _mdHtml(t){const L=(t||'').split('\\n');let o=[],lt=null;"
@@ -1886,12 +1941,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
         mids = list(live_active)
         mid = mids[0] if mids else None
         title = caption = None
+        captions = []
         if mid is not None:
             m = store.get_meeting(mid)
             title = m["title"] if m else None
             caption = store.latest_transcript(mid)
+            captions = store.recent_transcripts(mid, 3)
         return {"recording": bool(mids), "mid": mid, "count": len(mids),
-                "title": title, "caption": caption}
+                "title": title, "caption": caption, "captions": captions}
 
     @app.get("/native/capability")
     def native_capability():
