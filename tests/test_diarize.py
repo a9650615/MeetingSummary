@@ -251,3 +251,68 @@ def test_live_speaker_labeler_promotes_session_cluster_to_named_voice():
     labels = [fn(b"x" * 4000) for _ in range(8)]
     assert labels[0] != "Alice"                         # first noisy sample: no individual match
     assert labels[-3:] == ["Alice", "Alice", "Alice"]    # promoted, and stays promoted
+
+
+# --- interleaved-speaker robustness: change-point boundaries + piece-confirm ---
+import array  # noqa: E402
+
+
+def _pcm(value, secs, sr=16000):
+    return array.array("h", [value] * int(secs * sr)).tobytes()
+
+
+def _emb_labeler():
+    """label_fn double like the real live_speaker_labeler: exposes embed +
+    peek_from_emb (always None = unknown, so ONLY change-point can split) +
+    a full-audio label_fn. Embedding is derived from the pcm sign: +value ->
+    voice A vector, -value -> voice B vector (orthogonal -> cosine 0)."""
+    def _vec(pcm):
+        a = np.frombuffer(pcm, dtype=np.int16)
+        return np.array([1.0, 0.0]) if a.mean() >= 0 else np.array([0.0, 1.0])
+    def fn(pcm):
+        return "A" if np.frombuffer(pcm, dtype=np.int16).mean() >= 0 else "B"
+    fn.embed = _vec
+    fn.peek_from_emb = lambda e: None          # never a confident named identity
+    fn.peek = lambda pcm: None
+    return fn
+
+
+def test_group_by_peek_change_point_splits_unknown_speakers():
+    # Two unknown speakers (peek None throughout) with orthogonal embeddings:
+    # change-point must still cut, where the old confident-name-only logic merged.
+    a, b = np.array([1.0, 0.0]), np.array([0.0, 1.0])
+    segs = [{"_peek": None, "_emb": a}, {"_peek": None, "_emb": a},
+            {"_peek": None, "_emb": b}, {"_peek": None, "_emb": b}]
+    diarize._group_by_peek(segs, change_sim=0.35)
+    assert [s["speaker"] for s in segs] == [0, 0, 1, 1]
+    # Without change_sim (embed absent) it stays merged — no false splits.
+    segs2 = [{"_peek": None, "_emb": a}, {"_peek": None, "_emb": b}]
+    diarize._group_by_peek(segs2, change_sim=None)
+    assert [s["speaker"] for s in segs2] == [0, 0]
+
+
+def test_confirm_pieces_merges_same_voice_keeps_distinct():
+    # pieces alternating A/A/B on 1s each; A-A must merge, B stays.
+    audio = _pcm(100, 1) + _pcm(100, 1) + _pcm(-100, 1)
+    embed = lambda pcm: (np.array([1.0, 0.0]) if np.frombuffer(pcm, np.int16).mean() >= 0
+                         else np.array([0.0, 1.0]))
+    pieces = [(0, 0.0, 1.0), (1, 1.0, 2.0), (2, 2.0, 3.0)]
+    out = diarize._confirm_pieces(audio, pieces, embed, merge_sim=0.62, sample_rate=16000)
+    assert len(out) == 2                                  # A+A merged, B kept
+    assert out[0][1] == 0.0 and out[0][2] == 2.0          # merged span covers both A pieces
+
+
+def test_split_live_utterance_change_point_splits_two_unknown():
+    # 3s voice A then 3s voice B, neither confidently named -> change-point splits.
+    audio = _pcm(100, 3) + _pcm(-100, 3)
+    parts = diarize.split_live_utterance(audio, "你好嗎。我很好。", _emb_labeler(), window_s=1.5)
+    assert len(parts) == 2
+    assert parts[0][0] == "A" and parts[1][0] == "B"
+
+
+def test_split_live_utterance_embed_single_speaker_stays_one():
+    # A single voice throughout must NOT be over-split by the change-point path.
+    audio = _pcm(100, 5)
+    parts = diarize.split_live_utterance(audio, "整段都是同一個人在講話。", _emb_labeler(), window_s=1.5)
+    assert len(parts) == 1
+    assert parts[0][0] == "A"

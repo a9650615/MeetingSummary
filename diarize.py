@@ -399,27 +399,25 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
                 return name
         return _label_for(sid)                       # unknown -> session-local cluster
 
-    def peek(audio):
-        # STATE-FREE identity guess for split_live_utterance's turn-boundary
-        # detection ONLY: returns a label when CONFIDENT (matches a named voice,
-        # or an ALREADY-ESTABLISHED session cluster from an earlier fn() commit),
-        # else None meaning "no opinion" — the caller treats that as a
-        # continuation of whichever speaker is already talking, NOT a new one.
-        # Crucially this NEVER spawns and never updates tr's centroids: letting
-        # every noisy 1.5s window independently run the full fn() (match-or-spawn)
-        # was the runaway-說話者N bug — a real speaker's own windows regularly
-        # dropped below both the 0.62 named and 0.4 session thresholds by chance,
-        # each spawning a brand-new cluster. Tried comparing raw window embeddings
-        # to each other / to a running mean instead of gating on confidence: still
-        # over-split a genuine single-speaker monologue in the majority of trials
-        # (short-window cosine noise dominates the signal). Defaulting uncertainty
-        # to "same speaker" instead is far cheaper than a spurious split — new
-        # identities are only ever created by fn() committing on a full
-        # utterance/piece, never by peek().
+    def embed(audio):
+        # STATE-FREE normalized embedding for a window (no spawn, no centroid
+        # update). None when too short to embed reliably. split_live_utterance
+        # uses these for change-point boundary detection between speakers that
+        # aren't (yet) a confidently-named/established identity.
         if len(audio) < min_bytes:
             return None
-        emb = np.asarray(extractor(audio), dtype=np.float32)
-        e = emb / (np.linalg.norm(emb) + 1e-9)
+        e = np.asarray(extractor(audio), dtype=np.float32)
+        return e / (np.linalg.norm(e) + 1e-9)
+
+    def peek_from_emb(e):
+        # Confident identity for a precomputed embedding: a named voice, or an
+        # ALREADY-ESTABLISHED session cluster. None = "no opinion" (treated as a
+        # continuation, never a new speaker). NEVER spawns/updates centroids —
+        # letting every noisy window run the full match-or-spawn fn() was the
+        # runaway-說話者N bug. New identities are only ever created by fn()
+        # committing on a full utterance/piece.
+        if e is None:
+            return None
         if known:
             name, _sim = match_speaker(e, known, match_threshold)
             if name is not None:
@@ -431,30 +429,72 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
                 return _label_for(best)
         return None
 
+    def peek(audio):
+        return peek_from_emb(embed(audio))
+
     fn.peek = peek
+    fn.embed = embed
+    fn.peek_from_emb = peek_from_emb
     return fn
 
 
-def _group_by_peek(segments):
+def _group_by_peek(segments, change_sim=None):
     """Assign local integer group ids from each window's '_peek' identity
-    (consumed here, not persisted): None ('no confident opinion') extends the
-    CURRENT group rather than starting a new one — bias toward NOT splitting,
-    since peek() never spawns and a genuinely distinct speaker still gets
-    detected once they cross a confidence threshold peek() trusts. A boundary is
-    only cut when a window confidently names a DIFFERENT identity than the last
-    confident one seen."""
-    gid, last_confident = 0, None
+    (consumed here, not persisted). Two boundary signals:
+
+      1. CONFIDENT NAME CHANGE — a window confidently names a DIFFERENT identity
+         than the last confident one seen (the original, safe signal). An
+         unconfident window (peek None) extends the current group, never splits.
+      2. CHANGE-POINT (only when change_sim is given + windows carry '_emb') —
+         a LARGE embedding jump between adjacent windows (cosine < change_sim)
+         marks a turn even between two speakers neither of which is a confident
+         named/established identity. This alone over-splits a noisy single
+         speaker (short-window cosine is noisy), so it's deliberately gated LOW
+         and every resulting split is re-checked at piece quality by
+         _confirm_pieces (which merges pieces that re-embed as the same voice).
+    """
+    gid, last_confident, prev_emb = 0, None, None
     for seg in segments:
         peeked = seg.pop("_peek", None)
-        if peeked is not None and last_confident is not None and peeked != last_confident:
+        emb = seg.pop("_emb", None)
+        cut = (peeked is not None and last_confident is not None and peeked != last_confident)
+        if not cut and change_sim is not None and prev_emb is not None and emb is not None:
+            cut = float(prev_emb @ emb) < change_sim
+        if cut:
             gid += 1
         if peeked is not None:
             last_confident = peeked
+        if emb is not None:
+            prev_emb = emb
         seg["speaker"] = gid
 
 
+def _confirm_pieces(audio, pieces, embed, merge_sim, sample_rate):
+    """Guard against over-splitting: re-embed each candidate piece on its FULL
+    (longer, cleaner) audio and merge adjacent pieces that come back as the SAME
+    voice (cosine >= merge_sim). Piece-quality audio embeds far more reliably
+    than the short windows that proposed the boundary, so this reliably undoes
+    spurious change-point splits while keeping real turns. pieces = [(gid, s, e)]."""
+    embs = []
+    for _gid, ps, pe in pieces:
+        pa = bytes(audio[int(ps * sample_rate) * 2:int(pe * sample_rate) * 2])
+        embs.append(embed(pa) if pa else None)
+    out = [list(pieces[0])]
+    out_emb = [embs[0]]
+    for i in range(1, len(pieces)):
+        g, ps, pe = pieces[i]
+        e, prev = embs[i], out_emb[-1]
+        if e is not None and prev is not None and float(e @ prev) >= merge_sim:
+            out[-1][2] = pe                      # same voice -> merge into previous piece
+        else:
+            out.append([g, ps, pe])
+            out_emb.append(e)
+    return [(g, ps, pe) for g, ps, pe in out]
+
+
 def split_live_utterance(audio, text, label_fn, *, window_s=1.5,
-                         sample_rate=16000, min_piece=0.6):
+                         sample_rate=16000, min_piece=0.6,
+                         change_sim=0.35, merge_sim=0.62):
     """Split ONE finalized live utterance into per-speaker pieces when >1 speaker
     alternates within it (paragraph mode / no silence gap between turns).
 
@@ -482,6 +522,8 @@ def split_live_utterance(audio, text, label_fn, *, window_s=1.5,
     if win_bytes <= 0 or len(audio) < 2 * win_bytes:   # too short to hold a turn change
         return [(label_fn(audio), text, 0, total_ms)]
     peek = getattr(label_fn, "peek", None)
+    embed = getattr(label_fn, "embed", None)
+    peek_from_emb = getattr(label_fn, "peek_from_emb", None)
     segments, pos = [], 0
     while pos < len(audio):
         chunk = bytes(audio[pos:pos + win_bytes])
@@ -490,23 +532,34 @@ def split_live_utterance(audio, text, label_fn, *, window_s=1.5,
             break
         st = pos / (sample_rate * 2)
         seg = {"start": st, "end": min(total_s, st + window_s)}
-        if peek is not None:
+        if embed is not None:
+            # One extraction per window: reuse it for BOTH the confident-identity
+            # peek and the change-point signal (no double embedding).
+            e = embed(chunk)
+            seg["_emb"] = e
+            seg["_peek"] = peek_from_emb(e) if peek_from_emb is not None else (
+                peek(chunk) if peek is not None else None)
+        elif peek is not None:
             seg["_peek"] = peek(chunk)
         else:
             seg["speaker"] = label_fn(chunk)
         segments.append(seg)
         pos += win_bytes
-    if peek is not None:
-        _group_by_peek(segments)
+    if peek is not None or embed is not None:
+        _group_by_peek(segments, change_sim=change_sim if embed is not None else None)
     pieces = _speaker_pieces(0.0, total_s, segments, min_piece=min_piece)
+    # Confirm change-point splits at piece quality: merge adjacent pieces that
+    # re-embed as the same voice (undoes noisy over-splits; keeps real turns).
+    if embed is not None and len(pieces) > 1:
+        pieces = _confirm_pieces(audio, pieces, embed, merge_sim, sample_rate)
     if len(pieces) <= 1:
-        if peek is not None:
+        if peek is not None or embed is not None:
             return [(label_fn(audio), text, 0, total_ms)]  # one turn -> decide on full audio
         spk = pieces[0][0] if pieces else (segments[0]["speaker"] if segments else None)
         return [(spk, text, 0, total_ms)]
     dur = total_s or 1.0
     texts = _split_text(text, [(pe - ps) / dur for _, ps, pe in pieces])
-    if peek is None:
+    if peek is None and embed is None:
         return [(spk, txt, int(ps * 1000), int(pe * 1000))
                 for (spk, ps, pe), txt in zip(pieces, texts)]
     out = []

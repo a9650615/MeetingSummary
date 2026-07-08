@@ -298,8 +298,18 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
     checked AFTER draining this round's buffers, so the last bit of audio
     still gets transcribed."""
     while True:
-        await pump.got.wait()
-        pump.got.clear()
+        # Wake on new audio OR on a 0.5s tick. The tick matters: a native
+        # source can start (helper alive, no error) yet stream ZERO frames --
+        # a mic engine that never fires its tap, or system audio before its
+        # first buffer. Without it consume() would block on pump.got forever
+        # and never see should_stop(), so /live/stop couldn't end the session
+        # (only killing the process would). Polling stop/abort each tick fixes
+        # that regardless of whether any audio ever arrives.
+        try:
+            await asyncio.wait_for(pump.got.wait(), timeout=0.5)
+            pump.got.clear()
+        except asyncio.TimeoutError:
+            pass
         if should_abort and should_abort():
             break
         for tag, buf in pump.buffers.items():

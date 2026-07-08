@@ -407,6 +407,19 @@ def _models_page():
            "<p class=hint style='margin:.6em 0 0'>開始錄音(含手動／快速錄音)時，自動開啟可置頂於其他 App 之上的"
            "原生小窗(狀態＋計時＋停止)。需先到下方「加速 runtime」安裝 <code>floatpanel</code>。</p></div>"
            if _apple_silicon() else "")
+        + ("<div class=card style='margin-top:12px'>"
+           "<label style='font-weight:600'>🎙️ 錄音預設（免每次重選）</label>"
+           "<div class=row style='margin-top:8px'>"
+           "<label>來源 <select id=live_source_opt>"
+           "<option value=mic>麥克風(我)</option>"
+           "<option value=system>系統音(對方)</option>"
+           "<option value=both>兩者混合</option>"
+           "<option value=dual>雙軌(我/對方分離)</option>"
+           "</select></label></div>"
+           "<label class=chk style='margin-top:.6em'><input type=checkbox id=live_nativesys_opt> "
+           "🖥️ 系統音用原生擷取（ScreenCaptureKit，免瀏覽器分享框）</label>"
+           "<p class=hint style='margin:.6em 0 0'>/live 錄音頁會記住這裡的預設；也可在錄音頁直接改，會自動存回。"
+           "原生擷取需先安裝 <code>audiocap</code> 並授權螢幕錄製。</p></div>")
         + "</section>"
 
         "<section id=sec-rt><h2>加速 runtime（.cpp · Metal）</h2>"
@@ -502,6 +515,12 @@ def _models_page():
     (function(){const f=document.getElementById('floatpanel_opt');if(!f)return;
       fetch('/settings/float_panel').then(r=>r.json()).then(j=>f.checked=j.value==='1');
       f.onchange=()=>fetch('/settings/float_panel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:f.checked?'1':'0'})});})();
+    (function(){const s=document.getElementById('live_source_opt');if(!s)return;
+      fetch('/settings/live_source').then(r=>r.json()).then(j=>{if(j.value)s.value=j.value;});
+      s.onchange=()=>fetch('/settings/live_source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
+    (function(){const n=document.getElementById('live_nativesys_opt');if(!n)return;
+      fetch('/settings/live_native_sys').then(r=>r.json()).then(j=>n.checked=j.value==='1');
+      n.onchange=()=>fetch('/settings/live_native_sys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:n.checked?'1':'0'})});})();
     function fmtB(b){if(b>=1e9)return (b/1e9).toFixed(2)+' GB';
       if(b>=1e6)return (b/1e6).toFixed(1)+' MB';
       if(b>=1e3)return (b/1e3).toFixed(0)+' KB';return b+' B';}
@@ -609,6 +628,13 @@ _LIVE_BODY = """
       <span id=sharehint style="display:none"><br>系統音/兩者會跳出分享視窗,請選螢幕或分頁並<b>勾選「分享音訊」</b>;兩者建議戴耳機。</span>
       模型可即時切換,免重啟。</p>
   </details>
+</div>
+<div id=permwarn style="display:none;margin-top:10px;padding:12px 14px;border-radius:10px;background:#3a1d1d;color:#ffb4b4;border:1px solid #7a2e2e">
+  <b>⚠️ <span id=permwarn_msg></span></b>
+  <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+    <button class="btn small" id=permwarn_open>⚙️ 開啟系統設定</button>
+    <button class="btn small" id=permwarn_retry>重試</button>
+  </div>
 </div>
 <div class=card style="margin-top:10px">
   <label style="font-weight:600">📝 現場筆記
@@ -756,6 +782,44 @@ const dnLive=document.getElementById('denoise_live');
 fetch('/settings/denoise').then(r=>r.json()).then(j=>dnLive.checked=j.value==='1').catch(()=>{});
 dnLive.onchange=()=>fetch('/settings/denoise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:dnLive.checked?'1':'0'})});
 
+// getUserMedia/getDisplayMedia can hang forever without throwing (mic/screen
+// permission wedged in the browser/OS). Without a bound, startBtn stays disabled
+// and 開始 is dead with no feedback ("按開始沒反應"). Race a timeout so a hang
+// surfaces an error and re-arms the button instead of silently wedging.
+function withTimeout(p, ms, msg){
+  return Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error(msg)), ms))]);
+}
+// Permission reminder banner: shown when a media grant is denied/wedged, with a
+// button that asks the server to open the right macOS Privacy pane (the browser
+// can't open x-apple.systempreferences: itself).
+let _permKind='mic';
+function showPermWarn(kind, msg){
+  _permKind=kind;
+  const w=document.getElementById('permwarn'); if(!w) return;
+  document.getElementById('permwarn_msg').textContent=msg;
+  document.getElementById('permwarn_open').textContent=(kind==='screen'?'⚙️ 開啟螢幕錄製設定':'⚙️ 開啟麥克風設定');
+  w.style.display='';
+}
+function hidePermWarn(){ const w=document.getElementById('permwarn'); if(w) w.style.display='none'; }
+document.getElementById('permwarn_open').onclick=()=>{
+  fetch('/open-settings?which='+_permKind,{method:'POST'}).catch(()=>{});
+};
+document.getElementById('permwarn_retry').onclick=()=>{ hidePermWarn(); startBtn.click(); };
+// Proactive: warn as soon as the chosen source needs the mic and it's already
+// denied at the browser level — no need to wait for a failed 開始 click.
+async function checkMicPerm(){
+  const src=document.getElementById('source').value;
+  const micInvolved = src==='mic'||src==='dual'||src==='both';
+  if(!micInvolved){ hidePermWarn(); return; }
+  if(!navigator.permissions||!navigator.permissions.query) return;
+  try{
+    const st=await navigator.permissions.query({name:'microphone'});
+    const apply=()=>{ if(st.state==='denied') showPermWarn('mic','麥克風權限被拒 — 開啟後重試'); else hidePermWarn(); };
+    apply(); st.onchange=apply;
+  }catch(e){ /* Safari/Firefox may not support the 'microphone' query */ }
+}
+document.getElementById('source').addEventListener('change', checkMicPerm);
+checkMicPerm();
 async function getStreams(source){
   if(source==='mic') return [await navigator.mediaDevices.getUserMedia({audio:true})];
   if(source==='system'){
@@ -858,8 +922,21 @@ startBtn.onclick = async () => {
   // browser must NOT also capture it. dual -> browser does mic only; system -> none.
   let browserSrc = source;
   if(nativeSys) browserSrc = (source==='dual') ? 'mic' : (source==='system' ? 'none' : source);
-  try { streams = browserSrc==='none' ? [] : await getStreams(browserSrc); }
-  catch(e){ S.textContent=' 取得音源失敗: '+e.message; startBtn.disabled=false; return; }
+  try { streams = browserSrc==='none' ? [] : await withTimeout(getStreams(browserSrc), 12000,
+        '取得音源逾時 — 權限可能卡住，開啟系統設定確認後重試'); hidePermWarn(); }
+  catch(e){
+    startBtn.disabled=false;
+    const kind = browserSrc==='mic' ? 'mic' : 'screen';  // display sources -> screen recording pane
+    let msg;
+    if(e.name==='NotAllowedError'||e.name==='SecurityError')
+      msg = kind==='screen' ? '螢幕錄製權限被拒 — 開啟後重試' : '麥克風權限被拒 — 開啟後重試';
+    else if(e.name==='NotFoundError'||e.name==='DevicesNotFoundError')
+      msg = '找不到麥克風/音源裝置 — 確認已接上並啟用';
+    else msg = e.message || '取得音源失敗';
+    S.textContent=' ⚠️ '+msg;
+    showPermWarn(kind, msg);
+    return;
+  }
   // Ask for a 16 kHz context so the browser's quality resampler does the work
   // (ratio≈1, no crude decimation). Falls back to the device rate if unsupported.
   try { ctx = new AudioContext({sampleRate:16000}); }
@@ -937,13 +1014,30 @@ stopBtn.onclick = () => {
   S.textContent += mid ? ` 已停止。可到首頁對 #${mid} 產生摘要。` : ' 已停止。';
   startBtn.disabled=false; stopBtn.disabled=true; recUiStop();
 };
-// Auto-check 系統音原生擷取 if audiocap is installed and permission already granted.
+// Just report whether native system capture is available -- the checkbox state
+// itself comes from the saved 錄音預設 below, not forced on here.
 fetch('/native/capability').then(r=>r.json()).then(j=>{
-  if(j.audiocap && j.granted){
-    document.getElementById('nativesys').checked=true;
-    document.getElementById('status').textContent=' ✅ 原生系統音可用，已自動啟用';
-  }
+  if(j.audiocap && j.granted)
+    document.getElementById('status').textContent=' ✅ 原生系統音可用';
 }).catch(()=>{});
+// Restore saved recording defaults so the page never needs re-picking. A URL
+// ?source= (floatpanel browser fallback) is a per-load override, so it wins.
+const _urlSrc=new URLSearchParams(location.search).get('source');
+if(!_urlSrc){
+  fetch('/settings/live_source').then(r=>r.json()).then(j=>{
+    if(j.value){ const s=document.getElementById('source'); s.value=j.value; updateShareHint(); checkMicPerm(); }
+  }).catch(()=>{});
+}
+fetch('/settings/live_native_sys').then(r=>r.json()).then(j=>{
+  document.getElementById('nativesys').checked=(j.value==='1'); updateShareHint();
+}).catch(()=>{});
+// Persist edits made on the page too, so last-used sticks (mirrors 設定).
+document.getElementById('source').addEventListener('change', e=>
+  fetch('/settings/live_source',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({value:e.target.value})}).catch(()=>{}));
+document.getElementById('nativesys').addEventListener('change', e=>
+  fetch('/settings/live_native_sys',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({value:e.target.checked?'1':'0'})}).catch(()=>{}));
 // Page load / refresh: a session may already be recording server-side (native
 // /live/start from the floatpanel, or another still-open /live tab) -- attach
 // to it instead of showing the idle 開始錄音 state.
@@ -1930,6 +2024,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
     # for a browserless /live/start recording — pump/task kept alive here (else GC'd)
     _panel = {"p": None}  # the floating control-panel subprocess (singleton)
 
+    def _reap_stale_audiocap():
+        # audiocap children spawned for a native session don't die when the
+        # server is SIGKILLed (macOS has no PDEATHSIG) — they reparent to init
+        # and keep the mic / SCStream open. A survivor starves the NEXT session's
+        # capture (engine.start() succeeds but the held device delivers nothing
+        # -> 0-byte mic.pcm) and outlives /live/stop, which only knows procs THIS
+        # server started. Reaping by binary path is safe whenever nothing is
+        # recording here: any audiocap still alive is then a stale orphan.
+        binp = backends.audiocap_bin()
+        if binp:
+            subprocess.run(["pkill", "-9", "-f", binp], capture_output=True)
+
+    _reap_stale_audiocap()  # boot: clear orphans left by a crashed predecessor
+
     def _open_panel():
         """Launch the native float panel if installed; idempotent (reuse if alive)."""
         binp = backends.floatpanel_bin()
@@ -2087,6 +2195,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
             p.terminate()
         return {"granted": granted, "msg": msg or ("已授權" if granted else "尚未授權")}
 
+    @app.post("/open-settings")
+    def open_settings(which: str = "mic"):
+        # Jump the user straight to the right macOS Privacy pane when a browser
+        # media permission is denied (the /live page can't open x-apple.
+        # systempreferences: itself — the browser blocks that scheme).
+        pane = {"mic": "Privacy_Microphone",
+                "screen": "Privacy_ScreenCapture"}.get(which, "Privacy_Microphone")
+        try:
+            subprocess.Popen(
+                ["open", f"x-apple.systempreferences:com.apple.preference.security?{pane}"])
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"open failed: {e}") from e
+        return {"opened": True, "pane": pane}
+
     @app.post("/live/start")
     async def live_start(body: LiveStartIn):
         # Browserless recording: the floatpanel's 開始 calls this directly — no
@@ -2233,6 +2355,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
         for m in list(live_active):
             live_stop.add(m)
             n += 1
+        if n == 0:
+            # Nothing tracked to stop, yet an orphaned audiocap from a crashed
+            # prior server may still be recording (and holding the device).
+            # "停止" must always actually stop — reap the orphan.
+            _reap_stale_audiocap()
         return {"stopping": n}
 
     @app.post("/floatpanel/open")
@@ -3188,7 +3315,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
         return {"deleted": name}
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
-                 "denoise": "0", "float_panel": "0"}
+                 "denoise": "0", "float_panel": "0",
+                 # /live recording defaults, so the page never needs re-picking:
+                 "live_source": "mic", "live_native_sys": "0"}
 
     @app.get("/settings/{key}")
     def get_setting_route(key: str):
@@ -3201,8 +3330,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if key not in _SETTINGS:
             raise HTTPException(404, "unknown setting")
         v = body.value
-        if key == "persist_speakers":
+        if key in ("persist_speakers", "live_native_sys"):
             v = "1" if v in ("1", "true", "on") else "0"
+        elif key == "live_source":
+            v = v if v in ("mic", "system", "both", "dual") else "mic"
         store.set_setting(key, v)
         return {"value": store.get_setting(key, _SETTINGS[key])}
 

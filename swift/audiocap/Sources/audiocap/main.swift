@@ -21,6 +21,7 @@
 // keeps streaming solo. Prints "READY" to stderr once at least one source is
 // live; "ERR <msg>" per failure (fatal only if NOTHING ended up capturing).
 import AVFoundation
+import CoreAudio
 import CoreGraphics
 import Foundation
 import ScreenCaptureKit
@@ -189,40 +190,207 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
 /// Microphone capture via AVAudioEngine, downsampled to 16 kHz mono int16 and
 /// written as FRAMED TRACK_MIC frames only (there's no legacy unframed mic
 /// mode — mic capture is new, so it always speaks the framed protocol).
-final class MicCapturer {
-    let engine = AVAudioEngine()
-    let writer: FrameWriter
+// System-audio capture via a Core Audio process tap (macOS 14.2+). Unlike
+// ScreenCaptureKit's SCStream — which needs a GUI (Aqua) session and drops with
+// -3805 when the server is launched detached — a process tap runs headless and
+// needs no Screen-Recording grant, so it works regardless of launch context.
+// Downmixes the global system mix to 16 kHz mono int16, matching the framed
+// protocol (or raw stdout for the legacy no-flag mode).
+@available(macOS 14.2, *)
+final class SystemTapCapturer {
+    let framed: Bool
+    let writer: FrameWriter?
+    let out = FileHandle.standardOutput
+    private var tapID = AudioObjectID(kAudioObjectUnknown)
+    private var aggID = AudioObjectID(kAudioObjectUnknown)
+    private var procID: AudioDeviceIOProcID?
+    private var converter: AVAudioConverter?
+    private var inFormat: AVAudioFormat?
+    private let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                          sampleRate: TARGET_SR, channels: 1, interleaved: true)!
+    var isRunning = false
 
-    init(writer: FrameWriter) {
+    init(framed: Bool, writer: FrameWriter?) {
+        self.framed = framed
         self.writer = writer
     }
 
+    func start() -> Bool {
+        // Global system mix, mono. Empty exclude-list captures everything; we emit
+        // no audio ourselves so there's nothing of ours to exclude.
+        let desc = CATapDescription(monoGlobalTapButExcludeProcesses: [])
+        desc.isPrivate = true
+        desc.muteBehavior = .unmuted
+        var tap = AudioObjectID(kAudioObjectUnknown)
+        var st = AudioHardwareCreateProcessTap(desc, &tap)
+        guard st == noErr, tap != kAudioObjectUnknown else {
+            err("系統音擷取初始化失敗 (tap \(st))"); return false
+        }
+        tapID = tap
+
+        var fmt = AudioStreamBasicDescription()
+        var sz = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var fmtAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat, mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        st = AudioObjectGetPropertyData(tapID, &fmtAddr, 0, nil, &sz, &fmt)
+        guard st == noErr, let inFmt = AVAudioFormat(streamDescription: &fmt),
+              let conv = AVAudioConverter(from: inFmt, to: outFormat) else {
+            err("系統音格式取得失敗 (\(st))"); return false
+        }
+        inFormat = inFmt
+        converter = conv
+
+        let aggDesc: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "MeetingSummary Tap",
+            kAudioAggregateDeviceUIDKey: "io.meetingsummary.aggregate",
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceTapListKey: [[
+                kAudioSubTapUIDKey: desc.uuid.uuidString,
+                kAudioSubTapDriftCompensationKey: true,
+            ]],
+        ]
+        var agg = AudioObjectID(kAudioObjectUnknown)
+        st = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &agg)
+        guard st == noErr, agg != kAudioObjectUnknown else {
+            err("系統音彙總裝置建立失敗 (\(st))"); return false
+        }
+        aggID = agg
+
+        let queue = DispatchQueue(label: "audiocap.systemtap")
+        st = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, queue) { [weak self] _, inData, _, _, _ in
+            self?.handle(inData)
+        }
+        guard st == noErr, let proc = procID else { err("系統音 IOProc 建立失敗 (\(st))"); return false }
+        st = AudioDeviceStart(aggID, proc)
+        guard st == noErr else { err("系統音擷取啟動失敗 (\(st))"); return false }
+        isRunning = true
+        return true
+    }
+
+    private func handle(_ inData: UnsafePointer<AudioBufferList>) {
+        guard let conv = converter, let inFmt = inFormat else { return }
+        let bytesPerFrame = inFmt.streamDescription.pointee.mBytesPerFrame
+        guard bytesPerFrame > 0 else { return }
+        let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inData))
+        guard let first = abl.first, let mData = first.mData else { return }
+        let inFrames = first.mDataByteSize / bytesPerFrame
+        guard inFrames > 0, let inBuf = AVAudioPCMBuffer(pcmFormat: inFmt, frameCapacity: inFrames) else { return }
+        inBuf.frameLength = inFrames
+        memcpy(inBuf.audioBufferList.pointee.mBuffers.mData, mData, Int(first.mDataByteSize))
+        let ratio = TARGET_SR / inFmt.sampleRate
+        let cap = AVAudioFrameCount(Double(inFrames) * ratio) + 32
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: cap) else { return }
+        var convErr: NSError?
+        // Feed this callback's buffer EXACTLY once: returning .haveData with the
+        // same buffer repeatedly makes the SRC re-consume it to fill the output,
+        // aliasing samples into a periodic warble (波波波波). .noDataNow after one
+        // feed lets it emit what it has; the persistent converter carries filter
+        // state to the next callback for a smooth stream.
+        var supplied = false
+        let status = conv.convert(to: outBuf, error: &convErr) { _, s in
+            if supplied { s.pointee = .noDataNow; return nil }
+            supplied = true
+            s.pointee = .haveData
+            return inBuf
+        }
+        guard status != .error, convErr == nil, let ch = outBuf.int16ChannelData else { return }
+        let n = Int(outBuf.frameLength)
+        guard n > 0 else { return }
+        let payload = Data(bytes: ch[0], count: n * MemoryLayout<Int16>.size)
+        if framed, let w = writer { w.write(track: TRACK_SYSTEM, payload: payload) }
+        else { out.write(payload) }
+    }
+
+    func stop() {
+        if let proc = procID, aggID != kAudioObjectUnknown {
+            AudioDeviceStop(aggID, proc)
+            AudioDeviceDestroyIOProcID(aggID, proc)
+        }
+        if aggID != kAudioObjectUnknown { AudioHardwareDestroyAggregateDevice(aggID) }
+        if tapID != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tapID) }
+    }
+
+    func err(_ m: String) { FileHandle.standardError.write("ERR \(m)\n".data(using: .utf8)!) }
+}
+
+// Mic capture via AVCaptureSession. AVAudioEngine's inputNode tap silently
+// never fires in this plain CLI process (start() succeeds + "READY", but no
+// buffers ever arrive) -- a known AVAudioEngine-outside-an-app limitation.
+// AVCaptureAudioDataOutput is the reliable capture path here, and its
+// audioSettings converts to 16 kHz mono int16 for us, so no manual resample.
+final class MicCapturer: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    let session = AVCaptureSession()
+    let writer: FrameWriter
+    // AGC: the raw AVCaptureSession mic has no auto-gain (unlike browser
+    // getUserMedia, which enabled it) — captured speech came in ~30x too quiet
+    // (rms ~80 vs ~2500, ~-52 dBFS), leaving only ~7 effective int16 bits so ASR
+    // degraded. Peak-normalize toward a healthy level with fast-attack/slow-
+    // release smoothing + a hard limiter. Never attenuate (quiet is the problem)
+    // and don't amplify the near-silence noise floor.
+    private var agcEnv: Float = 200
+
+    init(writer: FrameWriter) {
+        self.writer = writer
+        super.init()
+    }
+
     func start() throws {
-        let input = engine.inputNode
-        let inFormat = input.inputFormat(forBus: 0)
-        guard let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
-                                            sampleRate: TARGET_SR, channels: 1, interleaved: true),
-              let converter = AVAudioConverter(from: inFormat, to: outFormat) else {
-            throw NSError(domain: "audiocap.mic", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "format setup failed"])
+        guard let dev = AVCaptureDevice.default(for: .audio) else {
+            throw NSError(domain: "audiocap.mic", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "找不到麥克風裝置"])
         }
-        input.installTap(onBus: 0, bufferSize: 2048, format: inFormat) { [weak self] buffer, _ in
-            guard let self = self else { return }
-            let ratio = TARGET_SR / inFormat.sampleRate
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
-            guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: capacity) else { return }
-            var convErr: NSError?
-            let status = converter.convert(to: outBuf, error: &convErr) { _, outStatus in
-                outStatus.pointee = .haveData
-                return buffer
+        let devInput = try AVCaptureDeviceInput(device: dev)
+        guard session.canAddInput(devInput) else {
+            throw NSError(domain: "audiocap.mic", code: 4,
+                          userInfo: [NSLocalizedDescriptionKey: "無法加入麥克風輸入"])
+        }
+        session.addInput(devInput)
+        let out = AVCaptureAudioDataOutput()
+        // macOS honors an explicit PCM output format here -> deliver 16 kHz mono
+        // int16 straight to the delegate, matching the framed protocol's payload.
+        out.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: TARGET_SR,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        out.setSampleBufferDelegate(self, queue: DispatchQueue(label: "audiocap.mic"))
+        guard session.canAddOutput(out) else {
+            throw NSError(domain: "audiocap.mic", code: 5,
+                          userInfo: [NSLocalizedDescriptionKey: "無法加入音訊輸出"])
+        }
+        session.addOutput(out)
+        session.startRunning()
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        guard CMSampleBufferDataIsReady(sampleBuffer),
+              let bb = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        var len = 0
+        var ptr: UnsafeMutablePointer<Int8>?
+        guard CMBlockBufferGetDataPointer(bb, atOffset: 0, lengthAtOffsetOut: nil,
+                                          totalLengthOut: &len, dataPointerOut: &ptr) == noErr,
+              let p = ptr, len > 0 else { return }
+        let count = len / MemoryLayout<Int16>.size
+        p.withMemoryRebound(to: Int16.self, capacity: count) { s in
+            var peak: Float = 0
+            for i in 0..<count { let a = abs(Float(s[i])); if a > peak { peak = a } }
+            agcEnv += (peak > agcEnv ? 0.6 : 0.05) * (peak - agcEnv)   // fast attack, slow release
+            let gain: Float = agcEnv > 40 ? min(30.0, max(1.0, 22000.0 / agcEnv)) : 1.0
+            if gain > 1.01 {
+                for i in 0..<count {
+                    s[i] = Int16(max(-32767.0, min(32767.0, Float(s[i]) * gain)))
+                }
             }
-            guard status != .error, convErr == nil, let ch = outBuf.int16ChannelData else { return }
-            let n = Int(outBuf.frameLength)
-            guard n > 0 else { return }
-            let payload = Data(bytes: ch[0], count: n * MemoryLayout<Int16>.size)
-            self.writer.write(track: TRACK_MIC, payload: payload)
         }
-        try engine.start()
+        writer.write(track: TRACK_MIC, payload: Data(bytes: p, count: len))
     }
 }
 
@@ -266,6 +434,9 @@ if #available(macOS 13.0, *) {
     let wantSystem = hasSystemFlag || hasBothFlag || !anyModeFlag  // no flags = legacy default
     let framed = anyModeFlag
 
+    var micHold: MicCapturer?  // AVCaptureSession's delegate is unowned -> keep the
+                               // capturer alive past Task setup or the session stops.
+    var sysHold: AnyObject?    // same: the tap/IOProc must outlive Task setup.
     Task {
         let writer = framed ? FrameWriter() : nil
         var started = false
@@ -275,6 +446,7 @@ if #available(macOS 13.0, *) {
                 let mic = MicCapturer(writer: writer!)
                 do {
                     try mic.start()
+                    micHold = mic
                     started = true
                 } catch {
                     FileHandle.standardError.write("ERR mic \(error)\n".data(using: .utf8)!)
@@ -286,9 +458,22 @@ if #available(macOS 13.0, *) {
         }
         if wantSystem {
             // In --both mode, degrade instead of exiting if mic is already streaming.
-            let cap = Capturer(framed: framed, writer: writer)
-            await cap.start(fatalOnFail: !started)
-            if cap.isRunning { started = true }
+            if #available(macOS 14.2, *) {
+                // Core Audio process tap — headless, works even when the server is
+                // launched detached (SCStream would drop with -3805 there).
+                let tap = SystemTapCapturer(framed: framed, writer: writer)
+                if tap.start() {
+                    sysHold = tap
+                    started = true
+                } else if !started {
+                    FileHandle.standardError.write("ERR 沒有可用的音訊來源\n".data(using: .utf8)!)
+                    exit(1)
+                }
+            } else {
+                let cap = Capturer(framed: framed, writer: writer)
+                await cap.start(fatalOnFail: !started)
+                if cap.isRunning { started = true }
+            }
         }
         guard started else {
             FileHandle.standardError.write("ERR 沒有可用的音訊來源\n".data(using: .utf8)!)
