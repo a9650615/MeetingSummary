@@ -140,6 +140,12 @@ final class PanelSystemTapCapturer {
     private var inFormat: AVAudioFormat?
     private let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
                                           sampleRate: CAP_TARGET_SR, channels: 1, interleaved: true)!
+    // A tap started WITHOUT Screen & System Audio Recording permission streams
+    // buffers of exact zeros (no error) — indistinguishable from success unless
+    // we look at the samples. sawSignal flips true on the first non-zero sample;
+    // onFirstAudio fires once then, so the UI can say "真的在錄" vs "還沒收到音訊".
+    private(set) var sawSignal = false
+    var onFirstAudio: (() -> Void)?
 
     init(sink: WSFrameSink) { self.sink = sink }
 
@@ -212,6 +218,10 @@ final class PanelSystemTapCapturer {
         guard status != .error, convErr == nil, let ch = outBuf.int16ChannelData else { return }
         let n = Int(outBuf.frameLength)
         guard n > 0 else { return }
+        if !sawSignal {  // silent (unpermitted) tap = exact zeros; any non-zero = real audio
+            for i in 0..<n where ch[0][i] != 0 { sawSignal = true; break }
+            if sawSignal { let cb = onFirstAudio; DispatchQueue.main.async { cb?() } }
+        }
         sink.write(track: CAP_TRACK_SYSTEM, payload: Data(bytes: ch[0], count: n * MemoryLayout<Int16>.size))
     }
 
@@ -358,6 +368,10 @@ final class Model: ObservableObject {
         task.resume()
         let sink = WSFrameSink(task)
         self.sink = sink
+        // Indicator: "準備中" = socket up + asking permission + warming the
+        // capturers, but no real audio yet; flips to "● 錄音中" on the first
+        // non-zero sample from any track (see onFirstAudio / mic start).
+        self.hint = "準備中…"
 
         let wantMic = (source == .mic || source == .both)
         let wantSystem = (source == .system || source == .both)
@@ -368,7 +382,7 @@ final class Model: ObservableObject {
                     guard let self = self, self.wsTask === task else { return }  // not stopped meanwhile
                     if granted {
                         let mic = PanelMicCapturer(sink: sink)
-                        do { try mic.start(); self.micCap = mic }
+                        do { try mic.start(); self.micCap = mic; self.hint = "● 錄音中" }
                         catch { self.liveNotice = "麥克風擷取失敗: \(error.localizedDescription)" }
                     } else {
                         self.liveNotice = "需要麥克風權限：系統設定 → 隱私權與安全性 → 麥克風"
@@ -378,9 +392,38 @@ final class Model: ObservableObject {
         }
         if wantSystem {
             if #available(macOS 14.2, *) {
+                // A Core Audio system-audio tap started WITHOUT Screen & System
+                // Audio Recording permission streams pure silence (zeros, no
+                // error). Taps have no dedicated requestAccess, so trigger the
+                // Screen Recording prompt (same TCC gate) — it registers the app
+                // in the privacy pane and asks for consent. First grant needs a
+                // fresh tap, so tell the user to re-start after enabling.
+                if !CGPreflightScreenCaptureAccess() {
+                    _ = CGRequestScreenCaptureAccess()
+                    self.liveNotice = "請在 系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製 開啟 MeetingSummary，再重新開始錄音"
+                }
                 let sys = PanelSystemTapCapturer(sink: sink)
-                if sys.start() { self.sysCap = sys }
-                else { self.liveNotice = "系統音擷取啟動失敗（需授權／macOS 14.2+）" }
+                sys.onFirstAudio = { [weak self] in
+                    guard let self = self, self.wsTask === task else { return }
+                    self.hint = "● 錄音中"
+                    if self.liveNotice.contains("系統音") || self.liveNotice.contains("螢幕") {
+                        self.liveNotice = ""  // audio flowing -> clear the permission nag
+                    }
+                }
+                if sys.start() {
+                    self.sysCap = sys
+                    // Started ≠ capturing: an unpermitted tap yields only zeros.
+                    // Check a few seconds in and tell the user instead of silently
+                    // recording silence (this is the "真的在錄嗎" signal).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                        guard let self = self, self.wsTask === task else { return }
+                        if (self.sysCap as? PanelSystemTapCapturer)?.sawSignal == false {
+                            self.liveNotice = "⚠️ 未擷取到系統音（可能未授權）：系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製 開啟 MeetingSummary 後重新開始"
+                        }
+                    }
+                } else {
+                    self.liveNotice = "系統音擷取啟動失敗（需授權／macOS 14.2+）"
+                }
             } else {
                 self.liveNotice = "系統音原生擷取需 macOS 14.2 以上"
             }
@@ -388,6 +431,7 @@ final class Model: ObservableObject {
     }
 
     private func stopNativeRelay() {
+        self.hint = ""
         micCap?.stop(); micCap = nil
         if #available(macOS 14.2, *) { (sysCap as? PanelSystemTapCapturer)?.stop() }
         sysCap = nil
