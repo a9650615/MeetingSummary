@@ -270,11 +270,11 @@ class TwoPassSession:
     long single utterances get sluggish."""
 
     def __init__(self, *, backend, interim_backend=None, sample_rate=16000,
-                 frame_ms=30, silence_ms=400, max_utt_s=15.0, interim_s=1.2,
+                 frame_ms=30, silence_ms=400, max_utt_s=15.0, interim_s=0.6,
                  interim_tail_s=8.0, min_speech_ms=250, rms_threshold=80,
                  speech_factor=2.0, track="mic", speaker_fn=None, speech_fn=None,
                  splitter=None,
-                 interim_duty=0.75, interim_min_s=1.0, interim_max_s=3.0, clock=None):
+                 interim_duty=0.75, interim_min_s=0.4, interim_max_s=3.0, clock=None):
         self.final_backend = backend
         self.interim_backend = interim_backend
         self.speaker_fn = speaker_fn  # optional audio_bytes -> live speaker label
