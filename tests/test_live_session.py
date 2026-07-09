@@ -225,6 +225,31 @@ def test_consume_pops_and_forwards_notices():
     assert asyncio.run(run()) == ["downgraded model"]
 
 
+def test_consume_drains_all_pending_renames_in_one_tick():
+    # A speaker promotion pushed onto the rename queue (from enable_diarization's
+    # on_promote, running in the threadpool feed() call) must all be delivered —
+    # unlike notices, pop_rename is drained in a loop, not just once per tick.
+    async def run():
+        tracks = {"t": ("mic", "我")}
+        pump = live_session.WallClockPump(tracks, {"t": io.BytesIO()}, t0=time.time())
+        pump.got.set()
+        pending = [("說話者1", "Scott"), ("說話者2", "Alice")]
+        renames = []
+
+        async def on_rename(old, new):
+            renames.append((old, new))
+
+        async def emit(ev, label):
+            pass
+
+        await live_session.consume(pump, {"t": StubSession()}, tracks, rec_on=lambda: False,
+                                   emit=emit, should_stop=lambda: True, interim_lag_bytes=0,
+                                   on_rename=on_rename, pop_rename=lambda: pending.pop(0) if pending else None)
+        return renames
+
+    assert asyncio.run(run()) == [("說話者1", "Scott"), ("說話者2", "Alice")]
+
+
 # --- flush + persistence --------------------------------------------------
 
 def test_flush_sessions_persists_finals(tmp_path):
@@ -271,6 +296,22 @@ def test_resolve_speaker_collapses_placeholder_to_side_keeps_name():
     assert r("對方", "對方") == "對方"           # bare side label is not a placeholder
 
 
+def test_store_speaker_keeps_cluster_label_falls_back_to_side():
+    s = live_session.store_speaker
+    assert s("說話者1", "對方") == "說話者1"     # unpromoted cluster -> stored AS-IS
+    assert s("Scott", "對方") == "Scott"        # promoted/recognized name -> stored AS-IS
+    assert s(None, "我") == "我"                # no diarization (mic track) -> side label
+
+
+def test_display_speaker_collapses_only_unpromoted_cluster_labels():
+    d = live_session.display_speaker
+    assert d("說話者1", "system") == "對方"     # unpromoted cluster on system -> 對方
+    assert d("說話者2", "mic") == "我"
+    assert d("說話者3", "mixed") == "混合"
+    assert d("Scott", "system") == "Scott"      # promoted name passes through
+    assert d("對方1", "system") == "對方1"       # post-meeting /diarize label untouched
+
+
 # --- enable_diarization wiring (省效能: one embed per utterance by default) ---
 
 def _diar_sessions_tracks():
@@ -302,3 +343,32 @@ def test_enable_diarization_split_opt_in_wires_splitter(tmp_path, monkeypatch):
     live_session.enable_diarization(sessions, tracks, store)
     assert callable(getattr(sessions["sys"], "splitter", None))
     assert getattr(sessions["sys"], "speaker_fn", None) is None
+
+
+def test_enable_diarization_promotion_renames_stored_rows_and_calls_on_rename(tmp_path, monkeypatch):
+    # Live retroactive rename: when mid is given, a cluster promotion (fired by
+    # the labeler's on_promote) must both UPDATE this meeting's already-stored
+    # rows (store.rename_speaker) and notify the caller (on_rename) so it can
+    # push a live 'rename' message / bump a floatpanel refetch counter.
+    import diarize
+
+    def fake_labeler(extractor, rows, *, session_threshold, match_threshold, on_promote=None):
+        def fn(_audio):
+            if on_promote:
+                on_promote("說話者1", "Scott")
+            return "Scott"
+        return fn
+
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b, sr=16000: b))
+    monkeypatch.setattr(diarize, "live_speaker_labeler", fake_labeler)
+    monkeypatch.delenv("LIVE_DIAR_SPLIT", raising=False)
+    store = Store(tmp_path / "m.db")
+    mid = store.create_meeting("t", 0.0, "zh-TW")
+    store.add_transcript(mid, "live", "system", 0, 500, "說話者1", "hi")
+    sessions, tracks = _diar_sessions_tracks()
+    calls = []
+    live_session.enable_diarization(sessions, tracks, store, mid=mid,
+                                    on_rename=lambda old, new: calls.append((old, new)))
+    sessions["sys"].speaker_fn(b"x")
+    assert calls == [("說話者1", "Scott")]
+    assert store.list_transcripts(mid)[0]["speaker"] == "Scott"

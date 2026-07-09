@@ -303,6 +303,7 @@ final class Model: ObservableObject {
     var mid: Int?
     var startedAt: Date?
     private var lastShowSeq = -1        // last /floatpanel/open counter seen (-1 = not yet polled)
+    private var lastRev = -1            // last /live/state "rev" seen (-1 = not yet polled)
     var onShowRequest: (() -> Void)?    // set by AppDelegate: bring the panel forward
 
     private func req(_ path: String, method: String = "GET", json: [String: Any]? = nil,
@@ -360,6 +361,19 @@ final class Model: ObservableObject {
             if let seq = o["show_seq"] as? Int {
                 if self.lastShowSeq >= 0 && seq > self.lastShowSeq { self.onShowRequest?() }
                 self.lastShowSeq = seq
+            }
+            // A speaker promotion retroactively renamed earlier rows server-side
+            // (see live_session.enable_diarization's on_promote). pollTranscripts
+            // only ever fetches id > lastId, so it would never see the rename on
+            // already-fetched rows — reset the cursor on a rev bump to re-fetch
+            // everything (the endpoint already collapses 說話者N -> 對方/我, so
+            // renamed/promoted rows just come back correct).
+            if let rev = o["rev"] as? Int {
+                if self.lastRev >= 0 && rev > self.lastRev {
+                    self.transcripts = []
+                    self.lastId = 0
+                }
+                self.lastRev = rev
             }
         }
     }

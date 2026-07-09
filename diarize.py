@@ -403,7 +403,8 @@ def _consolidate_named(speakers, *, cohesion=0.45):
 
 
 def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
-                         match_threshold=0.62, min_secs=1.2, sample_rate=16000):
+                         match_threshold=0.62, min_secs=1.2, sample_rate=16000,
+                         on_promote=None):
     """Factory for the LIVE per-utterance speaker label fn: fn(pcm_bytes) -> label.
 
     Recognizes voices the user already NAMED in past meetings (cosine-match the
@@ -414,7 +415,13 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
     voiceprints are matched (auto placeholders like 說話者5 are skipped), so live
     never shows a meaningless cross-meeting placeholder.
 
-    speakers = store.list_speakers() rows (id, name, centroid bytes, count)."""
+    speakers = store.list_speakers() rows (id, name, centroid bytes, count).
+
+    on_promote(old_label, new_name): fired the moment a session cluster promotes
+    (old_label = its "說話者N" cluster label, new_name = the recognized name) — so
+    a caller can retroactively rename that cluster's already-emitted lines (only
+    the promotion path ever creates a 說話者N cluster; the direct known-match path
+    above returns a name immediately, nothing to rename)."""
     import numpy as np  # noqa: PLC0415
     tr = SpeakerTracker(threshold=session_threshold)
     # One clean count-weighted centroid per name (dropping garbage/outlier
@@ -450,6 +457,8 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
             name, _sim = match_speaker(tr.centroids[sid], known, match_threshold)
             if name is not None:
                 promoted[sid] = name
+                if on_promote:
+                    on_promote(f"說話者{sid + 1}", name)
                 return name
         return _label_for(sid)                       # unknown -> session-local cluster
 

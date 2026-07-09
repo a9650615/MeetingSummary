@@ -253,6 +253,30 @@ def test_live_speaker_labeler_promotes_session_cluster_to_named_voice():
     assert labels[-3:] == ["Alice", "Alice", "Alice"]    # promoted, and stays promoted
 
 
+def test_live_speaker_labeler_on_promote_fires_with_old_cluster_label_and_name():
+    # Live retroactive rename needs to know WHICH cluster label (說話者N) to
+    # rewrite once it promotes — on_promote must fire exactly once, with the
+    # cluster's old label and the newly recognized name, so the caller (
+    # live_session.enable_diarization) can store.rename_speaker(mid, old, new).
+    dim = 16
+    rng = np.random.default_rng(0)
+    alice_dir = rng.normal(size=dim)
+    alice_dir /= np.linalg.norm(alice_dir)
+
+    def extractor(_audio):
+        v = alice_dir + 0.7 * rng.normal(size=dim)
+        return v / np.linalg.norm(v)
+
+    rows = [_spk_row("Alice", alice_dir)]
+    promotions = []
+    fn = diarize.live_speaker_labeler(extractor, rows, session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=0,
+                                      on_promote=lambda old, new: promotions.append((old, new)))
+    labels = [fn(b"x" * 4000) for _ in range(8)]
+    assert labels[-1] == "Alice"                        # sanity: still promotes
+    assert promotions == [("說話者1", "Alice")]           # fired once, old cluster -> new name
+
+
 # --- interleaved-speaker robustness: change-point boundaries + piece-confirm ---
 import array  # noqa: E402
 

@@ -658,15 +658,34 @@ const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
 function colored(speaker){ return COLORS[speaker]||'#444'; }
 // Unified line timestamp = wall-clock time-of-day (same on live push + attach).
 function clockStr(epochMs){ return new Date(epochMs).toLocaleTimeString(); }
-function appendFinalLine(speaker, text, tstr){
+// A live final now carries the STORED label (說話者N while un-promoted, else a
+// real name) so a later promotion can retroactively rename it — collapse to the
+// side label for display only (server already collapses for attach-on-load rows).
+function collapseSpeaker(raw, track){
+  if(/^說話者\\d+$/.test(raw||'')) return track==='system' ? '對方' : (track==='mixed' ? '混合' : '我');
+  return raw;
+}
+function appendFinalLine(speaker, text, tstr, raw){
   const line=document.createElement('div'); line.className='tline';
   const ts=document.createElement('span'); ts.className='ts'; ts.textContent=tstr;
   const bd=document.createElement('span');
   if(speaker){const w=document.createElement('b'); w.className='who';
-    w.style.color=colored(speaker); w.textContent=speaker+'：'; bd.appendChild(w);}
+    w.style.color=colored(speaker); w.textContent=speaker+'：'; w.dataset.raw=raw||speaker;
+    bd.appendChild(w);}
   bd.appendChild(document.createTextNode(text));
   line.appendChild(ts); line.appendChild(bd);
   T.insertAdjacentElement('afterbegin', line);  // newest on top, below #live
+}
+// Speaker promotion pushed live ({type:'rename', from, to}): find every already-
+// rendered line still keyed to the old cluster label and relabel it to the real
+// name — the whole point of RETROACTIVE rename (earlier lines stop showing
+// 對方/我 once that voice is recognized), without waiting for a page reload.
+function applyRename(from, to){
+  T.querySelectorAll('.who').forEach(w=>{
+    if(w.dataset.raw===from){
+      w.dataset.raw=to; w.style.color=colored(to); w.textContent=to+'：';
+    }
+  });
 }
 
 // Generic per-load override: /live?source=<mic|system|both|dual> pre-picks the source.
@@ -970,17 +989,18 @@ startBtn.onclick = async () => {
       S.textContent=' session #'+mid+' 錄製中…';
       if(notesEl&&notesEl.value) saveNotes(); }  // flush notes typed before record
     else if(m.type==='interim'){
-      const sp=m.speaker||'';
+      const sp=collapseSpeaker(m.speaker||'', m.track);
       C.textContent = m.text;                       // caption: words only
       L.textContent = '… '+(sp?sp+': ':'')+m.text;  // grey in-progress, above history
     }
     else if(m.type==='final'){
-      const sp=m.speaker||'';
+      const raw=m.speaker||'', sp=collapseSpeaker(raw, m.track);
       C.textContent = m.text;
       const tstr = m.ts ? clockStr(m.ts*1000) : clockStr(recStart + m.start_ms);
-      appendFinalLine(sp, m.text, tstr);
+      appendFinalLine(sp, m.text, tstr, raw);
       L.textContent='';                             // utterance committed
     }
+    else if(m.type==='rename'){ applyRename(m.from, m.to); }
     else if(m.type==='notice'){ S.textContent=' ⚡ '+m.msg;
       fetch('/models').then(r=>r.json()).then(showModels); }
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
@@ -1115,7 +1135,19 @@ class TagIn(BaseModel):
 
 
 def _rows(rows):
-    return [dict(r) for r in rows]
+    # Transcript rows carry both speaker+track -> collapse a stored, un-promoted
+    # live cluster label (說話者N) to its side label (對方/我/混合) for display.
+    # Every JSON/HTML transcript render routes through here (get_meeting, the
+    # detail page, /meetings/{mid}/transcripts), so this is the one place that
+    # needs it. Non-transcript rows (segments, summaries) lack "speaker"/"track"
+    # and pass through untouched.
+    out = []
+    for r in rows:
+        d = dict(r)
+        if "speaker" in d and "track" in d:
+            d["speaker"] = live_session.display_speaker(d["speaker"], d["track"])
+        out.append(d)
+    return out
 
 
 def _src_labels(src):
@@ -1128,13 +1160,22 @@ def _src_labels(src):
     }.get(src, ("mic", "我"))
 
 
+def _row_track(r):
+    # r is a sqlite3.Row (real rows) or a plain dict (some callers/tests build
+    # rows by hand without a track) -> tolerate either, and a missing column.
+    try:
+        return r["track"]
+    except (KeyError, IndexError):
+        return None
+
+
 def _transcript_text(rows):
     # Skip whisper silence-hallucination lines so the summary can't echo them
     # (e.g. 優優獨播劇場). Existing meetings keep the lines in the transcript view;
     # only the text FED TO the summarizer is cleaned.
     import live  # noqa: PLC0415
-    return "\n".join(f"{r['speaker']}: {r['text']}" for r in rows
-                     if not live._is_hallucination(r["text"]))
+    return "\n".join(f"{live_session.display_speaker(r['speaker'], _row_track(r))}: {r['text']}"
+                     for r in rows if not live._is_hallucination(r["text"]))
 
 
 def _snippet(text, q, span=44):
@@ -1162,7 +1203,8 @@ def _export_text(meeting, transcripts, summaries):
         lines += [f"## 摘要（{s['kind']}）", s["text"], ""]
     lines.append("## 逐字稿")
     for r in transcripts:
-        lines.append(f"- `{_ts(r['start_ms'])}` **{r['speaker']}**：{r['text']}")
+        spk = live_session.display_speaker(r['speaker'], _row_track(r))
+        lines.append(f"- `{_ts(r['start_ms'])}` **{spk}**：{r['text']}")
     return "\n".join(lines) + "\n"
 
 
@@ -2014,6 +2056,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
     native_sessions = {}  # mid -> {"proc": None, "task": asyncio.Task, "notice": str|None}
     # for a /ws/native-capture (floatpanel relay) session — task kept alive here (else GC'd)
     _panel = {"p": None, "show_seq": 0}  # subprocess (singleton) + show-request counter
+    # mid -> counter, bumped whenever a speaker promotion retroactively renames
+    # earlier live rows for that meeting. The floatpanel has no push channel (it
+    # only polls /meetings/{mid}/transcripts by lastId, which never re-fetches
+    # already-seen rows) — seeing this counter increase is its cue to reset the
+    # cursor and re-fetch everything, picking up the rename. ponytail: never
+    # pruned, one int per meeting for the app's lifetime — trivial vs. tracking
+    # session end here too.
+    _live_rev = {}
 
     def _open_panel():
         """Launch the native float panel if installed; idempotent (reuse if alive)."""
@@ -2113,7 +2163,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 notice = sess["notice"]
         return {"recording": bool(mids), "mid": mid, "count": len(mids),
                 "title": title, "caption": caption, "captions": captions, "notice": notice,
-                "started_at": started_at, "show_seq": _panel["show_seq"]}
+                "started_at": started_at, "show_seq": _panel["show_seq"],
+                "rev": _live_rev.get(mid, 0)}
 
     @app.get("/native/capability")
     def native_capability():
@@ -2198,7 +2249,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
             interim_s=live_interim_s, max_utt_s=live_max_utt_s,
             rms_threshold=live_rms_threshold, interim_duty=live_interim_duty)
         if diarize:
-            live_session.enable_diarization(sessions, tracks, store)
+            def _bump_rev(_old, _new, _mid=mid):
+                _live_rev[_mid] = _live_rev.get(_mid, 0) + 1
+            live_session.enable_diarization(sessions, tracks, store, mid=mid,
+                                            on_rename=_bump_rev)
 
         pump = live_session.WallClockPump(tracks, audio_files, t0)
         idle["live"] += 1
@@ -2630,11 +2684,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # each finalized utterance, PLUS recognition of voices the user already named
         # in past meetings (match the global speakers table -> real name live; unknown
         # voices stay 說話者N). Skip the 我/mic track (single person).
+        pending_renames = []  # (old, new) pushed by on_promote (threadpool thread),
+                              # drained each consume() tick -> a ws 'rename' push.
+
         if ws.query_params.get("diarize") == "1":
+            def _push_rename(old, new):
+                pending_renames.append((old, new))
+                _live_rev[mid] = _live_rev.get(mid, 0) + 1  # also seen by a
+                # floatpanel polling this same (browser-started) session
             # splitter labels each piece itself (owns the labeler), so a
             # single-speaker utterance returns one piece = the normal case, and a
             # multi-speaker one is split per turn. No separate speaker_fn needed.
-            live_session.enable_diarization(sessions, tracks, store)
+            live_session.enable_diarization(sessions, tracks, store, mid=mid,
+                                            on_rename=_push_rename)
 
         async def _emit(ev, label):
             track, speaker = label
@@ -2643,7 +2705,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 # which matches the saved (silence-gated) pcm exactly -> seek +
                 # follow-highlight line up. ts (wall-clock) is display only.
                 ev["ts"] = time.time()
-                spk = live_session.resolve_speaker(ev.get("speaker"), speaker)
+                # STORE the raw label (說話者N / a name) — not collapsed to 對方/我
+                # — so a later promotion can retroactively rename this row (see
+                # live_session.store_speaker). The client gets the same raw label
+                # (keyed by it for the 'rename' push) and collapses it for display.
+                spk = live_session.store_speaker(ev.get("speaker"), speaker)
                 store.add_transcript(mid, "live", track,
                                      ev["start_ms"] + conn_offset_ms,
                                      ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
@@ -2708,11 +2774,18 @@ def create_app(store, *, summary_backend, asr_backend=None,
         async def _on_notice(msg):
             await ws.send_json({"type": "notice", "msg": msg})
 
+        def _pop_rename():
+            return pending_renames.pop(0) if pending_renames else None
+
+        async def _on_rename(old, new):
+            await ws.send_json({"type": "rename", "from": old, "to": new})
+
         try:
             await live_session.consume(
                 pump, sessions, tracks, rec_on=lambda: rec["on"], emit=_emit,
                 should_stop=_should_stop, interim_lag_bytes=interim_lag_bytes,
                 on_notice=_on_notice, pop_notice=_pop_notice,
+                on_rename=_on_rename, pop_rename=_pop_rename,
                 should_abort=lambda: closed)
         finally:
             rtask.cancel()

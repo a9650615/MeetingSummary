@@ -28,13 +28,39 @@ _PLACEHOLDER = re.compile(r"^(我|對方|說話者|混合)\d+$")
 
 
 def resolve_speaker(diar_label, side_label):
-    """The speaker to STORE + display for a live final. A recognized name (from
-    the voiceprint DB) wins; an auto placeholder (說話者N / 對方N / 我N) collapses
-    to the track's side label (對方 = 系統音/remote, 我 = 麥克風). So an unrecognized
+    """The speaker to DISPLAY for a live final. A recognized name (from the
+    voiceprint DB) wins; an auto placeholder (說話者N / 對方N / 我N) collapses to
+    the track's side label (對方 = 系統音/remote, 我 = 麥克風). So an unrecognized
     voice always shows which side spoke — never a meaningless 說話者N — and the
-    output is uniform whether or not diarization named the utterance."""
+    output is uniform whether or not diarization named the utterance. Kept for
+    display collapse only — see display_speaker for the row-level equivalent
+    used once labels are STORED via store_speaker (below)."""
     name = (diar_label or side_label or "").strip()
     return side_label if _PLACEHOLDER.match(name) else (name or side_label)
+
+
+def store_speaker(diar_label, side_label):
+    """The value to STORE for a live final. Unlike resolve_speaker, this keeps a
+    session cluster label (說話者N) or a recognized/promoted name AS-IS — never
+    collapsed to 對方/我 — so a later promotion (diarize.live_speaker_labeler's
+    on_promote) can target this cluster's earlier rows by name and rename them
+    (store.rename_speaker). Only falls back to the side label when diarization
+    produced nothing at all (e.g. the mic track, never diarized)."""
+    return diar_label or side_label
+
+
+_CLUSTER_LABEL = re.compile(r"^說話者\d+$")
+
+
+def display_speaker(stored, track):
+    """Collapse a STORED session cluster label (說話者N, not yet promoted) to its
+    track's side label for DISPLAY only — 對方/我/混合. A promoted name, a
+    recognized name, or an already-side label passes through unchanged. Post-
+    meeting /diarize labels (對方1, 我2, …) never match here (different prefix),
+    so this never touches that feature's own multi-speaker labels."""
+    if stored and _CLUSTER_LABEL.match(stored):
+        return {"system": "對方", "mixed": "混合"}.get(track, "我")
+    return stored
 
 
 class WallClockPump:
@@ -123,12 +149,18 @@ def build_track_sessions(tracks, *, live_manager, live_interim_backend, silence_
     }
 
 
-def enable_diarization(sessions, tracks, store):
+def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
     """Wire live per-utterance speaker labeling onto every non-mic track's
     session (mirrors ws_live's ?diarize=1): online voiceprint clustering on
     each finalized utterance, plus recognition of voices already named in
     past meetings. Best-effort — a missing model just logs and leaves
-    sessions untouched."""
+    sessions untouched.
+
+    mid: when given, a session cluster's later promotion to a named voice
+    (diarize.live_speaker_labeler's on_promote) retroactively renames that
+    cluster's already-stored rows via store.rename_speaker — so earlier lines
+    stop showing 對方/我 once the voice is recognized. on_rename(old, new): also
+    called on promotion (best-effort, e.g. to push a live notification)."""
     import os  # noqa: PLC0415
     try:
         import diarize as diar  # noqa: PLC0415
@@ -149,10 +181,23 @@ def enable_diarization(sessions, tracks, store):
         # a full-utterance embed is also LESS noisy than a 1.5s window, so the
         # default path is both cheaper and more accurate.
         split = os.environ.get("LIVE_DIAR_SPLIT") == "1"
+
+        def on_promote(old, new):
+            try:
+                store.rename_speaker(mid, old, new)
+            except Exception:  # noqa: BLE001  best-effort — a stuck rename must not break live ASR
+                pass
+            if on_rename:
+                try:
+                    on_rename(old, new)
+                except Exception:  # noqa: BLE001
+                    pass
+
         for tag, (_trk, spk) in tracks.items():
             if spk != "我":
                 labeler = diar.live_speaker_labeler(
-                    extractor, rows, session_threshold=thr, match_threshold=gthr)
+                    extractor, rows, session_threshold=thr, match_threshold=gthr,
+                    on_promote=on_promote if mid is not None else None)
                 if split:
                     sessions[tag].splitter = (
                         lambda a, t, lf=labeler: diar.split_live_utterance(a, t, lf))
@@ -173,7 +218,7 @@ def make_store_emit(mid, conn_offset_ms, store):
             return
         track, speaker = label
         ev["ts"] = time.time()
-        spk = resolve_speaker(ev.get("speaker"), speaker)
+        spk = store_speaker(ev.get("speaker"), speaker)
         store.add_transcript(mid, "live", track,
                               ev["start_ms"] + conn_offset_ms,
                               ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
@@ -183,7 +228,7 @@ def make_store_emit(mid, conn_offset_ms, store):
 
 async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
                    interim_lag_bytes, on_notice=None, pop_notice=None, on_stop=None,
-                   should_abort=None):
+                   should_abort=None, on_rename=None, pop_rename=None):
     """The live consumer loop: wait for pump.feed(), drain each track's
     buffer through its TwoPassSession, call emit(ev, tracks[tag]) for every
     event. Trims backlog so a slow backend can't wedge forever behind a live
@@ -232,6 +277,13 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
         if pop_notice and (msg := pop_notice()):
             if on_notice:
                 await on_notice(msg)
+        # Speaker promotions (diarize.live_speaker_labeler's on_promote, wired via
+        # enable_diarization) fire from the threadpool feed() call above, not this
+        # loop — pop_rename drains whatever piled up onto the (old, new) queue so
+        # the caller can push a live rename notification, same pattern as notices.
+        if pop_rename and on_rename:
+            while (renamed := pop_rename()) is not None:
+                await on_rename(*renamed)
         if should_stop():
             if on_stop:
                 await on_stop()
@@ -251,7 +303,7 @@ async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store):
             evs = []
         for ev in evs:
             if ev["kind"] == "final":  # audio-position offset, not wall-clock
-                spk = resolve_speaker(ev.get("speaker"), tracks[tag][1])
+                spk = store_speaker(ev.get("speaker"), tracks[tag][1])
                 store.add_transcript(mid, "live", tracks[tag][0],
                                       ev["start_ms"] + conn_offset_ms,
                                       ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,

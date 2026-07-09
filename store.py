@@ -1,8 +1,21 @@
 """Store: SQLite metadata for meetings/segments/transcripts/summaries.
 Schema per docs spec §4. Audio bytes live on disk under data/."""
+import re
 import sqlite3
 import threading
 from pathlib import Path
+
+_CLUSTER_LABEL = re.compile(r"^說話者\d+$")
+
+
+def _disp_speaker(speaker, track):
+    """Collapse a stored session cluster label (說話者N, not yet promoted to a
+    recognized name) to its track's side label for the live caption reads — 對方
+    (system) / 混合 (both) / 我 (mic). A promoted/recognized name passes through.
+    Mirrors live_session.display_speaker; inlined here to keep store dependency-free."""
+    if speaker and _CLUSTER_LABEL.match(speaker):
+        return {"system": "對方", "mixed": "混合"}.get(track, "我")
+    return speaker
 
 
 def group_by_proximity(meetings, gap_s=600):
@@ -171,17 +184,20 @@ class Store:
         """Most recent line (by id = insertion order) — for the float panel's live
         caption. id, not start_ms: live finals land in order, cheap single-row read."""
         r = self.db.execute(
-            "SELECT speaker, text FROM transcripts WHERE meeting_id=? "
+            "SELECT speaker, track, text FROM transcripts WHERE meeting_id=? "
             "ORDER BY id DESC LIMIT 1", (meeting_id,)).fetchone()
-        return (f"{r['speaker']}：{r['text']}" if r and r["text"] else None) if r else None
+        if not r or not r["text"]:
+            return None
+        return f"{_disp_speaker(r['speaker'], r['track'])}：{r['text']}"
 
     def recent_transcripts(self, meeting_id, limit=3):
         """Last `limit` finalized lines, oldest first — for the native panel's
         multi-line live captions. Same id-order rationale as latest_transcript."""
         rows = self.db.execute(
-            "SELECT speaker, text FROM transcripts WHERE meeting_id=? "
+            "SELECT speaker, track, text FROM transcripts WHERE meeting_id=? "
             "ORDER BY id DESC LIMIT ?", (meeting_id, limit)).fetchall()
-        return [f"{r['speaker']}：{r['text']}" for r in reversed(rows) if r["text"]]
+        return [f"{_disp_speaker(r['speaker'], r['track'])}：{r['text']}"
+                for r in reversed(rows) if r["text"]]
 
     def transcripts_after(self, meeting_id, after_id=0):
         """Finalized lines with id > after_id, oldest first — for the /live page's
