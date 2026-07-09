@@ -316,7 +316,9 @@ def test_display_speaker_collapses_only_unpromoted_cluster_labels():
 
 def _diar_sessions_tracks():
     sessions = {"sys": StubSession(), "mic": StubSession()}
-    tracks = {"sys": (0, "對方"), "mic": (1, "我")}
+    # value = (track_name, side_label); track_name is the transcripts.track column
+    # (rename is scoped to it), mirroring app.py's real tracks dict.
+    tracks = {"sys": ("system", "對方"), "mic": ("mic", "我")}
     return sessions, tracks
 
 
@@ -330,8 +332,8 @@ def test_enable_diarization_default_wires_speaker_fn_not_splitter(tmp_path, monk
     live_session.enable_diarization(sessions, tracks, store)
     assert callable(getattr(sessions["sys"], "speaker_fn", None))
     assert getattr(sessions["sys"], "splitter", None) is None
-    # The mic ("我") track is never diarized.
-    assert getattr(sessions["mic"], "speaker_fn", None) is None
+    # The mic ("我") track is now diarized too (named voices recognized there).
+    assert callable(getattr(sessions["mic"], "speaker_fn", None))
 
 
 def test_enable_diarization_split_opt_in_wires_splitter(tmp_path, monkeypatch):
@@ -369,7 +371,7 @@ def test_enable_diarization_promotion_renames_stored_rows_and_calls_on_rename(tm
     sessions, tracks = _diar_sessions_tracks()
     calls = []
     live_session.enable_diarization(sessions, tracks, store, mid=mid,
-                                    on_rename=lambda old, new: calls.append((old, new)))
+                                    on_rename=lambda old, new, track: calls.append((old, new, track)))
     sessions["sys"].speaker_fn(b"x")
-    assert calls == [("說話者1", "Scott")]
+    assert calls == [("說話者1", "Scott", "system")]     # track-scoped
     assert store.list_transcripts(mid)[0]["speaker"] == "Scott"

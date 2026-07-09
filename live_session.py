@@ -183,28 +183,35 @@ def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
         # default path is both cheaper and more accurate.
         split = os.environ.get("LIVE_DIAR_SPLIT") == "1"
 
-        def on_promote(old, new):
-            try:
-                store.rename_speaker(mid, old, new)
-            except Exception:  # noqa: BLE001  best-effort — a stuck rename must not break live ASR
-                pass
-            if on_rename:
+        def make_on_promote(trk):
+            # Per-track: a promotion renames only THIS track's earlier rows — each
+            # track diarizes independently, so mic's 說話者1 ≠ system's 說話者1.
+            def _promote(old, new):
                 try:
-                    on_rename(old, new)
-                except Exception:  # noqa: BLE001
+                    store.rename_speaker(mid, old, new, track=trk)
+                except Exception:  # noqa: BLE001  a stuck rename must not break live ASR
                     pass
+                if on_rename:
+                    try:
+                        on_rename(old, new, trk)
+                    except Exception:  # noqa: BLE001
+                        pass
+            return _promote
 
-        for tag, (_trk, spk) in tracks.items():
-            if spk != "我":
-                labeler = diar.live_speaker_labeler(
-                    extractor, rows, session_threshold=thr, match_threshold=gthr,
-                    continuity_threshold=cont,
-                    on_promote=on_promote if mid is not None else None)
-                if split:
-                    sessions[tag].splitter = (
-                        lambda a, t, lf=labeler: diar.split_live_utterance(a, t, lf))
-                else:
-                    sessions[tag].speaker_fn = labeler
+        # Diarize EVERY track, including 我/mic: the mic may capture several people
+        # in the room, and named voices should be recognized there too. Unrecognized
+        # mic clusters still display as 我 (display_speaker), recognized ones show
+        # the real name.
+        for tag, (_trk, _spk) in tracks.items():
+            labeler = diar.live_speaker_labeler(
+                extractor, rows, session_threshold=thr, match_threshold=gthr,
+                continuity_threshold=cont,
+                on_promote=make_on_promote(_trk) if mid is not None else None)
+            if split:
+                sessions[tag].splitter = (
+                    lambda a, t, lf=labeler: diar.split_live_utterance(a, t, lf))
+            else:
+                sessions[tag].speaker_fn = labeler
     except Exception as e:  # noqa: BLE001
         print(f"live diarize unavailable: {e}", file=sys.stderr)
 

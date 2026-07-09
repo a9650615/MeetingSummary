@@ -220,12 +220,20 @@ class Store:
         self.db.execute("UPDATE meetings SET title=? WHERE id=?", (title, meeting_id))
         self.db.commit()
 
-    def rename_speaker(self, meeting_id, old, new):
+    def rename_speaker(self, meeting_id, old, new, track=None):
         """Rename a speaker across a meeting (人工命名, e.g. 說話者1 -> Scott).
+        track (optional): scope to one track — REQUIRED for live cluster labels,
+        because each track diarizes independently so mic's 說話者1 and system's
+        說話者1 are DIFFERENT people; an unscoped rename would rewrite both.
         Returns rows changed."""
-        cur = self.db.execute(
-            "UPDATE transcripts SET speaker=? WHERE meeting_id=? AND speaker=?",
-            (new, meeting_id, old))
+        if track is None:
+            cur = self.db.execute(
+                "UPDATE transcripts SET speaker=? WHERE meeting_id=? AND speaker=?",
+                (new, meeting_id, old))
+        else:
+            cur = self.db.execute(
+                "UPDATE transcripts SET speaker=? WHERE meeting_id=? AND speaker=? AND track=?",
+                (new, meeting_id, old, track))
         self.db.commit()
         return cur.rowcount
 

@@ -665,12 +665,13 @@ function collapseSpeaker(raw, track){
   if(/^說話者\\d+$/.test(raw||'')) return track==='system' ? '對方' : (track==='mixed' ? '混合' : '我');
   return raw;
 }
-function appendFinalLine(speaker, text, tstr, raw){
+function appendFinalLine(speaker, text, tstr, raw, track){
   const line=document.createElement('div'); line.className='tline';
   const ts=document.createElement('span'); ts.className='ts'; ts.textContent=tstr;
   const bd=document.createElement('span');
   if(speaker){const w=document.createElement('b'); w.className='who';
-    w.style.color=colored(speaker); w.textContent=speaker+'：'; w.dataset.raw=raw||speaker;
+    w.style.color=colored(speaker); w.textContent=speaker+'：';
+    w.dataset.raw=raw||speaker; w.dataset.track=track||'';  // track scopes rename
     bd.appendChild(w);}
   bd.appendChild(document.createTextNode(text));
   line.appendChild(ts); line.appendChild(bd);
@@ -680,9 +681,9 @@ function appendFinalLine(speaker, text, tstr, raw){
 // rendered line still keyed to the old cluster label and relabel it to the real
 // name — the whole point of RETROACTIVE rename (earlier lines stop showing
 // 對方/我 once that voice is recognized), without waiting for a page reload.
-function applyRename(from, to){
+function applyRename(from, to, track){
   T.querySelectorAll('.who').forEach(w=>{
-    if(w.dataset.raw===from){
+    if(w.dataset.raw===from && (!track || w.dataset.track===track)){  // track-scoped
       w.dataset.raw=to; w.style.color=colored(to); w.textContent=to+'：';
     }
   });
@@ -997,10 +998,10 @@ startBtn.onclick = async () => {
       const raw=m.speaker||'', sp=collapseSpeaker(raw, m.track);
       C.textContent = m.text;
       const tstr = m.ts ? clockStr(m.ts*1000) : clockStr(recStart + m.start_ms);
-      appendFinalLine(sp, m.text, tstr, raw);
+      appendFinalLine(sp, m.text, tstr, raw, m.track);
       L.textContent='';                             // utterance committed
     }
-    else if(m.type==='rename'){ applyRename(m.from, m.to); }
+    else if(m.type==='rename'){ applyRename(m.from, m.to, m.track); }
     else if(m.type==='notice'){ S.textContent=' ⚡ '+m.msg;
       fetch('/models').then(r=>r.json()).then(showModels); }
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
@@ -2249,7 +2250,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             interim_s=live_interim_s, max_utt_s=live_max_utt_s,
             rms_threshold=live_rms_threshold, interim_duty=live_interim_duty)
         if diarize:
-            def _bump_rev(_old, _new, _mid=mid):
+            def _bump_rev(_old, _new, _track=None, _mid=mid):
                 _live_rev[_mid] = _live_rev.get(_mid, 0) + 1
             live_session.enable_diarization(sessions, tracks, store, mid=mid,
                                             on_rename=_bump_rev)
@@ -2688,8 +2689,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                               # drained each consume() tick -> a ws 'rename' push.
 
         if ws.query_params.get("diarize") == "1":
-            def _push_rename(old, new):
-                pending_renames.append((old, new))
+            def _push_rename(old, new, track):
+                pending_renames.append((old, new, track))
                 _live_rev[mid] = _live_rev.get(mid, 0) + 1  # also seen by a
                 # floatpanel polling this same (browser-started) session
             # splitter labels each piece itself (owns the labeler), so a
@@ -2777,8 +2778,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
         def _pop_rename():
             return pending_renames.pop(0) if pending_renames else None
 
-        async def _on_rename(old, new):
-            await ws.send_json({"type": "rename", "from": old, "to": new})
+        async def _on_rename(old, new, track):
+            await ws.send_json({"type": "rename", "from": old, "to": new, "track": track})
 
         try:
             await live_session.consume(
