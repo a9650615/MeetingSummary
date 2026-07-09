@@ -256,12 +256,25 @@ def enable_diarization(sessions, tracks, store):
         except (ValueError, TypeError):
             gthr = 0.62
         rows = store.list_speakers()  # known voiceprints, read-only for live
+        # One embedding per finalized utterance (省效能): label the whole
+        # utterance ONCE via speaker_fn. The within-utterance windowed split
+        # (split_live_utterance) embeds every ~1.5s window — N+1 embeds/utterance
+        # even for the common single-speaker turn — so it's opt-in via
+        # LIVE_DIAR_SPLIT=1 for paragraph mode (>1 speaker in one VAD segment, no
+        # gap). Natural VAD silence gaps already split most turns into their own
+        # utterances, each getting its own single embed + independent recognition;
+        # a full-utterance embed is also LESS noisy than a 1.5s window, so the
+        # default path is both cheaper and more accurate.
+        split = os.environ.get("LIVE_DIAR_SPLIT") == "1"
         for tag, (_trk, spk) in tracks.items():
             if spk != "我":
                 labeler = diar.live_speaker_labeler(
                     extractor, rows, session_threshold=thr, match_threshold=gthr)
-                sessions[tag].splitter = (
-                    lambda a, t, lf=labeler: diar.split_live_utterance(a, t, lf))
+                if split:
+                    sessions[tag].splitter = (
+                        lambda a, t, lf=labeler: diar.split_live_utterance(a, t, lf))
+                else:
+                    sessions[tag].speaker_fn = labeler
     except Exception as e:  # noqa: BLE001
         print(f"live diarize unavailable: {e}", file=sys.stderr)
 

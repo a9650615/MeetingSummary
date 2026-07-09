@@ -402,3 +402,36 @@ def test_make_store_emit_persists_only_final(tmp_path):
     assert store.latest_transcript(mid) is None
     asyncio.run(emit({"kind": "final", "start_ms": 0, "end_ms": 100, "text": "done"}, ("mic", "我")))
     assert store.latest_transcript(mid) == "我：done"
+
+
+# --- enable_diarization wiring (省效能: one embed per utterance by default) ---
+
+def _diar_sessions_tracks():
+    sessions = {"sys": StubSession(), "mic": StubSession()}
+    tracks = {"sys": (0, "對方"), "mic": (1, "我")}
+    return sessions, tracks
+
+
+def test_enable_diarization_default_wires_speaker_fn_not_splitter(tmp_path, monkeypatch):
+    # Default: label each utterance ONCE (speaker_fn), no per-window split.
+    import diarize
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b, sr=16000: b))
+    monkeypatch.delenv("LIVE_DIAR_SPLIT", raising=False)
+    store = Store(tmp_path / "m.db")
+    sessions, tracks = _diar_sessions_tracks()
+    live_session.enable_diarization(sessions, tracks, store)
+    assert callable(getattr(sessions["sys"], "speaker_fn", None))
+    assert getattr(sessions["sys"], "splitter", None) is None
+    # The mic ("我") track is never diarized.
+    assert getattr(sessions["mic"], "speaker_fn", None) is None
+
+
+def test_enable_diarization_split_opt_in_wires_splitter(tmp_path, monkeypatch):
+    import diarize
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b, sr=16000: b))
+    monkeypatch.setenv("LIVE_DIAR_SPLIT", "1")
+    store = Store(tmp_path / "m.db")
+    sessions, tracks = _diar_sessions_tracks()
+    live_session.enable_diarization(sessions, tracks, store)
+    assert callable(getattr(sessions["sys"], "splitter", None))
+    assert getattr(sessions["sys"], "speaker_fn", None) is None

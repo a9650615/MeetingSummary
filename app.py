@@ -666,11 +666,13 @@ const startBtn=document.getElementById('start'), stopBtn=document.getElementById
 const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
 const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
 function colored(speaker){ return COLORS[speaker]||'#444'; }
+// Auto placeholder (說話者1 / 對方2 / 我3) = not yet recognized -> show no name.
+function named(speaker){ return speaker && !/^(我|對方|說話者)\\d+$/.test(speaker.trim()); }
 function appendFinalLine(speaker, text, tstr){
   const line=document.createElement('div'); line.className='tline';
   const ts=document.createElement('span'); ts.className='ts'; ts.textContent=tstr;
   const bd=document.createElement('span');
-  if(speaker){const w=document.createElement('b'); w.className='who';
+  if(named(speaker)){const w=document.createElement('b'); w.className='who';
     w.style.color=colored(speaker); w.textContent=speaker+'：'; bd.appendChild(w);}
   bd.appendChild(document.createTextNode(text));
   line.appendChild(ts); line.appendChild(bd);
@@ -970,7 +972,7 @@ startBtn.onclick = async () => {
     else if(m.type==='interim'){
       const sp=m.speaker||'';
       C.textContent = m.text;                       // caption: words only
-      L.textContent = '… '+(sp?sp+': ':'')+m.text;  // grey in-progress, above history
+      L.textContent = '… '+(named(sp)?sp+': ':'')+m.text;  // grey in-progress, above history
     }
     else if(m.type==='final'){
       const sp=m.speaker||'';
