@@ -368,3 +368,27 @@ def test_consolidate_named_drops_outlier_and_merges():
     hank = [v for n, v in out if n == "Hank"][0]
     base_u = np.asarray(base, dtype=np.float32)
     assert float(np.dot(hank, base_u)) > 0.9     # near coherent mean, not dragged to the orthogonal row
+
+
+def test_live_speaker_labeler_continuity_keeps_last_speaker_on_noisy_utterance():
+    # A recognized speaker's next short/noisy utterance can dip below match_threshold
+    # (0.62) yet stay clearly the same voice (>= continuity 0.5). It must inherit the
+    # last speaker, not flicker to 對方 / a fresh 說話者N.
+    dim = 16
+    rng = np.random.default_rng(1)
+    alice = rng.normal(size=dim); alice /= np.linalg.norm(alice)
+    orth = rng.normal(size=dim); orth -= (orth @ alice) * alice; orth /= np.linalg.norm(orth)
+    noisy = 0.55 * alice + np.sqrt(1 - 0.55 ** 2) * orth    # cosine 0.55 to alice (unit)
+    seq = [alice, noisy]
+    calls = {"i": 0}
+
+    def extractor(_audio):
+        v = seq[min(calls["i"], len(seq) - 1)]; calls["i"] += 1
+        return v
+
+    rows = [_spk_row("Alice", alice)]
+    fn = diarize.live_speaker_labeler(extractor, rows, session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=0,
+                                      continuity_threshold=0.5)
+    assert fn(b"x" * 4000) == "Alice"      # clean -> recognized
+    assert fn(b"x" * 4000) == "Alice"      # noisy 0.55 -> continuity keeps Alice, no flicker

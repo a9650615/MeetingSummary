@@ -166,6 +166,7 @@ def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
         import diarize as diar  # noqa: PLC0415
         extractor = diar.embedding_extractor()
         thr = float(os.environ.get("LIVE_DIAR_THRESHOLD", "0.4"))
+        cont = float(os.environ.get("LIVE_DIAR_CONTINUITY", "0.5"))  # same-speaker continuity
         try:
             gthr = float(store.get_setting("speaker_threshold", "0.62"))
         except (ValueError, TypeError):
@@ -197,6 +198,7 @@ def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
             if spk != "我":
                 labeler = diar.live_speaker_labeler(
                     extractor, rows, session_threshold=thr, match_threshold=gthr,
+                    continuity_threshold=cont,
                     on_promote=on_promote if mid is not None else None)
                 if split:
                     sessions[tag].splitter = (

@@ -404,7 +404,7 @@ def _consolidate_named(speakers, *, cohesion=0.45):
 
 def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
                          match_threshold=0.62, min_secs=1.2, sample_rate=16000,
-                         on_promote=None):
+                         on_promote=None, continuity_threshold=0.5):
     """Factory for the LIVE per-utterance speaker label fn: fn(pcm_bytes) -> label.
 
     Recognizes voices the user already NAMED in past meetings (cosine-match the
@@ -433,15 +433,21 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
     def _label_for(sid):
         return promoted.get(sid, f"說話者{sid + 1}")
 
+    last = {"label": None, "e": None}  # last EMITTED (label, normalized emb) — continuity anchor
+
+    def _emit(label, e):
+        last["label"], last["e"] = label, e
+        return label
+
     def fn(audio):
-        if len(audio) < min_bytes and tr.centroids:
-            return _label_for(tr.last_id)            # too short -> reuse last, don't spawn
+        if len(audio) < min_bytes and last["label"] is not None:
+            return last["label"]                     # too short -> continue last speaker, don't spawn
         emb = np.asarray(extractor(audio), dtype=np.float32)
+        e = emb / (np.linalg.norm(emb) + 1e-9)
         if known:
-            e = emb / (np.linalg.norm(emb) + 1e-9)
             name, _sim = match_speaker(e, known, match_threshold)
             if name is not None:
-                return name                          # recognized a named voice
+                return _emit(name, e)                # recognized a named voice
         sid = tr.assign(emb)
         if sid not in promoted and known:
             # A short single utterance's own embedding can land just under
@@ -451,16 +457,26 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
             # cluster gets less noisy as more of that speaker's utterances
             # accumulate into it — so retry the named match against THAT refined
             # centroid; once it crosses match_threshold, "promote" the cluster so
-            # this and all its future occurrences resolve to the real name
-            # (past occurrences already emitted stay as 說話者N — no retroactive
-            # rewrite here, that's the post-meeting /diarize pass's job).
+            # this and all its future occurrences resolve to the real name.
+            # Earlier 說話者N lines are fixed up live via on_promote (retroactive
+            # rename), no longer left for the post-meeting pass.
             name, _sim = match_speaker(tr.centroids[sid], known, match_threshold)
             if name is not None:
                 promoted[sid] = name
                 if on_promote:
                     on_promote(f"說話者{sid + 1}", name)
-                return name
-        return _label_for(sid)                       # unknown -> session-local cluster
+                return _emit(name, e)
+        # Temporal continuity: an unrecognized/noisy utterance whose embedding is
+        # still close to the LAST emitted speaker (softer than match_threshold) is
+        # almost certainly that same person still talking — inherit their label
+        # instead of flickering to 對方 / a fresh 說話者N. Same-turn utterances are
+        # more self-similar than any single one is to a noisy enrolled centroid.
+        # Anchor emb stays put (no drift). Tradeoff: a quick, acoustically-similar
+        # interjection by another party can be absorbed — accepted for live; the
+        # post-meeting /diarize pass re-clusters accurately.
+        if last["e"] is not None and float(e @ last["e"]) >= continuity_threshold:
+            return last["label"]
+        return _emit(_label_for(sid), e)             # unknown -> session-local cluster
 
     def embed(audio):
         # STATE-FREE normalized embedding for a window (no spawn, no centroid
