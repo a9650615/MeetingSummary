@@ -5,19 +5,6 @@ def _store(tmp_path):
     return Store(tmp_path / "meetings.db")
 
 
-def test_caption_hides_placeholder_but_keeps_named(tmp_path):
-    s = _store(tmp_path)
-    mid = s.create_meeting(title="m", created_at=1.0, lang="zh-TW")
-    s.add_transcript(mid, "live", "system", 0, 500, "說話者1", "未辨識的一句話")
-    assert s.latest_transcript(mid) == "未辨識的一句話"          # placeholder -> no name
-    s.add_transcript(mid, "live", "mic", 500, 900, "我", "我講的話")
-    assert s.latest_transcript(mid) == "我：我講的話"            # bare track label kept
-    s.add_transcript(mid, "live", "system", 900, 1300, "Scott", "有命名的一句話")
-    assert s.latest_transcript(mid) == "Scott：有命名的一句話"    # human name kept
-    assert s.recent_transcripts(mid, limit=3) == [
-        "未辨識的一句話", "我：我講的話", "Scott：有命名的一句話"]
-
-
 def test_create_and_get_meeting(tmp_path):
     s = _store(tmp_path)
     mid = s.create_meeting(title="standup", created_at=1.0, lang="zh-TW")

@@ -666,13 +666,13 @@ const startBtn=document.getElementById('start'), stopBtn=document.getElementById
 const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
 const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
 function colored(speaker){ return COLORS[speaker]||'#444'; }
-// Auto placeholder (說話者1 / 對方2 / 我3) = not yet recognized -> show no name.
-function named(speaker){ return speaker && !/^(我|對方|說話者)\\d+$/.test(speaker.trim()); }
+// Unified line timestamp = wall-clock time-of-day (same on live push + attach).
+function clockStr(epochMs){ return new Date(epochMs).toLocaleTimeString(); }
 function appendFinalLine(speaker, text, tstr){
   const line=document.createElement('div'); line.className='tline';
   const ts=document.createElement('span'); ts.className='ts'; ts.textContent=tstr;
   const bd=document.createElement('span');
-  if(named(speaker)){const w=document.createElement('b'); w.className='who';
+  if(speaker){const w=document.createElement('b'); w.className='who';
     w.style.color=colored(speaker); w.textContent=speaker+'：'; bd.appendChild(w);}
   bd.appendChild(document.createTextNode(text));
   line.appendChild(ts); line.appendChild(bd);
@@ -723,7 +723,7 @@ function pollAttached(){
   fetch('/meetings/'+mid+'/transcripts?after='+attachLastId).then(r=>r.json()).then(j=>{
     (j.rows||[]).forEach(row=>{
       attachLastId=row.id;
-      appendFinalLine(row.speaker, row.text, (row.start_ms/1000).toFixed(1)+'s');
+      appendFinalLine(row.speaker, row.text, clockStr(recStart + row.start_ms));
     });
   }).catch(()=>{});
   fetch('/live/state').then(r=>r.json()).then(st=>{
@@ -972,12 +972,12 @@ startBtn.onclick = async () => {
     else if(m.type==='interim'){
       const sp=m.speaker||'';
       C.textContent = m.text;                       // caption: words only
-      L.textContent = '… '+(named(sp)?sp+': ':'')+m.text;  // grey in-progress, above history
+      L.textContent = '… '+(sp?sp+': ':'')+m.text;  // grey in-progress, above history
     }
     else if(m.type==='final'){
       const sp=m.speaker||'';
       C.textContent = m.text;
-      const tstr = m.ts ? new Date(m.ts*1000).toLocaleTimeString() : (m.start_ms/1000).toFixed(1)+'s';
+      const tstr = m.ts ? clockStr(m.ts*1000) : clockStr(recStart + m.start_ms);
       appendFinalLine(sp, m.text, tstr);
       L.textContent='';                             // utterance committed
     }
@@ -2865,7 +2865,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 # which matches the saved (silence-gated) pcm exactly -> seek +
                 # follow-highlight line up. ts (wall-clock) is display only.
                 ev["ts"] = time.time()
-                spk = ev.get("speaker") or speaker        # online diarize overrides
+                spk = live_session.resolve_speaker(ev.get("speaker"), speaker)
                 store.add_transcript(mid, "live", track,
                                      ev["start_ms"] + conn_offset_ms,
                                      ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,

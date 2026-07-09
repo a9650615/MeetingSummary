@@ -38,12 +38,6 @@ struct Row: Identifiable {
     let id: Int
     let speaker: String
     let text: String
-    // Auto placeholder (說話者1 / 對方2 / 我3) = not yet recognized -> no name shown.
-    var displaySpeaker: String {
-        let s = speaker.trimmingCharacters(in: .whitespaces)
-        if s.range(of: "^(我|對方|說話者)[0-9]+$", options: .regularExpression) != nil { return "" }
-        return s
-    }
 }
 
 // ── Native capture, in-process (approach B, single App identity) ──────────────
@@ -524,7 +518,7 @@ struct PanelView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         ForEach(m.transcripts) { r in
-                            (Text(r.displaySpeaker.isEmpty ? "" : r.displaySpeaker + "  ")
+                            (Text(r.speaker.isEmpty ? "" : r.speaker + "  ")
                                 .font(.caption).foregroundColor(.secondary)
                              + Text(r.text).font(.callout))
                                 .frame(maxWidth: .infinity, alignment: .leading)

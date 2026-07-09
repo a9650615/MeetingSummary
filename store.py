@@ -1,21 +1,8 @@
 """Store: SQLite metadata for meetings/segments/transcripts/summaries.
 Schema per docs spec §4. Audio bytes live on disk under data/."""
-import re
 import sqlite3
 import threading
 from pathlib import Path
-
-_PLACEHOLDER = re.compile(r"^(我|對方|說話者)\d+$")
-
-
-def _caption(speaker, text):
-    """Join a live caption line, dropping the speaker prefix for auto
-    placeholders (說話者1 / 對方2 / 我3) — a not-yet-recognized voice shows text
-    only, never a meaningless 說話者N. Human-named speakers (and the bare 我/對方
-    track labels) keep their prefix."""
-    if speaker and not _PLACEHOLDER.match(speaker.strip()):
-        return f"{speaker}：{text}"
-    return text
 
 
 def group_by_proximity(meetings, gap_s=600):
@@ -186,7 +173,7 @@ class Store:
         r = self.db.execute(
             "SELECT speaker, text FROM transcripts WHERE meeting_id=? "
             "ORDER BY id DESC LIMIT 1", (meeting_id,)).fetchone()
-        return (_caption(r["speaker"], r["text"]) if r and r["text"] else None) if r else None
+        return (f"{r['speaker']}：{r['text']}" if r and r["text"] else None) if r else None
 
     def recent_transcripts(self, meeting_id, limit=3):
         """Last `limit` finalized lines, oldest first — for the native panel's
@@ -194,7 +181,7 @@ class Store:
         rows = self.db.execute(
             "SELECT speaker, text FROM transcripts WHERE meeting_id=? "
             "ORDER BY id DESC LIMIT ?", (meeting_id, limit)).fetchall()
-        return [_caption(r["speaker"], r["text"]) for r in reversed(rows) if r["text"]]
+        return [f"{r['speaker']}：{r['text']}" for r in reversed(rows) if r["text"]]
 
     def transcripts_after(self, meeting_id, after_id=0):
         """Finalized lines with id > after_id, oldest first — for the /live page's

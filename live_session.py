@@ -13,6 +13,7 @@ backlog trim, the flush-on-stop — is one code path so the two entry points
 in app.py don't duplicate it.
 """
 import asyncio
+import re
 import sys
 import time
 
@@ -22,6 +23,18 @@ from starlette.websockets import WebSocketDisconnect
 import recorder
 
 TRACK_BACKLOG_MAXB = 45 * 16000 * 2  # ~45s cap; full audio is on disk for re-transcribe
+
+_PLACEHOLDER = re.compile(r"^(我|對方|說話者)\d+$")
+
+
+def resolve_speaker(diar_label, side_label):
+    """The speaker to STORE + display for a live final. A recognized name (from
+    the voiceprint DB) wins; an auto placeholder (說話者N / 對方N / 我N) collapses
+    to the track's side label (對方 = 系統音/remote, 我 = 麥克風). So an unrecognized
+    voice always shows which side spoke — never a meaningless 說話者N — and the
+    output is uniform whether or not diarization named the utterance."""
+    name = (diar_label or side_label or "").strip()
+    return side_label if _PLACEHOLDER.match(name) else (name or side_label)
 
 
 class WallClockPump:
@@ -289,7 +302,7 @@ def make_store_emit(mid, conn_offset_ms, store):
             return
         track, speaker = label
         ev["ts"] = time.time()
-        spk = ev.get("speaker") or speaker
+        spk = resolve_speaker(ev.get("speaker"), speaker)
         store.add_transcript(mid, "live", track,
                               ev["start_ms"] + conn_offset_ms,
                               ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
@@ -367,7 +380,7 @@ async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store):
             evs = []
         for ev in evs:
             if ev["kind"] == "final":  # audio-position offset, not wall-clock
-                spk = ev.get("speaker") or tracks[tag][1]
+                spk = resolve_speaker(ev.get("speaker"), tracks[tag][1])
                 store.add_transcript(mid, "live", tracks[tag][0],
                                       ev["start_ms"] + conn_offset_ms,
                                       ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,

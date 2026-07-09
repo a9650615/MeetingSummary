@@ -404,6 +404,17 @@ def test_make_store_emit_persists_only_final(tmp_path):
     assert store.latest_transcript(mid) == "我：done"
 
 
+def test_resolve_speaker_collapses_placeholder_to_side_keeps_name():
+    r = live_session.resolve_speaker
+    assert r("說話者1", "對方") == "對方"      # auto cluster -> side label
+    assert r("對方2", "對方") == "對方"         # numbered side placeholder -> bare side
+    assert r("我3", "我") == "我"
+    assert r(None, "對方") == "對方"            # diarize off -> side label
+    assert r("", "我") == "我"
+    assert r("Scott", "對方") == "Scott"        # recognized name wins
+    assert r("對方", "對方") == "對方"           # bare side label is not a placeholder
+
+
 # --- enable_diarization wiring (省效能: one embed per utterance by default) ---
 
 def _diar_sessions_tracks():
