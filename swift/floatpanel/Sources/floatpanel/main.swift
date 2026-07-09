@@ -304,6 +304,11 @@ final class Model: ObservableObject {
             let rec = (o["recording"] as? Bool) ?? false
             if rec && !self.recording { self.startedAt = Date() }
             if !rec { self.startedAt = nil; self.elapsed = "" }
+            // A live session that ends (stop OR the relay dying) returns the top
+            // dot to static idle — clear preparing/live so it stops breathing.
+            // The initial preparing window (started, not yet server-confirmed) is
+            // preserved: reset only on the recording -> not-recording transition.
+            if self.recording && !rec { self.starting = false; self.audioLive = false; self.liveNotice = "" }
             self.recording = rec
             let newMid = o["mid"] as? Int
             if newMid != self.trackedMid {  // new session (or ended) -> reset transcript cursor
@@ -313,7 +318,9 @@ final class Model: ObservableObject {
             }
             self.mid = newMid
             self.title = rec ? ((o["title"] as? String) ?? "錄音中") : "待機"
-            self.liveNotice = (o["notice"] as? String) ?? ""
+            // Only take a server notice when present — don't clobber a locally-set
+            // capture warning (e.g. the silent-tap / permission notice) every poll.
+            if let n = o["notice"] as? String, !n.isEmpty { self.liveNotice = n }
             if let lines = o["captions"] as? [String] {
                 self.captions = lines
             } else if let one = o["caption"] as? String, !one.isEmpty {
@@ -375,7 +382,7 @@ final class Model: ObservableObject {
         // Indicator: starting = socket up + asking permission + warming the
         // capturers, but no real audio yet (grey breathing dot); audioLive flips
         // on the first non-zero sample from any track (red dot).
-        self.starting = true; self.audioLive = false
+        self.starting = true; self.audioLive = false; self.liveNotice = ""
 
         let wantMic = (source == .mic || source == .both)
         let wantSystem = (source == .system || source == .both)
