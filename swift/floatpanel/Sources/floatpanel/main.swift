@@ -587,12 +587,29 @@ NSLayoutConstraint.activate([
 panel.contentView = vev
 panel.setContentSize(host.fittingSize)
 panel.center()
-panel.makeKeyAndOrderFront(nil)
 
-let statusController = StatusController(model: model, panel: panel)
-
-model.poll()
-Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in model.poll() }
-Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in model.tick() }
-Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { _ in model.pollTranscripts() }
+// Create the menu-bar light, show the panel, and start polling only AFTER the
+// app finishes launching. Creating an NSStatusItem before the run loop leaves
+// item.button == nil, so refresh() bails and the image is never set -> a
+// zero-width (invisible) status item. With no visible light, once the panel is
+// closed (= hidden) there's no way to re-summon it. didFinishLaunching
+// guarantees the status bar + its button exist, so the light actually appears
+// and stays as the app's persistent wake handle.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let m: Model
+    let panel: NSPanel
+    var status: StatusController?  // retains the status item for the app's life
+    init(m: Model, panel: NSPanel) { self.m = m; self.panel = panel; super.init() }
+    func applicationDidFinishLaunching(_ note: Notification) {
+        panel.makeKeyAndOrderFront(nil)
+        status = StatusController(model: m, panel: panel)
+        m.poll()
+        let mm = m
+        Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in mm.poll() }
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in mm.tick() }
+        Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { _ in mm.pollTranscripts() }
+    }
+}
+let appDelegate = AppDelegate(m: model, panel: panel)
+app.delegate = appDelegate
 app.run()
