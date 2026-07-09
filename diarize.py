@@ -343,9 +343,13 @@ def match_speaker(emb, known, threshold=0.62):
 
 
 def _is_placeholder(name):
-    """Auto label not yet named by a human (我3 / 對方24 / 說話者5)."""
+    """Auto label not yet named by a human (我3 / 對方24 / 說話者5 / 混合8). 混合N is
+    the 'both' track's auto label — mixed 2-speaker audio, so its centroid is
+    garbage; leaving it out of _is_placeholder let 71/149 such rows pollute the
+    live named-voiceprint match set (混合 vs 混合 ~0.8, 混合 vs a real name ~0.79)
+    → 認錯人. Never match auto placeholders live."""
     import re  # noqa: PLC0415
-    return bool(re.match(r"^(我|對方|說話者)\d+$", (name or "").strip()))
+    return bool(re.match(r"^(我|對方|說話者|混合)\d+$", (name or "").strip()))
 
 
 def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,

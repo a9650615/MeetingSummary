@@ -24,7 +24,7 @@ import recorder
 
 TRACK_BACKLOG_MAXB = 45 * 16000 * 2  # ~45s cap; full audio is on disk for re-transcribe
 
-_PLACEHOLDER = re.compile(r"^(我|對方|說話者)\d+$")
+_PLACEHOLDER = re.compile(r"^(我|對方|說話者|混合)\d+$")
 
 
 def resolve_speaker(diar_label, side_label):
