@@ -10,6 +10,7 @@ cd "$(dirname "$0")"
 PY=.venv/bin/python
 PORT=${MEETING_PORT:-8765}
 export MEETING_PORT=$PORT   # server (app.py) + health check bind the same port
+export MEETING_PANEL_AUTO=1 # real server opens the native floating panel on boot
 LOG=/tmp/meeting_server.log
 
 # Single-instance: a 2nd supervisor would fight the 1st (each start() kills the

@@ -418,8 +418,11 @@ def _models_page():
            "</select></label></div>"
            "<label class=chk style='margin-top:.6em'><input type=checkbox id=live_nativesys_opt> "
            "🖥️ 系統音用原生擷取（ScreenCaptureKit，免瀏覽器分享框）</label>"
+           "<label class=chk style='margin-top:.6em'><input type=checkbox id=native_relay_opt> "
+           "🔐 原生擷取由 App 直接進行（權限歸 MeetingSummary，非 python）</label>"
            "<p class=hint style='margin:.6em 0 0'>/live 錄音頁會記住這裡的預設；也可在錄音頁直接改，會自動存回。"
-           "原生擷取需先安裝 <code>audiocap</code> 並授權螢幕錄製。</p></div>")
+           "原生擷取需先安裝 <code>audiocap</code> 並授權螢幕錄製。開啟「權限歸 App」後，"
+           "浮動面板會自己啟動 audiocap 並串流回伺服器，讓螢幕錄製／麥克風權限記在 App 名下而非 python。</p></div>")
         + "</section>"
 
         "<section id=sec-rt><h2>加速 runtime（.cpp · Metal）</h2>"
@@ -521,6 +524,9 @@ def _models_page():
     (function(){const n=document.getElementById('live_nativesys_opt');if(!n)return;
       fetch('/settings/live_native_sys').then(r=>r.json()).then(j=>n.checked=j.value==='1');
       n.onchange=()=>fetch('/settings/live_native_sys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:n.checked?'1':'0'})});})();
+    (function(){const r=document.getElementById('native_relay_opt');if(!r)return;
+      fetch('/settings/native_relay').then(x=>x.json()).then(j=>r.checked=j.value==='1');
+      r.onchange=()=>fetch('/settings/native_relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:r.checked?'1':'0'})});})();
     function fmtB(b){if(b>=1e9)return (b/1e9).toFixed(2)+' GB';
       if(b>=1e6)return (b/1e6).toFixed(1)+' MB';
       if(b>=1e3)return (b/1e3).toFixed(0)+' KB';return b+' B';}
@@ -2053,6 +2059,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
             return True
         except Exception:  # noqa: BLE001
             return False
+
+    # Native entry point: the real server (supervise.sh sets MEETING_PANEL_AUTO=1)
+    # opens the floating panel on boot so launching the app lands on the native UI,
+    # not the browser. Gated on the env so plain `import app` in tests never spawns
+    # a GUI. No-op when floatpanel isn't installed.
+    #
+    # BUT NOT under approach B (native_relay=1): there the .app launcher spawns
+    # floatpanel ITSELF so macOS TCC attributes recording to the app, not python.
+    # If python auto-opened it here, floatpanel's responsible process would be
+    # python again — defeating the whole point — so leave the launch to the .app.
+    if os.environ.get("MEETING_PANEL_AUTO") == "1" and store.get_setting("native_relay", "0") != "1":
+        _open_panel()
+
     idle_release_s = int(os.environ.get("LIVE_IDLE_RELEASE_S", "600"))
 
     def _touch():
@@ -2152,10 +2171,15 @@ def create_app(store, *, summary_backend, asr_backend=None,
             except Exception:
                 return False
 
+        # relay (approach B) = the native app captures in-process + streams to
+        # /ws/native-capture. It does NOT need the audiocap helper (capture is
+        # folded into floatpanel), so report it regardless of audiocap presence.
+        relay = store.get_setting("native_relay", "0") == "1"
         binp = backends.audiocap_bin()
         if not binp:
             return {"audiocap": False, "granted": False, "mic_granted": False,
-                    "native_start": {"mic": False, "system": False, "both": False}}
+                    "native_start": {"mic": False, "system": False, "both": False},
+                    "relay": relay, "audiocap_path": None}
         granted = _probe("--check")
         mic_granted = _probe("--check-mic")
         # native_start.mic doesn't gate on mic_granted: unlike Screen-Recording
@@ -2165,7 +2189,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # input stream. So mic is attemptable as soon as audiocap exists;
         # system (and therefore both) still needs the real grant already.
         return {"audiocap": True, "granted": granted, "mic_granted": mic_granted,
-                "native_start": {"mic": True, "system": granted, "both": granted}}
+                "native_start": {"mic": True, "system": granted, "both": granted},
+                "relay": relay, "audiocap_path": binp}
 
     @app.post("/native/request-permission")
     def native_request_permission():
@@ -2345,6 +2370,131 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
         native_sessions[mid]["task"] = asyncio.create_task(_run())
         return {"id": mid, "source": source}
+
+    @app.websocket("/ws/native-capture")
+    async def ws_native_capture(ws: WebSocket):
+        # Native-front capture (approach B). The floatpanel spawns audiocap ITSELF
+        # and relays its framed stdout here over the socket. Why: macOS TCC blames
+        # the "responsible process" for screen-recording/mic, and the python server
+        # is detached (bootstrap setsid) so IT becomes responsible -> "python" shows
+        # in the Privacy panes. When the native app (launched by the .app) owns the
+        # audiocap child, TCC attributes to the app instead. Server-side this is the
+        # SAME pipeline as /live/start — only the audio SOURCE differs (this socket
+        # vs. a subprocess we spawn) — so it stays a first-class live_active citizen.
+        # ponytail: setup intentionally duplicates /live/start's rather than
+        # refactoring that in-use path; the two can diverge if the pipeline changes.
+        await ws.accept()
+        if live_manager is None:
+            await ws.close(code=1011)
+            return
+        qp = ws.query_params
+        source = qp.get("source", "mic")
+        if source not in ("mic", "system", "both"):
+            source = "mic"
+        diarize = qp.get("diarize") == "1"
+
+        import recorder  # noqa: PLC0415
+        t0 = time.time()
+        title = time.strftime("錄音 %Y-%m-%d %H:%M", time.localtime(t0))
+        mid = store.create_meeting(title, t0, "zh-TW")
+        conn_offset_ms = 0
+        audio_dir = f"data/{mid}-{int(t0)}"
+        os.makedirs(audio_dir, exist_ok=True)
+        store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
+                          started_at=t0, duration_s=0, origin="recorded")
+        if source == "mic":
+            tracks = {recorder.TRACK_MIC: ("mic", "我")}
+        elif source == "system":
+            tracks = {recorder.TRACK_SYSTEM: ("system", "對方")}
+        else:
+            tracks = {recorder.TRACK_MIC: ("mic", "我"),
+                      recorder.TRACK_SYSTEM: ("system", "對方")}
+        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb") for tag, lbl in tracks.items()}
+        live_manager.set_language(None)
+        sessions = live_session.build_track_sessions(
+            tracks, live_manager=live_manager, live_interim_backend=live_interim_backend,
+            silence_ms=live_silence_ms, min_speech_ms=live_min_speech_ms,
+            interim_s=live_interim_s, max_utt_s=live_max_utt_s,
+            rms_threshold=live_rms_threshold, interim_duty=live_interim_duty)
+        if diarize:
+            live_session.enable_diarization(sessions, tracks, store)
+
+        pump = live_session.WallClockPump(tracks, audio_files, t0)
+        idle["live"] += 1
+        live_active[mid] = 1
+        native_sessions[mid] = {"proc": None, "task": None, "notice": None}
+
+        class _WSFrameReader:
+            # Adapt WS binary frames to asyncio.StreamReader.readexactly so
+            # recorder.aiter_frames (via pump_framed_stdout) works verbatim.
+            def __init__(self, sock):
+                self.sock = sock
+                self.buf = bytearray()
+                self.eof = False
+
+            async def readexactly(self, n):
+                while len(self.buf) < n:
+                    if self.eof:
+                        raise asyncio.IncompleteReadError(bytes(self.buf), n)
+                    try:
+                        msg = await self.sock.receive()
+                    except Exception:  # noqa: BLE001  # disconnect / transport error
+                        self.eof = True
+                        continue
+                    if msg.get("type") == "websocket.disconnect":
+                        self.eof = True
+                        continue
+                    data = msg.get("bytes")
+                    if data:
+                        self.buf.extend(data)
+                out = bytes(self.buf[:n])
+                del self.buf[:n]
+                return out
+
+        reader = _WSFrameReader(ws)
+
+        def _should_stop():
+            if mid in live_stop:  # explicit /live/stop OR the relay ended (below)
+                live_stop.discard(mid)
+                return True
+            return False
+
+        def _pop_notice():
+            fn = getattr(live_manager.backend, "pop_notice", None)
+            return fn() if fn else None
+
+        # consume + finalize run in a DETACHED task (like /live/start). The ws
+        # handler below is cancelled the instant the client disconnects, so if the
+        # flush/cleanup ran inline here its `await`s would be cancelled mid-way and
+        # live_active would never clear. Detached, it survives the disconnect and
+        # finalizes cleanly; the handler only relays frames + signals stop.
+        async def _run():
+            try:
+                await live_session.consume(
+                    pump, sessions, tracks, rec_on=lambda: False,
+                    emit=live_session.make_store_emit(mid, conn_offset_ms, store),
+                    should_stop=_should_stop,
+                    interim_lag_bytes=int(2 * live_interim_s * 16000) * 2,
+                    pop_notice=_pop_notice)
+            finally:
+                pump.pad_to(time.time())
+                await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
+                for f in audio_files.values():
+                    f.close()
+                idle["live"] = max(0, idle["live"] - 1)
+                live_active.pop(mid, None)
+                native_sessions.pop(mid, None)
+                _touch()
+
+        native_sessions[mid]["task"] = asyncio.create_task(_run())
+        try:
+            # Relay audiocap frames until the socket closes / audiocap exits (EOF).
+            await live_session.pump_framed_stdout(reader, pump)
+        finally:
+            # Tell the detached consume task to drain + finalize. Runs even under
+            # CancelledError (client disconnect) — plain statements, no await.
+            live_stop.add(mid)
+            pump.got.set()
 
     @app.post("/live/stop")
     def live_stop_all():
@@ -3317,7 +3467,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
                  "denoise": "0", "float_panel": "0",
                  # /live recording defaults, so the page never needs re-picking:
-                 "live_source": "mic", "live_native_sys": "0"}
+                 "live_source": "mic", "live_native_sys": "0",
+                 # approach B: native app spawns audiocap + relays to /ws/native-capture
+                 # (TCC blames the app, not python). Opt-in while it beds in.
+                 "native_relay": "0"}
 
     @app.get("/settings/{key}")
     def get_setting_route(key: str):
@@ -3330,7 +3483,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if key not in _SETTINGS:
             raise HTTPException(404, "unknown setting")
         v = body.value
-        if key in ("persist_speakers", "live_native_sys"):
+        if key in ("persist_speakers", "live_native_sys", "native_relay"):
             v = "1" if v in ("1", "true", "on") else "0"
         elif key == "live_source":
             v = v if v in ("mic", "system", "both", "dual") else "mic"

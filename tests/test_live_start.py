@@ -234,6 +234,39 @@ def test_meeting_transcripts_after_returns_only_newer_rows(tmp_path):
         assert c.get("/meetings/999999/transcripts").status_code == 404
 
 
+def test_ws_native_capture_ingests_relayed_frames(tmp_path, monkeypatch):
+    # Approach B: the native app spawns audiocap and relays its framed stdout to
+    # /ws/native-capture. Server ingests it through the SAME pipeline as
+    # /live/start (no subprocess spawned server-side) and persists the PCM.
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "m.db")
+    app = create_app(store, summary_backend=lambda p: "x", asr_backend=None,
+                     live_manager=_FakeLiveManager())
+    frame = struct.pack("<BI", recorder.TRACK_SYSTEM, 2) + b"\x00\x00"
+    with TestClient(app) as c:
+        with c.websocket_connect("/ws/native-capture?source=system") as ws:
+            ws.send_bytes(frame * 5)
+            assert _wait_until(lambda: c.get("/live/state").json()["recording"] is True)
+        # closing the socket ends the session like an explicit /live/stop
+        assert _wait_until(lambda: c.get("/live/state").json()["recording"] is False)
+
+    seg_dirs = list((tmp_path / "data").glob("*-*"))
+    assert seg_dirs, "no segment dir created for the relayed native session"
+    assert (seg_dirs[0] / "system.pcm").read_bytes() != b""
+
+
+def test_ws_native_capture_needs_a_live_backend(tmp_path):
+    store = Store(tmp_path / "m.db")
+    app = create_app(store, summary_backend=lambda p: "x", asr_backend=None)  # live_manager=None
+    with TestClient(app) as c:
+        with c.websocket_connect("/ws/native-capture?source=mic") as ws:
+            # server closes immediately (1011) — receiving raises on the closed socket
+            import pytest as _pytest
+            from starlette.websockets import WebSocketDisconnect
+            with _pytest.raises(WebSocketDisconnect):
+                ws.receive_bytes()
+
+
 def test_live_start_both_tracks_creates_two_pcm_files(tmp_path, monkeypatch):
     # Helper dies right after its one frame, every time it's respawned -- the
     # supervisor retries (fast, no delay here) then gives up and ends the

@@ -40,34 +40,44 @@ PLIST
 # 3. Launcher (the bundle executable): first-run setup, supervise, open browser.
 cat > "$APP/Contents/MacOS/launcher" <<LAUNCH
 #!/usr/bin/env bash
-# Launch-first UX: open the browser immediately; bootstrap.py serves a progress
-# page on the port and installs deps in the background (skipped if a venv is
-# ready), then hands off to the real server. Reuses the dev project's venv if it
-# exists -> instant; otherwise sets up in Application Support.
+# Launch-first UX: bring up the native floating panel (approach B — launched
+# directly by this .app so macOS TCC attributes recording to the app, not python).
+# bootstrap.py installs deps in the background (skipped if a venv is ready) then
+# hands off to the real server; it opens the browser only if the panel isn't
+# installed. Reuses the dev project's venv if it exists -> instant.
 set -u
 PORT="\${MEETING_PORT:-$PORT}"   # runtime MEETING_PORT wins; build-time PORT is only the default
-# Already running? skip bootstrap/rsync entirely — jump straight to the page.
-if /usr/bin/curl -fsS -m 1 "http://127.0.0.1:\$PORT/health" >/dev/null 2>&1; then
-  open "http://127.0.0.1:\$PORT"
-  exit 0
-fi
 PROJECT="$ROOT"
 SRC="\$(cd "\$(dirname "\$0")/../Resources/app" && pwd)"
 WD="\$HOME/Library/Application Support/MeetingSummary"
-if [ -x "\$PROJECT/.venv/bin/python" ]; then
-  WD="\$PROJECT"                       # dev machine: reuse working venv (instant)
-else                                   # distribution: bootstrap release-update keeps code fresh
+[ -x "\$PROJECT/.venv/bin/python" ] && WD="\$PROJECT"   # dev machine: reuse working venv
+FP="\$WD/swift/floatpanel/.build/release/floatpanel"
+# Native entry (approach B): launch the floating panel as a DIRECT child of this
+# .app, detached so it survives our exit. Why direct (not via the python server):
+# macOS TCC blames the "responsible process" for screen-recording/mic; spawned by
+# the .app, the panel — and the audiocap it spawns — attribute to the app, not the
+# detached python server ("python" in the Privacy panes). The ( … & ) reparents it
+# to launchd, which preserves that attribution. Returns non-zero if not installed.
+launch_panel() { [ -x "\$FP" ] && ( MEETING_PORT="\$PORT" "\$FP" >/dev/null 2>&1 & ) ; }
+
+# Already running? just (re)show the panel; browser fallback if the panel isn't installed.
+if /usr/bin/curl -fsS -m 1 "http://127.0.0.1:\$PORT/health" >/dev/null 2>&1; then
+  launch_panel || open "http://127.0.0.1:\$PORT"
+  exit 0
+fi
+# Cold start: set up the working dir if this isn't a dev checkout.
+if [ ! -x "\$PROJECT/.venv/bin/python" ]; then   # distribution: release-update keeps code fresh
   mkdir -p "\$WD"
   /usr/bin/rsync -a --exclude .venv --exclude data "\$SRC/" "\$WD/" 2>/dev/null || cp -R "\$SRC/." "\$WD/"
 fi
 export MEETING_PORT=\$PORT
 export MEETING_REPO="$REPO_SLUG"                # bootstrap polls GitHub releases
 cd "\$WD"
-# Start the server detached, then exit immediately so the dock icon doesn't bounce
-# waiting on a foreground GUI app. bootstrap calls setsid() to survive into its own
-# session (the .app's process group gets reaped when we exit) and opens the browser
-# itself once it's serving the progress page.
+# Start the server detached, then exit immediately so the dock icon doesn't bounce.
+# bootstrap calls setsid() to survive the .app's process-group reap; it opens the
+# browser itself ONLY if the native panel isn't installed (else the panel is the UI).
 nohup /usr/bin/python3 bootstrap.py >/dev/null 2>&1 &
+launch_panel   # server still coming up; the panel polls + connects when it's ready
 exit 0
 LAUNCH
 chmod +x "$APP/Contents/MacOS/launcher"

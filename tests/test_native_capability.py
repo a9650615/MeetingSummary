@@ -23,7 +23,8 @@ def test_capability_no_helper(tmp_path, monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body == {"audiocap": False, "granted": False, "mic_granted": False,
-                     "native_start": {"mic": False, "system": False, "both": False}}
+                     "native_start": {"mic": False, "system": False, "both": False},
+                     "relay": False, "audiocap_path": None}
 
 
 def test_capability_helper_granted(tmp_path, monkeypatch, tmp_path_factory):
@@ -37,7 +38,8 @@ def test_capability_helper_granted(tmp_path, monkeypatch, tmp_path_factory):
     assert r.status_code == 200
     body = r.json()
     assert body == {"audiocap": True, "granted": True, "mic_granted": True,
-                     "native_start": {"mic": True, "system": True, "both": True}}
+                     "native_start": {"mic": True, "system": True, "both": True},
+                     "relay": False, "audiocap_path": str(fake_bin)}
 
 
 def test_capability_helper_denied(tmp_path, monkeypatch, tmp_path_factory):
@@ -54,7 +56,8 @@ def test_capability_helper_denied(tmp_path, monkeypatch, tmp_path_factory):
     # prompt is reliable on first real use, unlike screen-recording, so mic
     # start is attemptable as soon as audiocap exists (see native_capability).
     assert body == {"audiocap": True, "granted": False, "mic_granted": False,
-                     "native_start": {"mic": True, "system": False, "both": False}}
+                     "native_start": {"mic": True, "system": False, "both": False},
+                     "relay": False, "audiocap_path": str(fake_bin)}
 
 
 def test_capability_helper_timeout(tmp_path, monkeypatch, tmp_path_factory):

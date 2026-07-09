@@ -249,7 +249,12 @@ final class SystemTapCapturer {
             kAudioAggregateDeviceTapAutoStartKey: true,
             kAudioAggregateDeviceTapListKey: [[
                 kAudioSubTapUIDKey: desc.uuid.uuidString,
-                kAudioSubTapDriftCompensationKey: true,
+                // Drift compensation OFF: we tap the GLOBAL system mix, which shares
+                // the output device's clock (one clock domain, no drift to correct).
+                // Turning it on inserts a resampler into the live output path, which
+                // audibly garbles the very audio the user is listening to. Only
+                // needed when aggregating independent devices on separate clocks.
+                kAudioSubTapDriftCompensationKey: false,
             ]],
         ]
         var agg = AudioObjectID(kAudioObjectUnknown)

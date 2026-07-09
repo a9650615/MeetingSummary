@@ -21,6 +21,16 @@ LOG = os.path.join(HERE, "setup.log")
 state = {"step": "啟動中…", "line": "", "done": False, "error": ""}
 
 
+def _floatpanel_installed():
+    # Mirrors backends.floatpanel_bin() without importing it (bootstrap runs on
+    # system python3, pre-venv). When installed, the real server opens the native
+    # panel on boot (MEETING_PANEL_AUTO) so we skip opening the browser here.
+    p = os.environ.get("FLOATPANEL_BIN")
+    if p and os.path.exists(p):
+        return True
+    return os.path.exists(os.path.join(HERE, "swift", "floatpanel", ".build", "release", "floatpanel"))
+
+
 def _is_apple_silicon_hw():
     # True even under Rosetta — checks the HARDWARE, not the process arch.
     try:
@@ -193,8 +203,12 @@ def main():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     # Open the browser ourselves (we're in the surviving session) — the launcher
     # has already exited, so it can't. The progress page shows now, then reloads to
-    # the app once the real server takes over.
-    subprocess.run(["open", f"http://127.0.0.1:{PORT}"], capture_output=True)
+    # the app once the real server takes over. Skip it when the native panel is
+    # installed: the real server opens the panel on boot (MEETING_PANEL_AUTO), so
+    # opening the browser too would double the UI. Panel absent -> browser is both
+    # the progress page and the entry point.
+    if not _floatpanel_installed():
+        subprocess.run(["open", f"http://127.0.0.1:{PORT}"], capture_output=True)
     setup()
     # Can the real server even import? If yes, hand off. If not, it's a genuine
     # failure -> show the log on the page (don't exec a doomed server / hang silently).
