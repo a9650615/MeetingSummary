@@ -576,7 +576,11 @@ final class StatusController: NSObject {
 let model = Model()
 let delegate = PanelDelegate()
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
+// .regular = a Dock icon (reliable in every launch mode, incl. a dev raw binary —
+// unlike the menu-bar status item, which only renders dependably from a bundled
+// .app). The Dock icon is the app's persistent handle: closing the panel only
+// hides it (windowShouldClose), so clicking the Dock icon re-shows it.
+app.setActivationPolicy(.regular)
 
 let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
                     styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
@@ -634,6 +638,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in mm.poll() }
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in mm.tick() }
         Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { _ in mm.pollTranscripts() }
+    }
+
+    // Closing the panel only hides it (windowShouldClose), so never quit on last
+    // window closed — the app lives on in the Dock as the persistent handle.
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { false }
+
+    // Clicking the Dock icon (app already running, panel hidden) re-shows the panel.
+    func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { panel.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+        return true
     }
 }
 let appDelegate = AppDelegate(m: model, panel: panel)
