@@ -123,6 +123,22 @@ else
   echo "  (cd swift/floatpanel && swift build -c release) && ./build_app.sh" >&2
 fi
 
+# 6. Code-sign (launcher + nested panel) with a stable identity so macOS TCC
+# grants persist across updates. Uses the self-signed "MeetingSummary Dev"
+# identity when present (create once: ./setup_signing_cert.sh), else adhoc but
+# pinned to the real bundle id. Self-signed/adhoc still trips Gatekeeper on
+# other machines (right-click > Open) — that's expected until Developer ID +
+# notarization. --deep signs the nested panel (its own io.meetingsummary.floatpanel
+# identifier is preserved from its Info.plist).
+SIGN_ID="${FLOATPANEL_SIGN_ID:-MeetingSummary Dev}"
+if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+  codesign --force --deep -s "$SIGN_ID" --identifier io.meetingsummary.app "$APP" \
+    && echo "signed: $SIGN_ID"
+else
+  codesign --force --deep -s - --identifier io.meetingsummary.app "$APP" 2>/dev/null || true
+  echo "note: no '$SIGN_ID' identity — adhoc signed (run ./setup_signing_cert.sh for a stable one)" >&2
+fi
+
 echo "built $APP"
 echo "run: open '$APP'  (first launch installs deps + downloads models on demand)"
-echo "unsigned -> first time: right-click the app > Open to bypass Gatekeeper"
+echo "unsigned/self-signed -> first time: right-click the app > Open to bypass Gatekeeper"

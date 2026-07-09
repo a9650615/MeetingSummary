@@ -31,7 +31,9 @@ cp swift/floatpanel/Info.plist "$APP/Contents/Info.plist"
 #     Certificate Type: Code Signing
 # then rebuild — the grant then persists across rebuilds.
 SIGN_ID="${FLOATPANEL_SIGN_ID:-MeetingSummary Dev}"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+# No -v: a self-signed identity is untrusted so it's excluded from "valid
+# identities only", but codesign can still use it (that's all TCC needs).
+if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
   codesign --force --deep -s "$SIGN_ID" --identifier io.meetingsummary.floatpanel "$APP" \
     && echo "signed: $SIGN_ID (TCC grant persists across rebuilds)"
 else
