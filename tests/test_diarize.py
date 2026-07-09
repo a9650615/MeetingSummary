@@ -316,3 +316,31 @@ def test_split_live_utterance_embed_single_speaker_stays_one():
     parts = diarize.split_live_utterance(audio, "整段都是同一個人在講話。", _emb_labeler(), window_s=1.5)
     assert len(parts) == 1
     assert parts[0][0] == "A"
+
+
+def test_consolidate_named_drops_outlier_and_merges():
+    # One person named repeatedly: 3 coherent enrollments + 1 orthogonal garbage
+    # row -> ONE consolidated centroid near the coherent mean, garbage dropped.
+    # A placeholder (說話者N) is excluded; a lone name passes through.
+    import numpy as np
+    import diarize
+
+    def row(name, vec, count):
+        v = np.asarray(vec, dtype=np.float32)
+        v = v / (np.linalg.norm(v) + 1e-9)
+        return {"name": name, "centroid": v.tobytes(), "count": count}
+
+    base = [1.0, 0.0, 0.0, 0.0]
+    speakers = [
+        row("Hank", base, 5), row("Hank", [0.95, 0.31, 0.0, 0.0], 3),
+        row("Hank", [0.9, 0.2, 0.3, 0.0], 4), row("Hank", [0.0, 0.0, 0.0, 1.0], 1),  # orthogonal garbage
+        row("Ann", [0.0, 1.0, 0.0, 0.0], 2),
+        row("說話者3", base, 9),  # placeholder -> excluded
+    ]
+    out = diarize._consolidate_named(speakers)
+    names = [n for n, _ in out]
+    assert names.count("Hank") == 1              # 3 coherent merged, orphan dropped
+    assert "Ann" in names and "說話者3" not in names
+    hank = [v for n, v in out if n == "Hank"][0]
+    base_u = np.asarray(base, dtype=np.float32)
+    assert float(np.dot(hank, base_u)) > 0.9     # near coherent mean, not dragged to the orthogonal row

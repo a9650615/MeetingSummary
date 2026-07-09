@@ -352,6 +352,56 @@ def _is_placeholder(name):
     return bool(re.match(r"^(我|對方|說話者|混合)\d+$", (name or "").strip()))
 
 
+def _consolidate_named(speakers, *, cohesion=0.45):
+    """Collapse the fragmented per-name voiceprints from store.list_speakers() into
+    a few CLEAN centroids per name for live matching. Naming appends a NEW row each
+    time a cluster is named, so one person accrues many centroids — some
+    corroborating (same voice), some garbage (measured: a 'Hank' row orthogonal,
+    ~-0.05, to the other Hanks). Matching best-of-all then risks 認錯 (a garbage
+    row wins) and dilutes recall. Fix: per name, single-linkage-cluster the
+    centroids by cosine; count-weighted-average each cohesive group (>=2 members)
+    into ONE unit centroid, dropping lone dissenters; a name with no cohesive pair
+    falls back to its highest-count single centroid. Returns [(name, unit_np), ...].
+    Read-only — no DB write, so it's always fresh and reversible."""
+    import numpy as np  # noqa: PLC0415
+    from collections import defaultdict  # noqa: PLC0415
+    byname = defaultdict(list)
+    for r in speakers:
+        if r["centroid"] and not _is_placeholder(r["name"]):
+            v = np.frombuffer(r["centroid"], dtype=np.float32)
+            byname[r["name"]].append((v / (np.linalg.norm(v) + 1e-9), r["count"] or 1))
+    out = []
+    for name, items in byname.items():
+        vs = [v for v, _ in items]
+        n = len(vs)
+        if n == 1:
+            out.append((name, vs[0]))
+            continue
+        parent = list(range(n))
+        def find(x, parent=parent):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        for i in range(n):
+            for j in range(i + 1, n):
+                if float(vs[i] @ vs[j]) >= cohesion:
+                    parent[find(i)] = find(j)
+        groups = defaultdict(list)
+        for i in range(n):
+            groups[find(i)].append(i)
+        cohesive = [g for g in groups.values() if len(g) >= 2]
+        if not cohesive:  # all disagree -> trust the highest-count single centroid
+            best = max(range(n), key=lambda i: items[i][1])
+            out.append((name, vs[best]))
+            continue
+        for g in cohesive:
+            w = np.array([items[i][1] for i in g], dtype=np.float32)
+            c = np.average([vs[i] for i in g], axis=0, weights=w)
+            out.append((name, (c / (np.linalg.norm(c) + 1e-9)).astype(np.float32)))
+    return out
+
+
 def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
                          match_threshold=0.62, min_secs=1.2, sample_rate=16000):
     """Factory for the LIVE per-utterance speaker label fn: fn(pcm_bytes) -> label.
@@ -367,9 +417,9 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
     speakers = store.list_speakers() rows (id, name, centroid bytes, count)."""
     import numpy as np  # noqa: PLC0415
     tr = SpeakerTracker(threshold=session_threshold)
-    known = [(r["name"], np.frombuffer(r["centroid"], dtype=np.float32))
-             for r in speakers
-             if r["centroid"] and not _is_placeholder(r["name"])]
+    # One clean count-weighted centroid per name (dropping garbage/outlier
+    # enrollments) instead of every fragmented row — see _consolidate_named.
+    known = _consolidate_named(speakers)
     min_bytes = int(min_secs * sample_rate) * 2
     promoted = {}  # session id -> name, once that cluster's running centroid matches
 
