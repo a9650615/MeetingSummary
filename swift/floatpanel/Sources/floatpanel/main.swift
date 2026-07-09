@@ -255,6 +255,10 @@ final class Model: ObservableObject {
     @Published var elapsed = ""
     @Published var note = ""
     @Published var hint = ""
+    // Top-dot state: starting = capture began but no real audio yet (grey
+    // breathing); audioLive = first non-zero sample arrived (red). Idle = neither.
+    @Published var starting = false
+    @Published var audioLive = false
     @Published var source: Source = .mic
     // A native session can fail AFTER capture already started (e.g. mic/screen-
     // recording access denied when the capturer actually opens the device) —
@@ -368,10 +372,10 @@ final class Model: ObservableObject {
         task.resume()
         let sink = WSFrameSink(task)
         self.sink = sink
-        // Indicator: "準備中" = socket up + asking permission + warming the
-        // capturers, but no real audio yet; flips to "● 錄音中" on the first
-        // non-zero sample from any track (see onFirstAudio / mic start).
-        self.hint = "準備中…"
+        // Indicator: starting = socket up + asking permission + warming the
+        // capturers, but no real audio yet (grey breathing dot); audioLive flips
+        // on the first non-zero sample from any track (red dot).
+        self.starting = true; self.audioLive = false
 
         let wantMic = (source == .mic || source == .both)
         let wantSystem = (source == .system || source == .both)
@@ -382,7 +386,7 @@ final class Model: ObservableObject {
                     guard let self = self, self.wsTask === task else { return }  // not stopped meanwhile
                     if granted {
                         let mic = PanelMicCapturer(sink: sink)
-                        do { try mic.start(); self.micCap = mic; self.hint = "● 錄音中" }
+                        do { try mic.start(); self.micCap = mic; self.audioLive = true }
                         catch { self.liveNotice = "麥克風擷取失敗: \(error.localizedDescription)" }
                     } else {
                         self.liveNotice = "需要麥克風權限：系統設定 → 隱私權與安全性 → 麥克風"
@@ -405,7 +409,7 @@ final class Model: ObservableObject {
                 let sys = PanelSystemTapCapturer(sink: sink)
                 sys.onFirstAudio = { [weak self] in
                     guard let self = self, self.wsTask === task else { return }
-                    self.hint = "● 錄音中"
+                    self.audioLive = true
                     if self.liveNotice.contains("系統音") || self.liveNotice.contains("螢幕") {
                         self.liveNotice = ""  // audio flowing -> clear the permission nag
                     }
@@ -431,7 +435,7 @@ final class Model: ObservableObject {
     }
 
     private func stopNativeRelay() {
-        self.hint = ""
+        self.starting = false; self.audioLive = false
         micCap?.stop(); micCap = nil
         if #available(macOS 14.2, *) { (sysCap as? PanelSystemTapCapturer)?.stop() }
         sysCap = nil
@@ -463,12 +467,17 @@ final class Model: ObservableObject {
 struct PanelView: View {
     @ObservedObject var m: Model
 
+    // Session active (started or server-confirmed) — drives the top dot.
+    private var dotActive: Bool { m.recording || m.starting }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 8) {
-                Image(systemName: m.recording ? "record.circle.fill" : "circle")
-                    .foregroundStyle(m.recording ? .red : .secondary)
-                    .opacity(m.recording ? pulse : 1)
+                // 3-state: idle = grey static; 準備中 (started, no audio yet) = grey
+                // breathing; 錄音中 (real audio flowing) = red breathing.
+                Image(systemName: dotActive ? "record.circle.fill" : "circle")
+                    .foregroundStyle(dotActive ? (m.audioLive ? Color.red : Color.gray) : Color.secondary)
+                    .opacity(dotActive ? pulse : 1)
                 Text(m.title).font(.headline).lineLimit(1)
                 Spacer()
                 if !m.elapsed.isEmpty {
