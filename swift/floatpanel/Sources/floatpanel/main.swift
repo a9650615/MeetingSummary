@@ -151,6 +151,9 @@ final class PanelSystemTapCapturer {
     // onFirstAudio fires once then, so the UI can say "真的在錄" vs "還沒收到音訊".
     private(set) var sawSignal = false
     var onFirstAudio: (() -> Void)?
+    // Which start() step failed + its OSStatus, so the UI can say more than "failed".
+    private(set) var lastErr: OSStatus = noErr
+    private(set) var failStage = ""
 
     init(sink: WSFrameSink) { self.sink = sink }
 
@@ -160,7 +163,7 @@ final class PanelSystemTapCapturer {
         desc.muteBehavior = .unmuted
         var tap = AudioObjectID(kAudioObjectUnknown)
         var st = AudioHardwareCreateProcessTap(desc, &tap)
-        guard st == noErr, tap != kAudioObjectUnknown else { return false }
+        guard st == noErr, tap != kAudioObjectUnknown else { lastErr = st; failStage = "createTap"; return false }
         tapID = tap
 
         var fmt = AudioStreamBasicDescription()
@@ -170,13 +173,20 @@ final class PanelSystemTapCapturer {
             mElement: kAudioObjectPropertyElementMain)
         st = AudioObjectGetPropertyData(tapID, &fmtAddr, 0, nil, &sz, &fmt)
         guard st == noErr, let inFmt = AVAudioFormat(streamDescription: &fmt),
-              let conv = AVAudioConverter(from: inFmt, to: outFormat) else { return false }
+              let conv = AVAudioConverter(from: inFmt, to: outFormat) else {
+            lastErr = st; failStage = "tapFormat"; return false
+        }
         inFormat = inFmt
         converter = conv
 
+        // Unique aggregate UID per launch. A FIXED UID collides with a stale
+        // private aggregate leaked by a SIGKILLed prior instance (cleanup in
+        // stop() never ran) -> AudioHardwareCreateAggregateDevice returns 'nope'
+        // (1852797029) and system audio "fails to start". A per-launch UID never
+        // collides; the orphan is harmless and coreaudiod reaps it.
         let aggDesc: [String: Any] = [
             kAudioAggregateDeviceNameKey: "MeetingSummary Panel Tap",
-            kAudioAggregateDeviceUIDKey: "io.meetingsummary.panel.aggregate",
+            kAudioAggregateDeviceUIDKey: "io.meetingsummary.panel.aggregate." + UUID().uuidString,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
             kAudioAggregateDeviceTapAutoStartKey: true,
@@ -187,15 +197,16 @@ final class PanelSystemTapCapturer {
         ]
         var agg = AudioObjectID(kAudioObjectUnknown)
         st = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &agg)
-        guard st == noErr, agg != kAudioObjectUnknown else { return false }
+        guard st == noErr, agg != kAudioObjectUnknown else { lastErr = st; failStage = "createAggregate"; return false }
         aggID = agg
 
         let queue = DispatchQueue(label: "panel.systemtap")
         st = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, queue) { [weak self] _, inData, _, _, _ in
             self?.handle(inData)
         }
-        guard st == noErr, let proc = procID else { return false }
+        guard st == noErr, let proc = procID else { lastErr = st; failStage = "ioProc"; return false }
         st = AudioDeviceStart(aggID, proc)
+        if st != noErr { lastErr = st; failStage = "deviceStart" }
         return st == noErr
     }
 
@@ -456,7 +467,7 @@ final class Model: ObservableObject {
                         }
                     }
                 } else {
-                    self.liveNotice = "系統音擷取啟動失敗（需授權／macOS 14.2+）"
+                    self.liveNotice = "系統音擷取啟動失敗（\(sys.failStage) \(sys.lastErr)）— 需授權／macOS 14.2+，重試或重啟 App"
                 }
             } else {
                 self.liveNotice = "系統音原生擷取需 macOS 14.2 以上"
