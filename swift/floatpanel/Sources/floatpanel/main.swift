@@ -262,6 +262,8 @@ final class Model: ObservableObject {
     private var trackedMid: Int?
     var mid: Int?
     var startedAt: Date?
+    private var lastShowSeq = -1        // last /floatpanel/open counter seen (-1 = not yet polled)
+    var onShowRequest: (() -> Void)?    // set by AppDelegate: bring the panel forward
 
     private func req(_ path: String, method: String = "GET", json: [String: Any]? = nil,
                      done: ((Data?, Int) -> Void)? = nil) {
@@ -304,6 +306,13 @@ final class Model: ObservableObject {
                 self.captions = [one]
             } else {
                 self.captions = []
+            }
+            // Server-driven re-show: /floatpanel/open bumps show_seq. Seeing it
+            // increase means "bring the panel back" — works even when the
+            // menu-bar light isn't visible (dev raw binary / full menu bar).
+            if let seq = o["show_seq"] as? Int {
+                if self.lastShowSeq >= 0 && seq > self.lastShowSeq { self.onShowRequest?() }
+                self.lastShowSeq = seq
             }
         }
     }
@@ -534,10 +543,20 @@ final class StatusController: NSObject {
     }
 
     func refresh(recording: Bool) {
-        guard let b = item.button else { return }
+        guard let b = item.button else {
+            FileHandle.standardError.write("floatpanel: refresh but item.button==nil\n".data(using: .utf8)!)
+            return
+        }
         let name = recording ? "record.circle.fill" : "waveform.circle"
-        b.image = NSImage(systemSymbolName: name, accessibilityDescription: "MeetingSummary")
-        b.image?.isTemplate = true
+        if let img = NSImage(systemSymbolName: name, accessibilityDescription: "MeetingSummary") {
+            img.isTemplate = true
+            b.image = img
+            b.title = ""
+        } else {
+            // SF Symbol unavailable -> a text title so the light is never invisible.
+            b.image = nil
+            b.title = recording ? "● REC" : "◉ MS"
+        }
         b.contentTintColor = recording ? .systemRed : nil
     }
 
@@ -603,6 +622,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         panel.makeKeyAndOrderFront(nil)
         status = StatusController(model: m, panel: panel)
+        // Server-driven re-show handle (menu-bar-independent): /floatpanel/open
+        // bumps show_seq; the model sees it on poll and calls this to surface us.
+        m.onShowRequest = { [weak self] in
+            guard let self = self else { return }
+            self.panel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         m.poll()
         let mm = m
         Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in mm.poll() }

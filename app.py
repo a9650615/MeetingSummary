@@ -2013,7 +2013,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
     live_stop = set()  # mids the float control panel asked to stop (server-side)
     native_sessions = {}  # mid -> {"proc": None, "task": asyncio.Task, "notice": str|None}
     # for a /ws/native-capture (floatpanel relay) session — task kept alive here (else GC'd)
-    _panel = {"p": None}  # the floating control-panel subprocess (singleton)
+    _panel = {"p": None, "show_seq": 0}  # subprocess (singleton) + show-request counter
 
     def _open_panel():
         """Launch the native float panel if installed; idempotent (reuse if alive)."""
@@ -2113,7 +2113,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 notice = sess["notice"]
         return {"recording": bool(mids), "mid": mid, "count": len(mids),
                 "title": title, "caption": caption, "captions": captions, "notice": notice,
-                "started_at": started_at}
+                "started_at": started_at, "show_seq": _panel["show_seq"]}
 
     @app.get("/native/capability")
     def native_capability():
@@ -2279,7 +2279,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.post("/floatpanel/open")
     def floatpanel_open():
-        # Launch the native floating control panel (detached, idempotent).
+        # Show the native floating panel. Two cases, both handled: (1) not
+        # running -> spawn it (detached, idempotent); (2) already running but
+        # HIDDEN (window closed to the — possibly invisible — menu-bar light) ->
+        # bump show_seq, which the panel sees on its next /live/state poll and
+        # re-shows itself. So this is a reliable "bring the panel back" that does
+        # NOT depend on the menu-bar status item being visible.
+        _panel["show_seq"] += 1
         if not _open_panel():
             raise HTTPException(400, "floatpanel 未安裝（設定 → 加速 runtime → 安裝）")
         return {"opened": True}
