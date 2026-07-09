@@ -534,20 +534,6 @@ def ane_helper_bin():
     return cand if os.path.exists(cand) else None
 
 
-def audiocap_bin():
-    """Path to the prebuilt Swift ScreenCaptureKit system-audio helper, or None.
-    Env AUDIOCAP_BIN overrides (the .app bundles it); else the repo build output.
-    Streams 16k mono int16-LE PCM of system audio to stdout (needs macOS
-    Screen-Recording permission for the launching app)."""
-    import os  # noqa: PLC0415
-    p = os.environ.get("AUDIOCAP_BIN")
-    if p and os.path.exists(p):
-        return p
-    here = os.path.dirname(os.path.abspath(__file__))
-    cand = os.path.join(here, "swift", "audiocap", ".build", "release", "audiocap")
-    return cand if os.path.exists(cand) else None
-
-
 def floatpanel_bin():
     """Path to the prebuilt floating control-panel app, or None. Env FLOATPANEL_BIN
     overrides; else the repo build output."""

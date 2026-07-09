@@ -62,23 +62,20 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" "qwen3-ane-arm64.tar.gz" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Cache audiocap + floatpanel swift builds
+      - name: Cache floatpanel swift build
         uses: actions/cache@v4
         with:
           path: |
-            swift/audiocap/.build
             swift/floatpanel/.build
-          key: nativehelpers-arm64-${{ hashFiles('swift/audiocap/Sources/**', 'swift/floatpanel/Sources/**') }}
-      - name: Build + attach native helpers (audiocap, floatpanel) (best-effort)
-        # Pure Swift (ScreenCaptureKit / AppKit) — no Metal, fast. setup_runtime.sh
-        # downloads these so users get native system audio + the float panel without
-        # a Swift build. Non-blocking — the release already shipped above.
+          key: nativehelpers-arm64-${{ hashFiles('swift/floatpanel/Sources/**') }}
+      - name: Build + attach native helper (floatpanel) (best-effort)
+        # Pure Swift (AppKit/Core Audio) — no Metal, fast. setup_runtime.sh
+        # downloads this so users get the float panel (native mic + system-audio
+        # capture) without a Swift build. Non-blocking — the release already
+        # shipped above.
         continue-on-error: true
         timeout-minutes: 20
         run: |
-          ./build_audiocap.sh
-          ./package_audiocap.sh "$PWD/audiocap-arm64.tar.gz"
-          gh release upload "$GITHUB_REF_NAME" "audiocap-arm64.tar.gz" --clobber
           ./build_floatpanel.sh
           ./package_floatpanel.sh "$PWD/floatpanel-arm64.tar.gz"
           gh release upload "$GITHUB_REF_NAME" "floatpanel-arm64.tar.gz" --clobber

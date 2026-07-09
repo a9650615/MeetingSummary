@@ -23,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 
 import asr
 import backends  # module-level: every `backends.x` call resolves (avoids per-fn import + NameError)
-import live_session  # shared pipeline plumbing: /ws/live (browser) + /live/start (native)
+import live_session  # shared pipeline plumbing: /ws/live (browser) + /ws/native-capture (floatpanel)
 from summarize import summarize
 
 from webassets import (  # static CSS/JS/PWA assets (presentation, no logic)
@@ -416,13 +416,10 @@ def _models_page():
            "<option value=both>兩者混合</option>"
            "<option value=dual>雙軌(我/對方分離)</option>"
            "</select></label></div>"
-           "<label class=chk style='margin-top:.6em'><input type=checkbox id=live_nativesys_opt> "
-           "🖥️ 系統音用原生擷取（ScreenCaptureKit，免瀏覽器分享框）</label>"
-           "<label class=chk style='margin-top:.6em'><input type=checkbox id=native_relay_opt> "
-           "🔐 原生擷取由 App 直接進行（權限歸 MeetingSummary，非 python）</label>"
            "<p class=hint style='margin:.6em 0 0'>/live 錄音頁會記住這裡的預設；也可在錄音頁直接改，會自動存回。"
-           "原生擷取需先安裝 <code>audiocap</code> 並授權螢幕錄製。開啟「權限歸 App」後，"
-           "浮動面板會自己啟動 audiocap 並串流回伺服器，讓螢幕錄製／麥克風權限記在 App 名下而非 python。</p></div>")
+           "系統音(對方)/兩者/雙軌會用瀏覽器 getDisplayMedia 分享分頁或畫面的音訊 — 免安裝任何原生元件。"
+           "另外，浮動控制面板（下方安裝 <code>floatpanel</code>）錄音時是完全獨立的原生擷取，"
+           "不受這裡的設定影響。</p></div>")
         + "</section>"
 
         "<section id=sec-rt><h2>加速 runtime（.cpp · Metal）</h2>"
@@ -430,7 +427,7 @@ def _models_page():
         "<table class=tx id=rt><tr><th>Runtime</th><th>狀態</th><th></th></tr></table>"
         "<p class=hint style='margin:.5em 0 0'>一鍵安裝。chatllm 優先下載預編譯(免 cmake)，"
         "下載不到才原始碼編譯；femelo 需 python≥3.11；speech = ANE 省電辨識(Qwen3-ASR CoreML，brew)；"
-        "audiocap = 原生系統音擷取、floatpanel = 浮動控制面板(皆為預編下載，不在本機編譯；首次用需授權「螢幕錄製」)。"
+        "floatpanel = 浮動控制面板(預編下載，不在本機編譯；首次用需授權「螢幕錄製」/「麥克風」)。"
         "缺的環境會自動 brew 安裝。清除只移除編譯產物，模型權重保留。</p>"
         "</div></section>")
     script = r"""
@@ -521,12 +518,6 @@ def _models_page():
     (function(){const s=document.getElementById('live_source_opt');if(!s)return;
       fetch('/settings/live_source').then(r=>r.json()).then(j=>{if(j.value)s.value=j.value;});
       s.onchange=()=>fetch('/settings/live_source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
-    (function(){const n=document.getElementById('live_nativesys_opt');if(!n)return;
-      fetch('/settings/live_native_sys').then(r=>r.json()).then(j=>n.checked=j.value==='1');
-      n.onchange=()=>fetch('/settings/live_native_sys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:n.checked?'1':'0'})});})();
-    (function(){const r=document.getElementById('native_relay_opt');if(!r)return;
-      fetch('/settings/native_relay').then(x=>x.json()).then(j=>r.checked=j.value==='1');
-      r.onchange=()=>fetch('/settings/native_relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:r.checked?'1':'0'})});})();
     function fmtB(b){if(b>=1e9)return (b/1e9).toFixed(2)+' GB';
       if(b>=1e6)return (b/1e6).toFixed(1)+' MB';
       if(b>=1e3)return (b/1e3).toFixed(0)+' KB';return b+' B';}
@@ -573,7 +564,7 @@ _LIVE_BODY = """
     <label class=fld>來源
       <select id=source>
         <option value="mic">麥克風(我)</option>
-        <option value="system">系統音(對方)</option>
+        <option value="system">分頁音訊(對方·getDisplayMedia)</option>
         <option value="both">兩者(混合)</option>
         <option value="dual">分軌(我 + 對方,分開標示)</option>
       </select></label>
@@ -624,7 +615,6 @@ _LIVE_BODY = """
       <label class=chk><input type=checkbox id=diarize> 對方即時多人分群(實驗)</label>
       <label class=chk title="只錄音不辨識，零推論、不發熱；事後再「重新語音辨識」"><input type=checkbox id=reconly> 🪫 純錄音(省電·不即時辨識)</label>
       <label class=chk title="嘈雜環境降噪，於事後重新辨識時生效"><input type=checkbox id=denoise_live> 🧪 降噪(重新辨識時)</label>
-      <label class=chk title="用原生 ScreenCaptureKit 擷取系統音(對方)，免每次跳瀏覽器分享框；首次需授權螢幕錄製"><input type=checkbox id=nativesys onchange="if(this.checked){const s=document.getElementById('status');s.textContent=' 請求螢幕錄製權限…';fetch('/native/request-permission',{method:'POST'}).then(r=>r.json()).then(j=>{s.textContent=j.granted?' ✅ 已授權系統音擷取':' ⚠️ '+(j.msg||'未授權，請到 系統設定→螢幕錄製 開啟')}).catch(()=>{s.textContent=' ⚠️ 權限請求失敗'})}"> 🖥️ 系統音原生擷取(免分享框)</label>
     </div>
     <div class=row style="margin-top:12px">
       <button class="btn small" id=newsess>🔄 新 session</button>
@@ -679,7 +669,7 @@ function appendFinalLine(speaker, text, tstr){
   T.insertAdjacentElement('afterbegin', line);  // newest on top, below #live
 }
 
-// Native floatpanel opens /live?source=<mic|system|both> — honor it on load.
+// Generic per-load override: /live?source=<mic|system|both|dual> pre-picks the source.
 {const q=new URLSearchParams(location.search).get('source');
  if(['mic','system','both','dual'].includes(q)) document.getElementById('source').value=q;}
 // Recording state feedback: swap start/stop, run an mm:ss timer + pulsing dot.
@@ -744,16 +734,14 @@ function pushLevel(rms){
   const now=Date.now(); if(now-_lvLast<220) return; _lvLast=now;
   if(levelBar) levelBar.style.width=Math.min(100, rms*400)+'%';
 }
-// Share-window hint only makes sense when the browser will actually prompt for
-// a screen/tab share (system or both, and not using native system-audio capture).
+// Share-window hint: any source that captures the other side's audio goes
+// through getDisplayMedia, which always prompts for a screen/tab share.
 function updateShareHint(){
   const src=document.getElementById('source').value;
-  const native=document.getElementById('nativesys').checked;
   const el=document.getElementById('sharehint');
-  if(el) el.style.display=(src==='system'||src==='both')&&!native ? '' : 'none';
+  if(el) el.style.display=(src==='system'||src==='both'||src==='dual') ? '' : 'none';
 }
 document.getElementById('source').addEventListener('change', updateShareHint);
-document.getElementById('nativesys').addEventListener('change', updateShareHint);
 updateShareHint();
 const notesEl=document.getElementById('notes'), noteStat=document.getElementById('notestatus');
 let noteTimer;
@@ -828,18 +816,36 @@ async function checkMicPerm(){
 }
 document.getElementById('source').addEventListener('change', checkMicPerm);
 checkMicPerm();
+// System/對方 audio is browser-native getDisplayMedia (tab/screen share,
+// audio track only — video is stopped immediately). Degrades gracefully if
+// the browser lacks getDisplayMedia entirely (older browsers): mic-only
+// sources still work; system/both/dual throw a clear error instead of
+// calling an undefined function.
+async function getSystemStream(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getDisplayMedia)
+    throw new Error('此瀏覽器不支援分頁/畫面音訊分享(getDisplayMedia)，請用麥克風或更新瀏覽器');
+  const s = await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
+  s.getVideoTracks().forEach(t=>t.stop());
+  return s;
+}
 async function getStreams(source){
   if(source==='mic') return [await navigator.mediaDevices.getUserMedia({audio:true})];
   if(source==='system'){
-    const s = await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
-    s.getVideoTracks().forEach(t=>t.stop());
+    const s = await getSystemStream();
     if(!s.getAudioTracks().length) throw new Error('未取得系統音(分享時要勾選「分享音訊」)');
     return [s];
   }
   const mic = await navigator.mediaDevices.getUserMedia({audio:true});
-  const sys = await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
-  sys.getVideoTracks().forEach(t=>t.stop());
-  return [mic, sys];  // both / dual
+  // both/dual: mic is still useful on its own, so a cancelled share picker
+  // (or a share with no audio track) degrades to mic-only with a notice
+  // instead of losing the mic too.
+  let sys = null;
+  try {
+    sys = await getSystemStream();
+    if(!sys.getAudioTracks().length){ sys.getTracks().forEach(t=>t.stop()); sys=null; }
+  } catch(e){ sys = null; }
+  if(!sys) S.textContent = ' ⚠️ 未取得分頁/系統音訊(可能取消了分享畫面)，僅錄製麥克風';
+  return sys ? [mic, sys] : [mic];
 }
 
 // One ScriptProcessor for a stream. tag=null -> send raw PCM; tag=0/1 -> prepend
@@ -924,17 +930,12 @@ startBtn.onclick = async () => {
   } catch(e){ /* state probe failed -- fall through to a normal start */ }
   {const eh=document.getElementById('ehint');if(eh)eh.style.display='none';}
   const source = document.getElementById('source').value;
-  const nativeSys = document.getElementById('nativesys').checked;
   const dual = source==='dual';
-  // native_sys: the SYSTEM track comes from ScreenCaptureKit server-side, so the
-  // browser must NOT also capture it. dual -> browser does mic only; system -> none.
-  let browserSrc = source;
-  if(nativeSys) browserSrc = (source==='dual') ? 'mic' : (source==='system' ? 'none' : source);
-  try { streams = browserSrc==='none' ? [] : await withTimeout(getStreams(browserSrc), 12000,
+  try { streams = await withTimeout(getStreams(source), 12000,
         '取得音源逾時 — 權限可能卡住，開啟系統設定確認後重試'); hidePermWarn(); }
   catch(e){
     startBtn.disabled=false;
-    const kind = browserSrc==='mic' ? 'mic' : 'screen';  // display sources -> screen recording pane
+    const kind = source==='mic' ? 'mic' : 'screen';  // display sources -> screen recording pane
     let msg;
     if(e.name==='NotAllowedError'||e.name==='SecurityError')
       msg = kind==='screen' ? '螢幕錄製權限被拒 — 開啟後重試' : '麥克風權限被拒 — 開啟後重試';
@@ -961,8 +962,7 @@ startBtn.onclick = async () => {
   const lv = document.getElementById('lang').value;
   const lang = lv ? '&lang='+lv : '';
   const ro = document.getElementById('reconly').checked ? '&record_only=1' : '';
-  const ns = document.getElementById('nativesys').checked ? '&native_sys=1' : '';
-  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}${lang}${ro}${ns}`);
+  ws = new WebSocket(`ws://${location.host}/ws/live?src=${source}${diar}${unit}${sess}${vad}${lang}${ro}`);
   ws.binaryType='arraybuffer';
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
@@ -986,7 +986,8 @@ startBtn.onclick = async () => {
     else if(m.type==='error'){ S.textContent=' 錯誤: '+m.msg; }
   };
   ws.onopen = () => {
-    // guard each stream: with native_sys a track may be server-sourced (no browser stream)
+    // guard each stream: getStreams degrades to mic-only if the system/對方
+    // share picker was cancelled (see getStreams), so streams[1] may be absent.
     if(dual){ if(streams[0])attach(streams[0],0,ratio,false); if(streams[1])attach(streams[1],1,ratio,false); }
     else if(source==='both' && streams.length>1){ attachMixed(streams,ratio); }  // 混合: one ungated track
     else { streams.forEach(st=>attach(st,null,ratio,true)); }  // mic/system single: gated
@@ -1022,33 +1023,21 @@ stopBtn.onclick = () => {
   S.textContent += mid ? ` 已停止。可到首頁對 #${mid} 產生摘要。` : ' 已停止。';
   startBtn.disabled=false; stopBtn.disabled=true; recUiStop();
 };
-// Just report whether native system capture is available -- the checkbox state
-// itself comes from the saved 錄音預設 below, not forced on here.
-fetch('/native/capability').then(r=>r.json()).then(j=>{
-  if(j.audiocap && j.granted)
-    document.getElementById('status').textContent=' ✅ 原生系統音可用';
-}).catch(()=>{});
 // Restore saved recording defaults so the page never needs re-picking. A URL
-// ?source= (floatpanel browser fallback) is a per-load override, so it wins.
+// ?source= is a per-load override (see above), so it wins over the saved default.
 const _urlSrc=new URLSearchParams(location.search).get('source');
 if(!_urlSrc){
   fetch('/settings/live_source').then(r=>r.json()).then(j=>{
     if(j.value){ const s=document.getElementById('source'); s.value=j.value; updateShareHint(); checkMicPerm(); }
   }).catch(()=>{});
 }
-fetch('/settings/live_native_sys').then(r=>r.json()).then(j=>{
-  document.getElementById('nativesys').checked=(j.value==='1'); updateShareHint();
-}).catch(()=>{});
 // Persist edits made on the page too, so last-used sticks (mirrors 設定).
 document.getElementById('source').addEventListener('change', e=>
   fetch('/settings/live_source',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({value:e.target.value})}).catch(()=>{}));
-document.getElementById('nativesys').addEventListener('change', e=>
-  fetch('/settings/live_native_sys',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({value:e.target.checked?'1':'0'})}).catch(()=>{}));
-// Page load / refresh: a session may already be recording server-side (native
-// /live/start from the floatpanel, or another still-open /live tab) -- attach
-// to it instead of showing the idle 開始錄音 state.
+// Page load / refresh: a session may already be recording server-side (the
+// floatpanel via /ws/native-capture, or another still-open /live tab) --
+// attach to it instead of showing the idle 開始錄音 state.
 fetch('/live/state').then(r=>r.json()).then(st=>{ if(st.recording) enterAttached(st); }).catch(()=>{});
 """
 
@@ -1058,11 +1047,6 @@ _LIVE = _shell("Live · MeetingSummary", _LIVE_BODY, script=_LIVE_JS, back=True)
 class MeetingIn(BaseModel):
     title: str
     lang: str = "zh-TW"
-
-
-class LiveStartIn(BaseModel):
-    source: str = "mic"       # mic | system | both
-    diarize: bool = False
 
 
 class SummaryIn(BaseModel):
@@ -1419,7 +1403,6 @@ def _runtime_status():
         st["speech"] = shutil.which("speech") is not None  # ANE batch ASR (省電)
         import backends  # noqa: PLC0415
         st["qwen3-ane"] = backends.ane_helper_bin() is not None  # ANE live helper
-        st["audiocap"] = backends.audiocap_bin() is not None     # native system audio
         st["floatpanel"] = backends.floatpanel_bin() is not None  # floating control panel
     return st
 
@@ -2028,23 +2011,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
     idle = {"last": time.time(), "live": 0}
     live_active = {}  # mid -> open live connections; surfaced in /jobs (global popout)
     live_stop = set()  # mids the float control panel asked to stop (server-side)
-    native_sessions = {}  # mid -> {"proc": audiocap Popen, "task": asyncio.Task, "notice": str|None}
-    # for a browserless /live/start recording — pump/task kept alive here (else GC'd)
+    native_sessions = {}  # mid -> {"proc": None, "task": asyncio.Task, "notice": str|None}
+    # for a /ws/native-capture (floatpanel relay) session — task kept alive here (else GC'd)
     _panel = {"p": None}  # the floating control-panel subprocess (singleton)
-
-    def _reap_stale_audiocap():
-        # audiocap children spawned for a native session don't die when the
-        # server is SIGKILLed (macOS has no PDEATHSIG) — they reparent to init
-        # and keep the mic / SCStream open. A survivor starves the NEXT session's
-        # capture (engine.start() succeeds but the held device delivers nothing
-        # -> 0-byte mic.pcm) and outlives /live/stop, which only knows procs THIS
-        # server started. Reaping by binary path is safe whenever nothing is
-        # recording here: any audiocap still alive is then a stale orphan.
-        binp = backends.audiocap_bin()
-        if binp:
-            subprocess.run(["pkill", "-9", "-f", binp], capture_output=True)
-
-    _reap_stale_audiocap()  # boot: clear orphans left by a crashed predecessor
 
     def _open_panel():
         """Launch the native float panel if installed; idempotent (reuse if alive)."""
@@ -2062,17 +2031,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
         except Exception:  # noqa: BLE001
             return False
 
-    # Native entry point: the real server (supervise.sh sets MEETING_PANEL_AUTO=1)
-    # opens the floating panel on boot so launching the app lands on the native UI,
-    # not the browser. Gated on the env so plain `import app` in tests never spawns
-    # a GUI. No-op when floatpanel isn't installed.
-    #
-    # BUT NOT under approach B (native_relay=1): there the .app launcher spawns
-    # floatpanel ITSELF so macOS TCC attributes recording to the app, not python.
-    # If python auto-opened it here, floatpanel's responsible process would be
-    # python again — defeating the whole point — so leave the launch to the .app.
-    if os.environ.get("MEETING_PANEL_AUTO") == "1" and store.get_setting("native_relay", "0") != "1":
-        _open_panel()
+    # Native entry point: the .app's own launcher spawns floatpanel directly (see
+    # build_app.sh's launch_panel) — NOT python — so macOS TCC attributes
+    # recording to the app, not the detached python server. If python also
+    # auto-opened it here (MEETING_PANEL_AUTO), floatpanel's responsible process
+    # would be python again, defeating the whole point of an in-process native
+    # capturer. So python never launches the panel itself; /floatpanel/open
+    # (manual) and floatpanel's own launch are the only paths.
 
     idle_release_s = int(os.environ.get("LIVE_IDLE_RELEASE_S", "600"))
 
@@ -2130,7 +2095,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # For the floating control panel: recording state + meeting title + the
         # latest caption line, so the panel can show live progress over any app.
         # Works the same whether the session is a browser /ws/live connection or
-        # a native /live/start one — both just register in live_active.
+        # a /ws/native-capture one — both just register in live_active.
         mids = list(live_active)
         mid = mids[0] if mids else None
         title = caption = None
@@ -2152,75 +2117,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.get("/native/capability")
     def native_capability():
-        # Non-prompting probes: is audiocap installed, and is Screen-Recording /
-        # microphone access already granted? --check / --check-mic only preflight
-        # (CGPreflightScreenCaptureAccess / AVCaptureDevice.authorizationStatus) —
-        # no dialog. mic_granted + native_start are ADDITIVE (old panel builds that
-        # only read audiocap/granted keep working unchanged).
-        import subprocess
-
-        def _probe(flag):
-            try:
-                p = subprocess.Popen([binp, flag], stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL)
-                try:
-                    out, _ = p.communicate(timeout=3)
-                    return out.strip() == b"GRANTED"
-                except subprocess.TimeoutExpired:
-                    p.kill()
-                    p.communicate()
-                    return False
-            except Exception:
-                return False
-
-        # relay (approach B) = the native app captures in-process + streams to
-        # /ws/native-capture. It does NOT need the audiocap helper (capture is
-        # folded into floatpanel), so report it regardless of audiocap presence.
-        relay = store.get_setting("native_relay", "0") == "1"
-        binp = backends.audiocap_bin()
-        if not binp:
-            return {"audiocap": False, "granted": False, "mic_granted": False,
-                    "native_start": {"mic": False, "system": False, "both": False},
-                    "relay": relay, "audiocap_path": None}
-        granted = _probe("--check")
-        mic_granted = _probe("--check-mic")
-        # native_start.mic doesn't gate on mic_granted: unlike Screen-Recording
-        # (which throws forever if you spawn cold without it — must be
-        # bootstrapped ahead via /native/request-permission), the mic TCC
-        # prompt fires reliably the first time audiocap actually opens the
-        # input stream. So mic is attemptable as soon as audiocap exists;
-        # system (and therefore both) still needs the real grant already.
-        return {"audiocap": True, "granted": granted, "mic_granted": mic_granted,
-                "native_start": {"mic": True, "system": granted, "both": granted},
-                "relay": relay, "audiocap_path": binp}
-
-    @app.post("/native/request-permission")
-    def native_request_permission():
-        # Pop the macOS Screen-Recording prompt for the launching app by briefly
-        # spawning audiocap (it calls CGRequestScreenCaptureAccess). Returns the
-        # outcome so the UI can guide the user. The prompt attributes to whatever
-        # launched the server (the .app, or Terminal in dev).
-        binp = backends.audiocap_bin()
-        if not binp:
-            raise HTTPException(400, "audiocap 未安裝（設定 → 加速 runtime → 安裝）")
-        import subprocess
-        p = subprocess.Popen([binp], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        granted, msg = False, ""
-        try:
-            for _ in range(60):  # up to ~30s for the user to answer the dialog
-                line = p.stderr.readline()
-                if not line:
-                    break
-                s = line.decode("utf8", "ignore").strip()
-                if s == "READY":
-                    granted = True
-                    break
-                if s.startswith("ERR") or "NOPERM" in s:
-                    msg = s
-                    break
-        finally:
-            p.terminate()
-        return {"granted": granted, "msg": msg or ("已授權" if granted else "尚未授權")}
+        # Whether native capture is available at all: is the floatpanel binary
+        # installed? Floatpanel is the ONLY native-capture front-end now (it
+        # captures mic + system audio in-process and relays to
+        # /ws/native-capture) — there's no separate helper to probe, and no
+        # permission pre-flight to do here: floatpanel requests mic/screen-
+        # recording access itself when it starts capturing, and surfaces any
+        # denial live via /live/state's `notice` field.
+        return {"floatpanel": backends.floatpanel_bin() is not None}
 
     @app.post("/open-settings")
     def open_settings(which: str = "mic"):
@@ -2236,155 +2140,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
             raise HTTPException(400, f"open failed: {e}") from e
         return {"opened": True, "pane": pane}
 
-    @app.post("/live/start")
-    async def live_start(body: LiveStartIn):
-        # Browserless recording: the floatpanel's 開始 calls this directly — no
-        # /live page, no getUserMedia. The server spawns audiocap itself (framed
-        # <track><len><payload> protocol — recorder.py) and demuxes it straight
-        # into the SAME pipeline /ws/live uses (live_session.py), so a native
-        # session is a first-class citizen of live_active/live_stop/live_state,
-        # not a parallel code path.
-        if live_manager is None:
-            raise HTTPException(400, "no live backend")
-        source = body.source if body.source in ("mic", "system", "both") else "mic"
-        binp = backends.audiocap_bin()
-        if not binp:
-            raise HTTPException(400, "audiocap 未安裝（設定 → 加速 runtime → 安裝）")
-
-        import recorder  # noqa: PLC0415
-        flag = {"mic": "--mic", "system": "--system", "both": "--both"}[source]
-        t0 = time.time()
-        title = time.strftime("錄音 %Y-%m-%d %H:%M", time.localtime(t0))
-        mid = store.create_meeting(title, t0, "zh-TW")
-        conn_offset_ms = 0  # native sessions always start a fresh meeting, never resume
-        audio_dir = f"data/{mid}-{int(t0)}"
-        os.makedirs(audio_dir, exist_ok=True)
-        store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
-                          started_at=t0, duration_s=0, origin="recorded")
-
-        if source == "mic":
-            tracks = {recorder.TRACK_MIC: ("mic", "我")}
-        elif source == "system":
-            tracks = {recorder.TRACK_SYSTEM: ("system", "對方")}
-        else:
-            tracks = {recorder.TRACK_MIC: ("mic", "我"),
-                      recorder.TRACK_SYSTEM: ("system", "對方")}
-        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb") for tag, lbl in tracks.items()}
-
-        live_manager.set_language(None)  # auto-detect, same default as a fresh ws_live session
-        sessions = live_session.build_track_sessions(
-            tracks, live_manager=live_manager, live_interim_backend=live_interim_backend,
-            silence_ms=live_silence_ms, min_speech_ms=live_min_speech_ms,
-            interim_s=live_interim_s, max_utt_s=live_max_utt_s,
-            rms_threshold=live_rms_threshold, interim_duty=live_interim_duty)
-        if body.diarize:
-            live_session.enable_diarization(sessions, tracks, store)
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                binp, flag, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        except Exception as e:
-            for f in audio_files.values():
-                f.close()
-            raise HTTPException(400, f"audiocap 啟動失敗: {e}") from e
-
-        pump = live_session.WallClockPump(tracks, audio_files, t0)
-        idle["live"] += 1  # block idle-release while recording, like ws_live
-        live_active[mid] = 1
-        native_sessions[mid] = {"proc": proc, "task": None, "notice": None}
-        if store.get_setting("float_panel", "0") == "1":
-            _open_panel()
-
-        async def _notify(msg):
-            sess = native_sessions.get(mid)
-            if sess is not None:
-                sess["notice"] = msg
-
-        async def _on_stderr_line(s):
-            print(f"audiocap (native /live/start {mid}): {s}", file=sys.stderr)
-            if any(k in s for k in ("NOPERM", "ERR", "-3801", "TCC")):
-                await _notify(s[:180])
-
-        async def _on_give_up():
-            # /live/start is native-only -- there's no other source to fall back
-            # to, so a helper that can't stay up ends the session like an
-            # explicit /live/stop (audio captured so far is still finalized).
-            live_stop.add(mid)
-            pump.got.set()
-
-        async def _spawn():
-            return await asyncio.create_subprocess_exec(
-                binp, flag, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-
-        label, perm_hint = {
-            "mic": ("麥克風擷取", "麥克風權限"),
-            "system": ("系統音擷取", "螢幕錄製權限"),
-            "both": ("音訊擷取", "螢幕錄製/麥克風權限"),
-        }[source]
-        supervisor = live_session.NativeCaptureSupervisor(
-            spawn=_spawn, reader_fn=live_session.pump_framed_stdout, pump=pump,
-            initial_proc=proc, on_stderr_line=_on_stderr_line, on_notice=_notify,
-            on_give_up=_on_give_up, label=label, perm_hint=perm_hint,
-            # Read live_session's module constants at CALL time (not as bound
-            # defaults) so tests can monkeypatch them to keep retries fast.
-            backoff=live_session.NATIVE_RESTART_BACKOFF_S,
-            max_fast_fails=live_session.NATIVE_MAX_FAST_FAILS,
-            fast_fail_window=live_session.NATIVE_FAST_FAIL_WINDOW_S)
-
-        def _should_stop():
-            if mid in live_stop:  # explicit /live/stop OR the supervisor gave up (see _on_give_up)
-                live_stop.discard(mid)
-                return True
-            return False
-
-        async def _on_stop():
-            supervisor.terminate()
-
-        def _pop_notice():
-            fn = getattr(live_manager.backend, "pop_notice", None)
-            return fn() if fn else None
-
-        async def _run():
-            # Peek-only (no discard) -- consume()'s _should_stop owns discarding
-            # mid from live_stop; this is just a defensive check so a helper
-            # crash that races an in-flight stop doesn't trigger one pointless
-            # respawn before the supervisor task gets cancelled below.
-            suptask = asyncio.create_task(
-                supervisor.run(should_stop=lambda: mid in live_stop))
-            try:
-                await live_session.consume(
-                    pump, sessions, tracks, rec_on=lambda: False,
-                    emit=live_session.make_store_emit(mid, conn_offset_ms, store),
-                    should_stop=_should_stop,
-                    interim_lag_bytes=int(2 * live_interim_s * 16000) * 2,
-                    pop_notice=_pop_notice, on_stop=_on_stop)
-            finally:
-                suptask.cancel()
-                supervisor.terminate()
-                pump.pad_to(time.time())
-                await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
-                for f in audio_files.values():
-                    f.close()
-                idle["live"] = max(0, idle["live"] - 1)
-                live_active.pop(mid, None)
-                native_sessions.pop(mid, None)
-                _touch()
-
-        native_sessions[mid]["task"] = asyncio.create_task(_run())
-        return {"id": mid, "source": source}
-
     @app.websocket("/ws/native-capture")
     async def ws_native_capture(ws: WebSocket):
-        # Native-front capture (approach B). The floatpanel spawns audiocap ITSELF
-        # and relays its framed stdout here over the socket. Why: macOS TCC blames
-        # the "responsible process" for screen-recording/mic, and the python server
-        # is detached (bootstrap setsid) so IT becomes responsible -> "python" shows
-        # in the Privacy panes. When the native app (launched by the .app) owns the
-        # audiocap child, TCC attributes to the app instead. Server-side this is the
-        # SAME pipeline as /live/start — only the audio SOURCE differs (this socket
-        # vs. a subprocess we spawn) — so it stays a first-class live_active citizen.
-        # ponytail: setup intentionally duplicates /live/start's rather than
-        # refactoring that in-use path; the two can diverge if the pipeline changes.
+        # Native-front capture: the floatpanel captures mic (AVCaptureSession)
+        # and system audio (a Core Audio process tap) IN-PROCESS itself and
+        # relays the framed <track><len><payload> protocol (recorder.py) here
+        # over the socket. Why in-process rather than a spawned helper: macOS
+        # TCC blames the "responsible process" for screen-recording/mic, and
+        # the python server is detached (bootstrap setsid) so IT would become
+        # responsible -> "python" shows in the Privacy panes. Since floatpanel
+        # itself opens the mic/tap, TCC attributes to the app instead. Server-
+        # side this demuxes into the SAME live_session.py pipeline /ws/live
+        # uses — only the audio SOURCE differs (this socket vs. browser PCM
+        # frames) — so it stays a first-class live_active citizen.
         await ws.accept()
         if live_manager is None:
             await ws.close(code=1011)
@@ -2465,7 +2233,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             fn = getattr(live_manager.backend, "pop_notice", None)
             return fn() if fn else None
 
-        # consume + finalize run in a DETACHED task (like /live/start). The ws
+        # consume + finalize run in a DETACHED task. The ws
         # handler below is cancelled the instant the client disconnects, so if the
         # flush/cleanup ran inline here its `await`s would be cancelled mid-way and
         # live_active would never clear. Detached, it survives the disconnect and
@@ -2490,7 +2258,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
         native_sessions[mid]["task"] = asyncio.create_task(_run())
         try:
-            # Relay audiocap frames until the socket closes / audiocap exits (EOF).
+            # Relay floatpanel's framed frames until the socket closes (EOF).
             await live_session.pump_framed_stdout(reader, pump)
         finally:
             # Tell the detached consume task to drain + finalize. Runs even under
@@ -2501,17 +2269,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.post("/live/stop")
     def live_stop_all():
         # Float panel "停止": ask every active live session to end (server-side);
-        # each ws_live loop (browser) or /live/start task (native) sees its mid
-        # in live_stop, breaks, flushes + finalizes.
+        # each ws_live loop (browser) or /ws/native-capture task (floatpanel)
+        # sees its mid in live_stop, breaks, flushes + finalizes.
         n = 0
         for m in list(live_active):
             live_stop.add(m)
             n += 1
-        if n == 0:
-            # Nothing tracked to stop, yet an orphaned audiocap from a crashed
-            # prior server may still be recording (and holding the device).
-            # "停止" must always actually stop — reap the orphan.
-            _reap_stale_audiocap()
         return {"stopping": n}
 
     @app.post("/floatpanel/open")
@@ -2741,11 +2504,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     @app.post("/models/setup")
     def models_setup(body: SetupIn):
-        if body.runtime not in ("femelo", "chatllm", "speech", "qwen3-ane",
-                                "audiocap", "floatpanel"):
+        if body.runtime not in ("femelo", "chatllm", "speech", "qwen3-ane", "floatpanel"):
             raise HTTPException(400, "unknown runtime")
         # native helpers are prebuilt — downloaded, not compiled on the client
-        _download_only = body.runtime in ("audiocap", "floatpanel")
+        _download_only = body.runtime in ("floatpanel",)
 
         def _build():
             import subprocess
@@ -2829,7 +2591,6 @@ def create_app(store, *, summary_backend, asr_backend=None,
         maxu = max(5.0, min(40.0, float(q.get("max_utt_s") or live_max_utt_s)))
         live_manager.set_language(q.get("lang") or None)  # ""/absent -> auto-detect
 
-        import backends as _bk  # noqa: PLC0415
         sessions = live_session.build_track_sessions(
             tracks, live_manager=live_manager, live_interim_backend=live_interim_backend,
             silence_ms=sil, min_speech_ms=live_min_speech_ms, interim_s=live_interim_s,
@@ -2878,7 +2639,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # silence up to now-t0 on each feed, so all tracks stay the same length
         # (= session duration) and on one shared clock, regardless of when each
         # browser stream starts or how it's gated — so 我/對方 timestamps and
-        # lengths line up. Shared with the native /live/start pipeline.
+        # lengths line up. Shared with the /ws/native-capture pipeline.
         # ponytail: no lag-drop — it broke the invariant; small-q4 keeps up. Add a
         # smarter back-pressure cap only if a slow model makes the buffer balloon.
         pump = live_session.WallClockPump(tracks, audio_files, t0)
@@ -2916,72 +2677,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
             pump.got.set()
 
         rtask = asyncio.create_task(receiver())
-        # Native system audio (ScreenCaptureKit): when ?native_sys=1, the SERVER
-        # captures system audio via the audiocap helper and feeds it into the
-        # system/對方 track — no per-session browser "share screen + audio" dialog.
-        # Same event loop as receiver() (asyncio subprocess) -> no thread races.
-        suptask = None
-        native_sup = None
-        if ws.query_params.get("native_sys") == "1":
-            sys_tag = next((t for t, (trk, _l) in tracks.items() if trk == "system"), None)
-            binp = _bk.audiocap_bin()
-            if sys_tag is not None and binp:
-                # dual = mic still comes from the browser, so a dead system track
-                # just goes silent (with a notice); system-only = it's the WHOLE
-                # session's audio, so giving up must end the session like a
-                # remote /live/stop, or nothing would ever feed the pump again.
-                only_source = not dual
-
-                async def _spawn():
-                    return await asyncio.create_subprocess_exec(
-                        binp, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-
-                async def _on_stderr_line(s):
-                    # Drain helper stderr; surface permission/errors to the live page
-                    # (denial -> no audio -> the consumer loop never wakes, so the
-                    # notice MUST come from here, not the main loop).
-                    print(f"audiocap: {s}", file=sys.stderr)
-                    if any(k in s for k in ("NOPERM", "ERR", "-3801", "TCC")):
-                        try:
-                            await ws.send_json({"type": "notice",
-                                                "msg": "原生系統音擷取失敗：" + s[:180]})
-                        except Exception:  # noqa: BLE001
-                            pass
-
-                async def _on_native_notice(msg):
-                    try:
-                        await ws.send_json({"type": "notice", "msg": msg})
-                    except Exception:  # noqa: BLE001
-                        pass
-
-                async def _on_native_give_up():
-                    if only_source:
-                        live_stop.add(mid)
-                        pump.got.set()
-
-                native_sup = live_session.NativeCaptureSupervisor(
-                    spawn=_spawn,
-                    reader_fn=lambda r, p, tag=sys_tag: live_session.pump_raw_stdout(r, p, tag),
-                    pump=pump, on_stderr_line=_on_stderr_line, on_notice=_on_native_notice,
-                    on_give_up=_on_native_give_up, label="系統音擷取",
-                    backoff=live_session.NATIVE_RESTART_BACKOFF_S,
-                    max_fast_fails=live_session.NATIVE_MAX_FAST_FAILS,
-                    fast_fail_window=live_session.NATIVE_FAST_FAIL_WINDOW_S)
-                suptask = asyncio.create_task(
-                    native_sup.run(should_stop=lambda: closed or mid in live_stop))
-            else:
-                await ws.send_json({"type": "notice",
-                                    "msg": "原生系統音擷取不可用（缺 helper 或需螢幕錄製權限）"})
 
         def _should_stop():
             if mid in live_stop:  # remote stop — checked AFTER draining this round's buffers
                 live_stop.discard(mid)
                 return True
             return False
-
-        async def _on_stop():
-            if native_sup:
-                native_sup.terminate()  # cut the native audio source so it stops feeding
 
         def _pop_notice():
             fn = getattr(live_manager.backend, "pop_notice", None)
@@ -2994,14 +2695,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
             await live_session.consume(
                 pump, sessions, tracks, rec_on=lambda: rec["on"], emit=_emit,
                 should_stop=_should_stop, interim_lag_bytes=interim_lag_bytes,
-                on_notice=_on_notice, pop_notice=_pop_notice, on_stop=_on_stop,
+                on_notice=_on_notice, pop_notice=_pop_notice,
                 should_abort=lambda: closed)
         finally:
             rtask.cancel()
-            if suptask:
-                suptask.cancel()
-            if native_sup:
-                native_sup.terminate()
             pump.pad_to(time.time())  # equalize track lengths to the final wall-clock
             await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
             for f in audio_files.values():
@@ -3252,7 +2949,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def meeting_transcripts_after(mid: int, after: int = 0):
         # For the /live page's attach-on-load: polls this to pick up finals that
         # landed in the store from a session it didn't itself open a websocket
-        # for (native /live/start, or a session started in another tab).
+        # for (/ws/native-capture via the floatpanel, or a session started in
+        # another tab).
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
         return {"rows": _rows(store.transcripts_after(mid, after))}
@@ -3468,11 +3166,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
                  "denoise": "0", "float_panel": "0",
-                 # /live recording defaults, so the page never needs re-picking:
-                 "live_source": "mic", "live_native_sys": "0",
-                 # approach B: native app spawns audiocap + relays to /ws/native-capture
-                 # (TCC blames the app, not python). Opt-in while it beds in.
-                 "native_relay": "0"}
+                 # /live recording default, so the page never needs re-picking:
+                 "live_source": "mic"}
 
     @app.get("/settings/{key}")
     def get_setting_route(key: str):
@@ -3485,7 +3180,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if key not in _SETTINGS:
             raise HTTPException(404, "unknown setting")
         v = body.value
-        if key in ("persist_speakers", "live_native_sys", "native_relay"):
+        if key == "persist_speakers":
             v = "1" if v in ("1", "true", "on") else "0"
         elif key == "live_source":
             v = v if v in ("mic", "system", "both", "dual") else "mic"

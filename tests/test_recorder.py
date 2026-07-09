@@ -78,7 +78,7 @@ def test_record_stream_writes_both_tracks(tmp_path):
 
 def test_aiter_frames_yields_tagged_payloads():
     # Async counterpart of parse_frames, fed from a real asyncio.StreamReader —
-    # the same type an audiocap subprocess's stdout is (asyncio.subprocess.PIPE).
+    # the same type /ws/native-capture's relay (a websocket-backed reader) is.
     async def run():
         reader = asyncio.StreamReader()
         reader.feed_data(frame(TRACK_SYSTEM, b"\x01\x02") + frame(TRACK_MIC, b"\x03\x04\x05"))

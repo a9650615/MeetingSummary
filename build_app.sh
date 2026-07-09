@@ -52,12 +52,13 @@ SRC="\$(cd "\$(dirname "\$0")/../Resources/app" && pwd)"
 WD="\$HOME/Library/Application Support/MeetingSummary"
 [ -x "\$PROJECT/.venv/bin/python" ] && WD="\$PROJECT"   # dev machine: reuse working venv
 FP="\$WD/swift/floatpanel/.build/release/floatpanel"
-# Native entry (approach B): launch the floating panel as a DIRECT child of this
-# .app, detached so it survives our exit. Why direct (not via the python server):
-# macOS TCC blames the "responsible process" for screen-recording/mic; spawned by
-# the .app, the panel — and the audiocap it spawns — attribute to the app, not the
-# detached python server ("python" in the Privacy panes). The ( … & ) reparents it
-# to launchd, which preserves that attribution. Returns non-zero if not installed.
+# Native entry: launch the floating panel as a DIRECT child of this .app,
+# detached so it survives our exit. Why direct (not via the python server):
+# macOS TCC blames the "responsible process" for screen-recording/mic; the
+# panel captures mic + system audio ITSELF (in-process), so spawned by the
+# .app it attributes to the app, not the detached python server ("python" in
+# the Privacy panes). The ( … & ) reparents it to launchd, which preserves
+# that attribution. Returns non-zero if not installed.
 launch_panel() { [ -x "\$FP" ] && ( MEETING_PORT="\$PORT" "\$FP" >/dev/null 2>&1 & ) ; }
 
 # Already running? just (re)show the panel; browser fallback if the panel isn't installed.

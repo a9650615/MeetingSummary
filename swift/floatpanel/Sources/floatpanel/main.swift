@@ -4,15 +4,12 @@
 // quick-note field that appends to the meeting notes. Talks to the local
 // server; honors MEETING_PORT (default 8765).
 //
-// Browserless start: 開始錄音 calls POST /live/start directly when the server
-// reports native_start[source] == true (audiocap installed + the relevant
-// permission already granted — see /native/capability). The server spawns
-// audiocap itself and feeds it straight into the live pipeline, so no /live
-// page or getUserMedia is involved. If native start isn't available for the
-// chosen source (e.g. mic permission not granted yet, or audiocap missing),
-// this falls back to opening /live in the browser like before — the first
-// browser mic use, or a manual "螢幕錄製" grant + retry, is what flips
-// native_start to true afterwards.
+// Browserless start: 開始錄音 always captures in-process (AVCaptureSession for
+// mic, a Core Audio process tap for system audio — both defined below) and
+// relays framed PCM to /ws/native-capture. No /live page, no getUserMedia,
+// no separate helper binary — this IS the native front-end. macOS TCC then
+// attributes mic/screen-recording access to THIS app, not the detached
+// python server, since floatpanel opens the mic/tap itself.
 import AVFoundation
 import AppKit
 import Combine
@@ -40,12 +37,12 @@ struct Row: Identifiable {
     let text: String
 }
 
-// ── Native capture, in-process (approach B, single App identity) ──────────────
-// Ported from swift/audiocap: mic via AVCaptureSession (+AGC), system audio via a
-// Core Audio process tap. Doing it HERE (not a separate audiocap binary) means the
-// screen-recording/mic TCC grant belongs to THIS app — "透過 App 授權" — instead of
-// being split across a second bundle id. Frames go straight out the relay socket in
-// the same <track:UInt8><len:UInt32LE><payload> format /ws/native-capture expects.
+// ── Native capture, in-process (single App identity) ───────────────────────────
+// Mic via AVCaptureSession (+AGC), system audio via a Core Audio process tap.
+// Doing it HERE (not a separate helper binary) means the screen-recording/mic
+// TCC grant belongs to THIS app — "透過 App 授權" — instead of a separate bundle
+// id. Frames go straight out the relay socket in the same
+// <track:UInt8><len:UInt32LE><payload> format /ws/native-capture expects.
 private let CAP_TARGET_SR = 16000.0
 private let CAP_TRACK_SYSTEM: UInt8 = 0
 private let CAP_TRACK_MIC: UInt8 = 1
@@ -249,19 +246,10 @@ final class Model: ObservableObject {
     @Published var note = ""
     @Published var hint = ""
     @Published var source: Source = .mic
-    // Additive /native/capability field: which sources /live/start can drive
-    // right now (audiocap installed + the relevant permission already granted).
-    @Published var nativeStart: [String: Bool] = ["mic": false, "system": false, "both": false]
-    // A native session can fail AFTER /live/start already returned 200 (e.g.
-    // mic access denied when audiocap actually opens the input stream) — the
-    // HTTP call alone can't tell us that, so /live/state carries a best-effort
-    // notice for whatever's currently recording.
+    // A native session can fail AFTER capture already started (e.g. mic/screen-
+    // recording access denied when the capturer actually opens the device) —
+    // /live/state carries a best-effort notice for whatever's currently recording.
     @Published var liveNotice = ""
-    // Approach B: when the server reports relay==true, THIS app spawns audiocap
-    // (audiocapPath) and streams its framed stdout to /ws/native-capture, so macOS
-    // TCC attributes screen-recording/mic to the native app instead of the detached
-    // python server. When false, fall back to POST /live/start (python spawns).
-    @Published var relay = false
     private var wsTask: URLSessionWebSocketTask?
     private var micCap: PanelMicCapturer?
     private var sysCap: AnyObject?   // PanelSystemTapCapturer (macOS 14.2+); retained
@@ -320,17 +308,6 @@ final class Model: ObservableObject {
         }
     }
 
-    func pollCapability() {
-        req("/native/capability") { [weak self] data, _ in
-            guard let self = self, let d = data,
-                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
-            if let ns = o["native_start"] as? [String: Bool] {
-                self.nativeStart = ns  // absent on an old server -> stays all-false (safe default)
-            }
-            self.relay = (o["relay"] as? Bool) ?? false
-        }
-    }
-
     func pollTranscripts() {
         guard recording, let m = mid else { return }
         req("/meetings/\(m)/transcripts?after=\(lastId)") { [weak self] data, _ in
@@ -354,23 +331,11 @@ final class Model: ObservableObject {
     }
 
     func start() {
-        // Approach B: the App captures natively (single TCC identity) + relays.
-        if relay {
-            startNativeRelay()
-            return
-        }
-        guard nativeStart[source.rawValue] ?? false else {
-            openInBrowser()
-            return
-        }
-        req("/live/start", method: "POST", json: ["source": source.rawValue]) { [weak self] _, code in
-            guard let self = self else { return }
-            if code != 200 {
-                self.openInBrowser()  // server declined (e.g. lost permission mid-flight) -> fall back
-            }
-            // success: no local state flip needed -- the next poll() picks up
-            // recording=true from /live/state, same as a browser session.
-        }
+        // Always capture natively, in this app (single TCC identity) — no
+        // browser fallback, no server-spawned helper. Permission prompts
+        // (mic / screen-recording) fire inline in startNativeRelay(); any
+        // denial surfaces via liveNotice instead of falling back elsewhere.
+        startNativeRelay()
     }
 
     // Capture natively IN THIS APP and stream frames to /ws/native-capture. The mic
@@ -422,10 +387,6 @@ final class Model: ObservableObject {
         wsTask?.cancel(with: .goingAway, reason: nil); wsTask = nil
     }
 
-    private func openInBrowser() {
-        if let u = URL(string: base + "/live?source=\(source.rawValue)") { NSWorkspace.shared.open(u) }
-    }
-
     // 主控台: the review/list/settings UI still lives in the browser (native entry
     // is /live only for now) — this is the one door back to it.
     func openConsole() {
@@ -433,8 +394,8 @@ final class Model: ObservableObject {
     }
 
     func stop() {
-        stopNativeRelay()               // relay session: kill our audiocap + close socket
-        req("/live/stop", method: "POST")  // also covers legacy /live/start + browser sessions
+        stopNativeRelay()                  // stop our in-process capture + close the socket
+        req("/live/stop", method: "POST")  // also covers any browser /ws/live session
     }
 
     func saveNote() {
@@ -470,16 +431,10 @@ struct PanelView: View {
                     ForEach(Source.allCases) { s in Text(s.label).tag(s) }
                 }
                 .pickerStyle(.segmented).labelsHidden()
-                if !m.relay && !(m.nativeStart[m.source.rawValue] ?? false) {
-                    Text(m.source == .mic
-                        ? "尚未偵測到麥克風權限，將於瀏覽器開啟（首次使用會請求授權）"
-                        : "尚未偵測到原生系統音擷取權限，將於瀏覽器分享畫面時勾選「分享音訊」")
-                        .font(.caption2).foregroundStyle(.orange)
-                }
             }
             if !m.liveNotice.isEmpty {
-                // e.g. mic/screen-recording denied AFTER /live/start already
-                // returned success — this is the only place that shows up.
+                // e.g. mic/screen-recording denied when capture actually starts —
+                // this is the only place that shows up.
                 Text("⚠️ " + m.liveNotice).font(.caption2).foregroundStyle(.orange).lineLimit(2)
             }
             transcriptView
@@ -637,9 +592,7 @@ panel.makeKeyAndOrderFront(nil)
 let statusController = StatusController(model: model, panel: panel)
 
 model.poll()
-model.pollCapability()
 Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in model.poll() }
 Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in model.tick() }
 Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { _ in model.pollTranscripts() }
-Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { _ in model.pollCapability() }
 app.run()
