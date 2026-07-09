@@ -76,6 +76,7 @@ if [ ! -x "\$PROJECT/.venv/bin/python" ]; then   # distribution: release-update 
 fi
 export MEETING_PORT=\$PORT
 export MEETING_REPO="$REPO_SLUG"                # bootstrap polls GitHub releases
+export MEETING_APP_BUNDLE="\$(cd "\$(dirname "\$0")/../.." && pwd)"  # updater swaps this whole bundle
 cd "\$WD"
 # Start the server detached, then exit immediately so the dock icon doesn't bounce.
 # bootstrap calls setsid() to survive the .app's process-group reap; it opens the

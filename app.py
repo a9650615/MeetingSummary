@@ -2563,13 +2563,37 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def update_apply():
         import updater
         here = os.path.dirname(os.path.abspath(__file__))
-        info = updater.apply(os.environ.get("MEETING_REPO", "a9650615/MeetingSummary"), here)
-        if info.get("applied"):
-            # restart so the new code loads (supervisor relaunches; bare run exits).
+        bundle = os.environ.get("MEETING_APP_BUNDLE")
+        info = updater.apply(os.environ.get("MEETING_REPO", "a9650615/MeetingSummary"), here, bundle_path=bundle)
+        if info.get("relaunching"):
+            # whole .app bundle was swapped — open the fresh copy, then tear down this
+            # supervise.sh tree (not just this process) so the new launcher's cold-start
+            # can bind the port and refresh WD without fighting the old one.
+            def _relaunch():
+                import shlex
+                import signal
+                import subprocess
+                import time as _t
+                subprocess.Popen(
+                    ["/bin/sh", "-c", f"sleep 2 && open {shlex.quote(info['bundle_path'])}"],
+                    start_new_session=True)
+                port = os.environ.get("MEETING_PORT", "8765")
+                try:
+                    pid = int(open(f"/tmp/meeting_supervise.{port}.pid").read().strip())
+                    os.kill(pid, signal.SIGTERM)   # supervise.sh cleanup() kills us too
+                except Exception:
+                    pass
+                _t.sleep(1.0)
+                os._exit(0)
+            import threading as _th
+            _th.Thread(target=_relaunch, daemon=True).start()
+        elif info.get("applied"):
+            # legacy source-only patch (no bundle_path, e.g. dev checkout) — restart
+            # just the python process; supervisor relaunches it with the new code.
             def _restart():
                 import time as _t
                 _t.sleep(0.4)
-                os._exit(3)   # supervisor relaunches with the new code
+                os._exit(3)
             import threading as _th
             _th.Thread(target=_restart, daemon=True).start()
         return info
