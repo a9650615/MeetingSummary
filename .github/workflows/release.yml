@@ -17,6 +17,22 @@ jobs:
           if [ "$v" != "$t" ]; then
             echo "::error::VERSION ($v) != tag ($t) — bump VERSION before tagging"; exit 1
           fi
+      - name: Cache floatpanel swift build
+        uses: actions/cache@v4
+        with:
+          path: |
+            swift/floatpanel/.build
+          key: nativehelpers-arm64-${{ hashFiles('swift/floatpanel/Sources/**') }}
+      - name: Build floatpanel (best-effort — nested into the .app below)
+        # Pure Swift (AppKit/Core Audio), no Metal — fast. Must run BEFORE
+        # build_app.sh so it can nest the panel as a real bundle
+        # (Contents/Resources/panel/MeetingSummary.app). Best-effort: a failure
+        # here degrades to launcher-without-panel rather than blocking the release.
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          ./build_floatpanel.sh
+          ./build_floatpanel_app.sh
       - name: Build MeetingSummary.app
         run: ./build_app.sh
       - name: Zip the .app (macOS-correct)
@@ -62,21 +78,13 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" "qwen3-ane-arm64.tar.gz" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Cache floatpanel swift build
-        uses: actions/cache@v4
-        with:
-          path: |
-            swift/floatpanel/.build
-          key: nativehelpers-arm64-${{ hashFiles('swift/floatpanel/Sources/**') }}
-      - name: Build + attach native helper (floatpanel) (best-effort)
-        # Pure Swift (AppKit/Core Audio) — no Metal, fast. setup_runtime.sh
-        # downloads this so users get the float panel (native mic + system-audio
-        # capture) without a Swift build. Non-blocking — the release already
-        # shipped above.
+      - name: Attach standalone floatpanel tarball (best-effort)
+        # Already built + nested into the .app above; this just packages the same
+        # binary as a standalone download for setup_runtime.sh's direct-fetch path.
+        # Non-blocking — the release already shipped above.
         continue-on-error: true
-        timeout-minutes: 20
+        timeout-minutes: 5
         run: |
-          ./build_floatpanel.sh
           ./package_floatpanel.sh "$PWD/floatpanel-arm64.tar.gz"
           gh release upload "$GITHUB_REF_NAME" "floatpanel-arm64.tar.gz" --clobber
         env:

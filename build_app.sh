@@ -51,14 +51,17 @@ PROJECT="$ROOT"
 SRC="\$(cd "\$(dirname "\$0")/../Resources/app" && pwd)"
 WD="\$HOME/Library/Application Support/MeetingSummary"
 [ -x "\$PROJECT/.venv/bin/python" ] && WD="\$PROJECT"   # dev machine: reuse working venv
-FP="\$WD/swift/floatpanel/.build/release/floatpanel"
+FP="\$(dirname "\$0")/../Resources/panel/MeetingSummary.app/Contents/MacOS/floatpanel"
 # Native entry: launch the floating panel as a DIRECT child of this .app,
 # detached so it survives our exit. Why direct (not via the python server):
 # macOS TCC blames the "responsible process" for screen-recording/mic; the
 # panel captures mic + system audio ITSELF (in-process), so spawned by the
 # .app it attributes to the app, not the detached python server ("python" in
 # the Privacy panes). The ( … & ) reparents it to launchd, which preserves
-# that attribution. Returns non-zero if not installed.
+# that attribution. \$FP is the nested panel BUNDLE's binary (Contents/Resources
+# /panel/MeetingSummary.app) — not a raw swift build-dir binary, which the
+# Dock/menu-bar render unreliably and which carries the wrong TCC identity.
+# Returns non-zero if not installed (dev build without swift, or nesting failed).
 launch_panel() { [ -x "\$FP" ] && ( MEETING_PORT="\$PORT" "\$FP" >/dev/null 2>&1 & ) ; }
 
 # Already running? just (re)show the panel; browser fallback if the panel isn't installed.
@@ -101,6 +104,23 @@ PY
     done
     iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/icon.icns" 2>/dev/null || true
   fi
+fi
+
+# 5. Nest the floatpanel bundle at Contents/Resources/panel/MeetingSummary.app so the
+# launcher runs a real .app, not a raw binary (Dock/menu-bar render raw binaries
+# unreliably, and TCC keys off the bundle identity io.meetingsummary.floatpanel).
+# Best-effort like the icon block above: dev machines without a floatpanel release
+# build still produce a working (degraded — panel-less, browser-fallback) launcher.
+FP_BIN="swift/floatpanel/.build/release/floatpanel"
+if [ -x "$FP_BIN" ]; then
+  [ -d dist/panel/MeetingSummary.app ] || ./build_floatpanel_app.sh
+  mkdir -p "$APP/Contents/Resources/panel"
+  cp -R dist/panel/MeetingSummary.app "$APP/Contents/Resources/panel/"
+  echo "nested panel: $APP/Contents/Resources/panel/MeetingSummary.app"
+else
+  echo "warning: $FP_BIN not built — shipping launcher WITHOUT the native panel" >&2
+  echo "  (degraded: falls back to opening the browser). To include it:" >&2
+  echo "  (cd swift/floatpanel && swift build -c release) && ./build_app.sh" >&2
 fi
 
 echo "built $APP"
