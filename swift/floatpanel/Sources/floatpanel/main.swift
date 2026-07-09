@@ -121,8 +121,13 @@ final class PanelMicCapturer: NSObject, AVCaptureAudioDataOutputSampleBufferDele
             var peak: Float = 0
             for i in 0..<count { let a = abs(Float(s[i])); if a > peak { peak = a } }
             agcEnv += (peak > agcEnv ? 0.6 : 0.05) * (peak - agcEnv)
-            let gain: Float = agcEnv > 40 ? min(30.0, max(1.0, 22000.0 / agcEnv)) : 1.0
-            if gain > 1.01 {
+            // Bidirectional AGC to a headroomed target (~0.55 full-scale): boost
+            // quiet speech AND attenuate loud/clipping input. The old max(1.0,…)
+            // ONLY boosted, so a hot mic stayed pinned at ±32767 (clipping) — which
+            // wrecks both ASR and the speaker embedding (measured: mic voiceprint
+            // noticeably worse than the un-AGC'd system tap). Gentler 12x ceiling.
+            let gain: Float = agcEnv > 40 ? min(12.0, max(0.2, 18000.0 / agcEnv)) : 1.0
+            if abs(gain - 1) > 0.01 {
                 for i in 0..<count {
                     s[i] = Int16(max(-32767.0, min(32767.0, Float(s[i]) * gain)))
                 }
