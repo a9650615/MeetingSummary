@@ -352,7 +352,8 @@ def test_enable_diarization_promotion_renames_stored_rows_and_calls_on_rename(tm
     # push a live 'rename' message / bump a floatpanel refetch counter.
     import diarize
 
-    def fake_labeler(extractor, rows, *, session_threshold, match_threshold, on_promote=None):
+    def fake_labeler(extractor, rows, *, session_threshold, match_threshold,
+                     on_promote=None, continuity_threshold=0.5):
         def fn(_audio):
             if on_promote:
                 on_promote("說話者1", "Scott")
