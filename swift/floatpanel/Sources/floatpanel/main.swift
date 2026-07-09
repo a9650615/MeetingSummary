@@ -275,6 +275,7 @@ final class Model: ObservableObject {
     // breathing); audioLive = first non-zero sample arrived (red). Idle = neither.
     @Published var starting = false
     @Published var audioLive = false
+    @Published var showSubtitle = false   // YouTube-style caption overlay toggle
     @Published var source: Source = .mic
     // A native session can fail AFTER capture already started (e.g. mic/screen-
     // recording access denied when the capturer actually opens the device) —
@@ -633,6 +634,9 @@ struct PanelView: View {
                     Text(m.elapsed).font(.system(.subheadline, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
+                Button { m.showSubtitle.toggle() } label: {
+                    Image(systemName: m.showSubtitle ? "captions.bubble.fill" : "captions.bubble")
+                }.buttonStyle(.borderless).help("字幕浮層：畫面底部顯示最新逐字（像 YouTube 即時字幕）")
                 Button { m.openConsole() } label: {
                     Image(systemName: "list.bullet.rectangle")
                 }.buttonStyle(.borderless).help("開啟主控台（會議清單／摘要／設定）")
@@ -824,10 +828,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let m: Model
     let panel: NSPanel
     var status: StatusController?  // retains the status item for the app's life
+    var subtitle: SubtitleController?          // retains the caption overlay
+    private var subtitleObs: AnyCancellable?
     init(m: Model, panel: NSPanel) { self.m = m; self.panel = panel; super.init() }
     func applicationDidFinishLaunching(_ note: Notification) {
         panel.makeKeyAndOrderFront(nil)
         status = StatusController(model: m, panel: panel)
+        // Caption overlay: show/hide a full-screen click-through subtitle panel
+        // as the toggle flips.
+        let sub = SubtitleController(model: m)
+        subtitle = sub
+        subtitleObs = m.$showSubtitle.removeDuplicates().sink { sub.setVisible($0) }
         // Server-driven re-show handle (menu-bar-independent): /floatpanel/open
         // bumps show_seq; the model sees it on poll and calls this to surface us.
         m.onShowRequest = { [weak self] in
