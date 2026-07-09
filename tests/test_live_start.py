@@ -94,6 +94,30 @@ def test_ws_native_capture_ingests_relayed_frames(tmp_path, monkeypatch):
     assert (seg_dirs[0] / "system.pcm").read_bytes() != b""
 
 
+def test_ws_native_capture_session_resumes_same_meeting(tmp_path, monkeypatch):
+    # floatpanel remembers the meeting id from the server's {"type":"meeting"}
+    # message and passes it back as ?session= after a dropped relay socket, so
+    # a reconnect lands in the SAME meeting instead of fragmenting a new one.
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "m.db")
+    app = create_app(store, summary_backend=lambda p: "x", asr_backend=None,
+                     live_manager=_FakeLiveManager())
+    with TestClient(app) as c:
+        with c.websocket_connect("/ws/native-capture?source=mic") as ws:
+            first = ws.receive_json()
+            assert first["type"] == "meeting"
+            mid1 = first["id"]
+        # dropped socket -> the detached consume task flushes + ends the session
+        assert _wait_until(lambda: c.get("/live/state").json()["recording"] is False)
+
+        with c.websocket_connect(f"/ws/native-capture?source=mic&session={mid1}") as ws2:
+            second = ws2.receive_json()
+            assert second["type"] == "meeting"
+            assert second["id"] == mid1  # bound to the SAME meeting, not a new one
+
+    assert len(store.list_meetings()) == 1  # never fragmented into a second meeting
+
+
 def test_ws_native_capture_needs_a_live_backend(tmp_path):
     store = Store(tmp_path / "m.db")
     app = create_app(store, summary_backend=lambda p: "x", asr_backend=None)  # live_manager=None

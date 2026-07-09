@@ -49,10 +49,15 @@ private let CAP_TRACK_MIC: UInt8 = 1
 
 /// Builds framed messages and sends them over the relay WebSocket. send() is
 /// enqueued per whole message, so concurrent mic+system writes never interleave.
+/// The task is swappable (setTask) so a reconnect can swap in a fresh
+/// URLSessionWebSocketTask under the SAME sink — the mic/system capturers hold
+/// one sink for their whole lifetime and must keep writing across reconnects.
 final class WSFrameSink {
-    private let task: URLSessionWebSocketTask
-    init(_ task: URLSessionWebSocketTask) { self.task = task }
+    private var task: URLSessionWebSocketTask?
+    init(_ task: URLSessionWebSocketTask?) { self.task = task }
+    func setTask(_ t: URLSessionWebSocketTask?) { task = t }
     func write(track: UInt8, payload: Data) {
+        guard let task = task else { return }  // no live socket (e.g. reconnecting) — drop
         var frame = Data([track])
         var len = UInt32(payload.count).littleEndian
         withUnsafeBytes(of: &len) { frame.append(contentsOf: $0) }
@@ -265,6 +270,16 @@ final class Model: ObservableObject {
     // /live/state carries a best-effort notice for whatever's currently recording.
     @Published var liveNotice = ""
     private var wsTask: URLSessionWebSocketTask?
+    private var relaySession: URLSession?  // dedicated session for the relay socket (not .shared)
+    private var pingTimer: Timer?
+    // Bumped on every real start()/stop() (NOT on an internal reconnect) — lets
+    // async closures (permission callbacks, receive/ping/reconnect) tell "this
+    // recording session ended/restarted" apart from "the relay socket dropped
+    // and got swapped under us", which must NOT reset audioLive or re-prompt.
+    private var relayEpoch = 0
+    private var userStopped = false
+    private var reconnectAttempt = 0
+    private var relayMid: Int?          // learned from the server's {"type":"meeting"} message
     private var micCap: PanelMicCapturer?
     private var sysCap: AnyObject?   // PanelSystemTapCapturer (macOS 14.2+); retained
     private var sink: WSFrameSink?
@@ -372,11 +387,19 @@ final class Model: ObservableObject {
     // prompt (AVCaptureDevice.requestAccess) and the system tap both run under the
     // App's identity, so the TCC grant is "透過 App 授權" — one entry, MeetingSummary.
     private func startNativeRelay() {
-        guard let wsURL = URL(string:
-            "ws://127.0.0.1:\(port)/ws/native-capture?source=\(source.rawValue)&diarize=1") else { return }
-        let task = URLSession.shared.webSocketTask(with: wsURL)
-        wsTask = task
-        task.resume()
+        relayEpoch += 1
+        let epoch = relayEpoch
+        userStopped = false
+        reconnectAttempt = 0
+        relayMid = nil  // a fresh start() always begins a NEW meeting, never resumes the last one
+
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 3600   // long-lived socket, not a short HTTP request
+        cfg.waitsForConnectivity = true
+        let session = URLSession(configuration: cfg)
+        relaySession = session
+
+        guard let task = openRelayTask(session: session, epoch: epoch) else { return }
         let sink = WSFrameSink(task)
         self.sink = sink
         // Indicator: starting = socket up + asking permission + warming the
@@ -390,7 +413,7 @@ final class Model: ObservableObject {
         if wantMic {
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
-                    guard let self = self, self.wsTask === task else { return }  // not stopped meanwhile
+                    guard let self = self, self.relayEpoch == epoch else { return }  // not stopped/restarted meanwhile
                     if granted {
                         let mic = PanelMicCapturer(sink: sink)
                         do { try mic.start(); self.micCap = mic; self.audioLive = true }
@@ -415,7 +438,7 @@ final class Model: ObservableObject {
                 }
                 let sys = PanelSystemTapCapturer(sink: sink)
                 sys.onFirstAudio = { [weak self] in
-                    guard let self = self, self.wsTask === task else { return }
+                    guard let self = self, self.relayEpoch == epoch else { return }
                     self.audioLive = true
                     if self.liveNotice.contains("系統音") || self.liveNotice.contains("螢幕") {
                         self.liveNotice = ""  // audio flowing -> clear the permission nag
@@ -427,7 +450,7 @@ final class Model: ObservableObject {
                     // Check a few seconds in and tell the user instead of silently
                     // recording silence (this is the "真的在錄嗎" signal).
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                        guard let self = self, self.wsTask === task else { return }
+                        guard let self = self, self.relayEpoch == epoch else { return }
                         if (self.sysCap as? PanelSystemTapCapturer)?.sawSignal == false {
                             self.liveNotice = "⚠️ 未擷取到系統音（可能未授權）：系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製 開啟 MeetingSummary 後重新開始"
                         }
@@ -441,14 +464,108 @@ final class Model: ObservableObject {
         }
     }
 
+    // Opens one WS attempt (initial connect OR reconnect) on the dedicated
+    // relay session: builds the URL (resuming into relayMid if known), starts
+    // the task, and kicks off its receive pump + keepalive ping timer. Does
+    // NOT touch the sink/capturers — callers wire/rewire those as needed.
+    private func openRelayTask(session: URLSession, epoch: Int) -> URLSessionWebSocketTask? {
+        var urlStr = "ws://127.0.0.1:\(port)/ws/native-capture?source=\(source.rawValue)&diarize=1"
+        if let m = relayMid { urlStr += "&session=\(m)" }
+        guard let wsURL = URL(string: urlStr) else { return nil }
+        let task = session.webSocketTask(with: wsURL)
+        wsTask = task
+        task.resume()
+        pumpReceive(task: task, epoch: epoch)
+        restartPingTimer(epoch: epoch)
+        return task
+    }
+
+    // Recursive receive loop — REQUIRED so URLSessionWebSocketTask doesn't stall/
+    // get reclaimed for having its read side never pumped. Only text message we
+    // care about is the server's {"type":"meeting","id":...} (remembered for
+    // resume-on-reconnect); everything else is ignored. A failure here means the
+    // socket died — reconnect if we're still meant to be recording.
+    private func pumpReceive(task: URLSessionWebSocketTask, epoch: Int) {
+        task.receive { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let message):
+                var newMid: Int?
+                if case .string(let text) = message,
+                   let data = text.data(using: .utf8),
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   obj["type"] as? String == "meeting", let mid = obj["id"] as? Int {
+                    newMid = mid
+                }
+                DispatchQueue.main.async {
+                    guard self.relayEpoch == epoch else { return }
+                    if let mid = newMid { self.relayMid = mid }
+                    self.reconnectAttempt = 0  // a successful read = the socket is healthy again
+                    if self.liveNotice == "重新連線中…" { self.liveNotice = "" }
+                }
+                self.pumpReceive(task: task, epoch: epoch)
+            case .failure:
+                DispatchQueue.main.async {
+                    guard self.relayEpoch == epoch, !self.userStopped else { return }
+                    self.scheduleReconnect(epoch: epoch)
+                }
+            }
+        }
+    }
+
+    // ~10s keepalive: a plain send-only socket with no ping/pong and no reads
+    // is exactly what stalls/gets silently reclaimed. A ping failure means the
+    // connection is dead even though writes haven't errored yet.
+    private func restartPingTimer(epoch: Int) {
+        pingTimer?.invalidate()
+        pingTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            guard let self = self, self.relayEpoch == epoch, let task = self.wsTask else { return }
+            task.sendPing { [weak self] error in
+                guard let self = self, error != nil else { return }
+                DispatchQueue.main.async {
+                    guard self.relayEpoch == epoch, !self.userStopped else { return }
+                    self.scheduleReconnect(epoch: epoch)
+                }
+            }
+        }
+    }
+
+    // Bounded backoff reconnect: 0.5s, 1s, 2s, 4s, 5s(cap), 5s — gives up after
+    // ~6 tries. Does NOT touch mic/system capturers (they keep running, still
+    // writing to the same `sink`) — only swaps a fresh task under it.
+    private func scheduleReconnect(epoch: Int) {
+        guard relayEpoch == epoch, !userStopped else { return }
+        guard reconnectAttempt < 6 else {
+            liveNotice = "重新連線失敗，請手動重新開始錄音"
+            return
+        }
+        let delay = min(5.0, 0.5 * pow(2.0, Double(reconnectAttempt)))
+        reconnectAttempt += 1
+        liveNotice = "重新連線中…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.relayEpoch == epoch, !self.userStopped,
+                  let session = self.relaySession else { return }
+            guard let task = self.openRelayTask(session: session, epoch: epoch) else {
+                self.scheduleReconnect(epoch: epoch)
+                return
+            }
+            self.sink?.setTask(task)
+        }
+    }
+
     private func stopNativeRelay() {
+        relayEpoch += 1   // invalidate any in-flight permission/receive/ping/reconnect callback
+        userStopped = true
         self.starting = false; self.audioLive = false
         micCap?.stop(); micCap = nil
         if #available(macOS 14.2, *) { (sysCap as? PanelSystemTapCapturer)?.stop() }
         sysCap = nil
-        sink = nil
+        pingTimer?.invalidate(); pingTimer = nil
+        sink?.setTask(nil); sink = nil
+        relayMid = nil
         // Closing the socket ends the /ws/native-capture session server-side.
         wsTask?.cancel(with: .goingAway, reason: nil); wsTask = nil
+        relaySession?.invalidateAndCancel(); relaySession = nil
     }
 
     // 主控台: the review/list/settings UI still lives in the browser (native entry

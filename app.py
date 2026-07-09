@@ -2165,9 +2165,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
         import recorder  # noqa: PLC0415
         t0 = time.time()
-        title = time.strftime("錄音 %Y-%m-%d %H:%M", time.localtime(t0))
-        mid = store.create_meeting(title, t0, "zh-TW")
-        conn_offset_ms = 0
+        # Reconnect/resume: floatpanel remembers the meeting id from the
+        # {"type":"meeting"} message below and passes it back as ?session=
+        # after a dropped relay socket, so the resumed audio lands in the SAME
+        # meeting instead of fragmenting into a new one each reconnect. Same
+        # pattern as ws_live (see there for the offset rationale).
+        session = qp.get("session")
+        if session and session.isdigit() and store.get_meeting(int(session)) is not None:
+            mid = int(session)
+            conn_offset_ms = max(0, int((t0 - store.get_meeting(mid)["created_at"]) * 1000))
+        else:
+            title = time.strftime("錄音 %Y-%m-%d %H:%M", time.localtime(t0))
+            mid = store.create_meeting(title, t0, "zh-TW")
+            conn_offset_ms = 0
+        await ws.send_json({"type": "meeting", "id": mid})
         audio_dir = f"data/{mid}-{int(t0)}"
         os.makedirs(audio_dir, exist_ok=True)
         store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
