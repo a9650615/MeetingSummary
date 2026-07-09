@@ -4,13 +4,16 @@
 # identity (io.meetingsummary.floatpanel). The panel IS the native front-end —
 # giving it a proper bundle makes it a first-class Dock app instead of a raw
 # terminal binary (which the Dock/menu-bar render unreliably).
-#   ./build_floatpanel_app.sh          -> dist/MeetingSummaryPanel.app
-#   open dist/MeetingSummaryPanel.app  (honors MEETING_PORT; default 8765)
+#   ./build_floatpanel_app.sh          -> dist/panel/MeetingSummary.app
+#   open dist/panel/MeetingSummary.app (honors MEETING_PORT; default 8765)
+# Bundle basename IS "MeetingSummary" (the Dock uses the .app filename, not
+# CFBundleName) — parked under dist/panel/ so it doesn't clash with the
+# launcher's dist/MeetingSummary.app.
 set -eu
 cd "$(dirname "$0")"
 BIN=swift/floatpanel/.build/release/floatpanel
 [ -x "$BIN" ] || { echo "build the binary first: (cd swift/floatpanel && swift build -c release)"; exit 1; }
-APP=dist/MeetingSummaryPanel.app
+APP=dist/panel/MeetingSummary.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/floatpanel"
