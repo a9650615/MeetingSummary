@@ -6,10 +6,11 @@ Apple Silicon (M 系列) 上**完全本地、隱私優先**的會議助手：錄
 
 ### 原生 App（一般使用者）
 1. 到 [Releases](https://github.com/a9650615/MeetingSummary/releases/latest) 下載 `MeetingSummary-vX.Y.Z.zip`。
-2. 解壓，首次右鍵 **打開**（未簽章，繞過 Gatekeeper）。
-3. 第一次啟動會自動：建立 venv、裝相依、依需求下載模型。瀏覽器會開進度頁，裝好自動導向 App。
+2. 解壓，首次右鍵 **打開**（自簽章、非 Apple 公證，跳一次 Gatekeeper 警告即可，之後正常雙擊）。
+3. 第一次啟動會自動下載已裝好相依（含 mlx 加速）的 Python 執行環境，免裝 Xcode/cmake；依需求下載模型。瀏覽器會開進度頁，裝好自動導向 App（或直接開原生錄音面板）。
+4. 開始錄音時系統會跳「麥克風」「螢幕與系統音訊錄製」授權，兩個都要允許——沒有系統音訊錄製權限，抓對方聲音會是全靜音。
 
-App 體積小（~70KB launcher）；相依與模型都在**首次啟動時才下載**。
+App 體積小（~70KB launcher）；相依與模型都在**首次啟動時才下載**（Apple Silicon 全套約 1–1.5GB，一次性）。
 
 ### 開發 / 原始碼啟動
 ```bash

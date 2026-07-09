@@ -116,3 +116,17 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" "floatpanel-arm64.tar.gz" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+      - name: Build + attach prebuilt Python runtime w/ deps (best-effort)
+        # python-build-standalone + requirements-app.txt + mlx pre-installed —
+        # bootstrap.py fetches this on a clean Mac instead of creating a venv
+        # against the system python3 (which pip-installs everything over the
+        # network and, worse, can trigger the Xcode CLT install prompt). Slow
+        # (mlx pulls torch as a real mlx-whisper dependency) but non-blocking —
+        # the release already shipped above.
+        continue-on-error: true
+        timeout-minutes: 40
+        run: |
+          ./package_pydist.sh "$PWD/pydist-arm64.tar.gz"
+          gh release upload "$GITHUB_REF_NAME" "pydist-arm64.tar.gz" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

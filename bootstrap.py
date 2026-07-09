@@ -42,6 +42,64 @@ def _is_apple_silicon_hw():
         return False
 
 
+def _fetch_pydist():
+    """Fetch the prebuilt Python (python-build-standalone, every dep incl. mlx
+    already installed) from the latest release and lay it down as `.venv` — the
+    exact layout (bin/python, bin/pip) every other script already assumes, so
+    nothing downstream needs to know this isn't a real venv. This is what makes
+    a clean Mac work with ZERO system Python: no Xcode CLT prompt from Apple's
+    /usr/bin/python3 stub, no version mismatch, no pip wait at first launch.
+    Apple Silicon only (that's the only prebuilt asset). Never raises — returns
+    False on any failure so the caller falls back to create-venv-and-pip-install."""
+    if not _is_apple_silicon_hw():
+        return False
+    try:
+        import io
+        import json as _json
+        import shutil
+        import tarfile
+        import urllib.request
+        repo = os.environ.get("MEETING_REPO", "a9650615/MeetingSummary")
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/releases/latest",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "MeetingSummary"})
+        rel = _json.load(urllib.request.urlopen(req, timeout=10))
+        url = next((a["browser_download_url"] for a in rel.get("assets", [])
+                    if a.get("name") == "pydist-arm64.tar.gz"), None)
+        if not url:
+            return False
+        state["step"] = "下載預裝 Python 執行環境…"
+        data = urllib.request.urlopen(url, timeout=600).read()
+        tmp = os.path.join(HERE, ".venv.tmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(data)) as tf:
+            tf.extractall(tmp)
+        extracted = os.path.join(tmp, "python")
+        if not os.path.isfile(os.path.join(extracted, "bin", "python3")):
+            shutil.rmtree(tmp, ignore_errors=True)
+            return False
+        venv = os.path.join(HERE, ".venv")
+        shutil.rmtree(venv, ignore_errors=True)
+        shutil.move(extracted, venv)
+        shutil.rmtree(tmp, ignore_errors=True)
+        link = os.path.join(venv, "bin", "python")
+        if not os.path.exists(link):
+            os.symlink("python3", link)
+        try:  # baked-in already -> skip the redundant pip-install-core step below
+            import hashlib
+            with open(os.path.join(HERE, REQ), "rb") as rf:
+                h = hashlib.md5(rf.read()).hexdigest()
+            with open(os.path.join(venv, ".reqhash"), "w") as mf:
+                mf.write(h)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        state["line"] = "pydist: " + str(e)[:120]
+        return False
+
+
 def _pip(args, log=False):
     """Run pip; stream to the page+log if log=True. Returns returncode (never raises)."""
     try:
@@ -85,9 +143,10 @@ def setup():
         # 檢查更新 → 更新並重啟). Launch always runs the current code as-is.
         if not os.path.exists(PY):
             state["step"] = "建立 Python 環境…"
-            subprocess.run([sys.executable, "-m", "venv", ".venv"], cwd=HERE,
-                           capture_output=True)
-            _pip(["install", "-q", "--upgrade", "pip"])
+            if not _fetch_pydist():
+                subprocess.run([sys.executable, "-m", "venv", ".venv"], cwd=HERE,
+                               capture_output=True)
+                _pip(["install", "-q", "--upgrade", "pip"])
         core_missing = subprocess.run([PY, "-c", "import fastapi,uvicorn"], cwd=HERE,
                                       capture_output=True).returncode != 0
         changed, h = _reqs_changed()        # requirements updated since last install?
