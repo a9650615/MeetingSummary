@@ -1636,6 +1636,7 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
 
     for i, (track, p, seg_off, bs, bl) in enumerate(units):
         win_off_ms = seg_off + int(bs / 2 / sample_rate * 1000)
+        win_dur_ms = int(bl / 2 / sample_rate * 1000)   # so untimed backends spread within the window
         tmp = f"{os.path.dirname(p)}/_win.pcm"
         with open(_src(p), "rb") as f:
             f.seek(bs)
@@ -1644,7 +1645,8 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
         texts = []
         speaker = _TRACK_LABEL.get(track, track)  # mic->我, system->對方
         try:
-            for t in asr.transcribe(tmp, profile="accurate", track=track, backend=backend):
+            for t in asr.transcribe(tmp, profile="accurate", track=track,
+                                    backend=backend, clip_ms=win_dur_ms):
                 store.add_transcript(mid, "accurate", track,
                                      t["start_ms"] + win_off_ms,
                                      t["end_ms"] + win_off_ms, speaker, t["text"])

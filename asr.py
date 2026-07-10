@@ -53,7 +53,14 @@ def _sentence_split(text, start_ms, end_ms, min_chars=6):
     return out
 
 
-def transcribe(audio_path, *, profile, track, backend):
+def transcribe(audio_path, *, profile, track, backend, clip_ms=None):
+    """clip_ms: the audio window's true length in ms. Non-whisper backends
+    (qwen3-ane / chatllm) return a whole 30s window as ONE segment with
+    start==end==0 (untimed blob). Without a real span, _sentence_split can't
+    distribute the sentences, so they'd all collapse onto the window's start
+    time — every line in a 30s window sharing one timestamp, and the timeline
+    stops matching the text. When a segment has no span, fall back to clip_ms so
+    the sentences spread across the actual window instead."""
     import live  # noqa: PLC0415 — reuse the live path's hallucination/filler blocklist
     out = []
     for seg in backend(audio_path):
@@ -65,6 +72,8 @@ def transcribe(audio_path, *, profile, track, backend):
             continue
         text = zhtw.to_tw(_collapse_repeats(text).strip())  # normalize 簡->繁(台灣)
         s_ms, e_ms = round(seg["start"] * 1000), round(seg["end"] * 1000)
+        if e_ms <= s_ms and clip_ms:   # untimed blob -> spread over the real window
+            e_ms = s_ms + clip_ms
         # sentence-split so a long window (qwen3/ANE return one big blob) becomes
         # several live-sized lines instead of one wall of text.
         for ss, ee, piece in _sentence_split(text, s_ms, e_ms):
