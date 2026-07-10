@@ -247,6 +247,24 @@ def test_get_meeting_detail(tmp_path):
     assert body["transcripts"][0]["text"] == "你好"
 
 
+def test_meeting_page_rename_uses_raw_stored_speaker_not_display_label(tmp_path):
+    # Live diarization stores the raw cluster label (說話者N); the review page
+    # (/m/{mid}) must display it collapsed (對方) but click-to-rename has to key
+    # off the RAW stored value — else it silently updates 0 rows because no row
+    # literally has speaker="對方" in the database.
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    store.add_transcript(mid, "accurate", "system", 0, 1000, "說話者1", "你好")
+
+    html = c.get(f"/m/{mid}").text
+    assert "data-spk='說話者1'" in html
+    assert ">對方<" in html
+
+    r = c.post(f"/meetings/{mid}/speaker", json={"old": "說話者1", "new": "Scott", "track": "system"})
+    assert r.json()["renamed"] == 1
+    assert store.list_transcripts(mid)[0]["speaker"] == "Scott"
+
+
 def test_get_missing_meeting_404(tmp_path):
     c, _ = make_client(tmp_path)
     assert c.get("/meetings/999").status_code == 404

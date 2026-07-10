@@ -1097,6 +1097,7 @@ class TitleIn(BaseModel):
 class SpeakerRenameIn(BaseModel):
     old: str
     new: str
+    track: str | None = None   # scopes /meetings/{mid}/speaker; ignored by the global rename
 
 
 class MergeIn(BaseModel):
@@ -1146,6 +1147,7 @@ def _rows(rows):
     for r in rows:
         d = dict(r)
         if "speaker" in d and "track" in d:
+            d["speaker_raw"] = d["speaker"]   # rename must key off this, not the display collapse
             d["speaker"] = live_session.display_speaker(d["speaker"], d["track"])
         out.append(d)
     return out
@@ -1798,7 +1800,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
     rows = "".join(
         f"<tr data-track='{html.escape(str(r['track']))}' data-ts='{(r['start_ms'] or 0)/1000:.2f}'>"
         f"<td class=ts>{ts_str(r['start_ms'])}</td>"
-        f"<td class=who data-spk='{html.escape(str(r['speaker']))}' "
+        f"<td class=who data-spk='{html.escape(str(r.get('speaker_raw', r['speaker'])))}' "
         f"title='點擊改名'>{html.escape(str(r['speaker']))}</td>"
         f"<td>{html.escape(r['text'])}</td></tr>"
         for r in transcripts) or "<tr><td colspan=3 class=muted>尚無逐字稿</td></tr>"
@@ -1976,15 +1978,19 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         # (pick a past speaker instead of retyping). Enter/blur commits, Esc cancels.
         "document.querySelectorAll('td.who[data-spk]').forEach(td=>{td.style.cursor='pointer';"
         "td.onclick=(e)=>{e.stopPropagation();if(td.querySelector('input'))return;"
-        "const old=td.dataset.spk;let cancelled=false;"
-        "const inp=document.createElement('input');inp.value=old;inp.setAttribute('list','spkdl');"
+        # raw = the actual stored speaker (rename must match this in the DB);
+        # disp = the friendly collapsed label shown/edited (對方/我/混合 or a
+        # promoted name) — they differ for un-promoted live cluster labels.
+        "const raw=td.dataset.spk;const disp=td.textContent;let cancelled=false;"
+        "const inp=document.createElement('input');inp.value=disp;inp.setAttribute('list','spkdl');"
         "inp.autocomplete='off';inp.style.cssText='font:inherit;width:7em';"
         "td.textContent='';td.appendChild(inp);inp.focus();inp.select();"
         "const commit=async()=>{const nw=inp.value.trim();"
-        "if(cancelled||!nw||nw===old){td.textContent=old;return;}"
+        "if(cancelled||!nw||nw===disp){td.textContent=disp;return;}"
+        "const trk=td.closest('tr').dataset.track;"
         f"const r=await fetch('/meetings/{mid}/speaker',{{method:'POST',"
-        "headers:{'Content-Type':'application/json'},body:JSON.stringify({old:old,new:nw})});"
-        "if(r.ok)location.reload();else td.textContent=old;};"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({old:raw,new:nw,track:trk})});"
+        "if(r.ok)location.reload();else td.textContent=disp;};"
         "inp.onkeydown=(ev)=>{if(ev.key==='Enter')inp.blur();"
         "else if(ev.key==='Escape'){cancelled=true;inp.blur();}};inp.onblur=commit;};});"
         "(function(){fetch('/speakers').then(r=>r.json()).then(j=>{"
@@ -2892,8 +2898,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
         new = body.new.strip()
-        n = store.rename_speaker(mid, body.old, new)
+        n = store.rename_speaker(mid, body.old, new, track=body.track)
         # propagate to the global voiceprint so future meetings auto-use the new name
+        # (no-op when old is a raw live cluster label — no such global speaker exists yet)
         store.rename_global_speaker(body.old, new)
         return {"renamed": n}
 
