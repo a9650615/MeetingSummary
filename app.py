@@ -332,10 +332,10 @@ async function loadThr(){const t=document.getElementById('thr');
   t.value=(await(await fetch('/settings/speaker_threshold')).json()).value;
   t.onchange=async()=>{await fetch('/settings/speaker_threshold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:t.value})});loadSugs();};}
 document.getElementById('reconcile').onclick=async()=>{
-  if(!confirm('重新比對所有聲紋：非常相近的會自動合併，從未被認出且只出現一次的雜訊會被刪除。確定要執行?'))return;
+  if(!confirm('重新比對所有聲紋：非常相近的會自動合併，從未被認出且只出現一次的雜訊會被刪除。\\n執行前會自動完整備份資料庫（可還原）。確定要執行?'))return;
   const m=document.getElementById('reconcilemsg');m.textContent='比對中…';
   const r=await(await fetch('/speakers/reconcile',{method:'POST'})).json();
-  m.textContent=`已合併 ${r.merged} 筆、清除 ${r.purged} 筆雜訊`;
+  m.textContent=`已合併 ${r.merged} 筆、清除 ${r.purged} 筆雜訊`+(r.backup?`（已備份，如需還原：${r.backup}）`:'');
   load();
 };
 loadThr();load();
@@ -1535,6 +1535,21 @@ def _persistent_names(store, embs, prefix, threshold=0.62):
             known.append((sid, emb))
             rows[sid] = {"id": sid, "name": nm, "centroid": emb.tobytes(), "count": 1}
     return names
+
+
+def _backup_db(store):
+    """Snapshot the sqlite DB before a destructive bulk op so the whole thing is
+    reversible by copying one file back. VACUUM INTO writes a consistent
+    single-file copy (WAL content included) — safer than cp'ing the .db while a
+    -wal is live. Returns the backup path (or None if it couldn't be made)."""
+    import time  # noqa: PLC0415
+    try:
+        dst = f"{store.db_path}.bak-{time.strftime('%Y%m%d-%H%M%S')}"
+        store.db.execute("VACUUM INTO ?", (dst,))
+        return dst
+    except Exception as e:
+        print(f"db backup failed: {e}", file=sys.stderr)
+        return None
 
 
 def _apply_speaker_reconcile(store, plan):
@@ -3209,9 +3224,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # One-click cleanup: merge fragmented voiceprints of the same named person,
         # fold placeholder rows that are VERY close to a real name into it, purge
         # one-shot noise. See diar.reconcile_speakers() for the full rationale.
+        # Snapshots the whole DB first so it's fully reversible (restore the .bak).
         import diarize as diar  # noqa: PLC0415
+        backup = _backup_db(store)
         plan = diar.reconcile_speakers(store.list_speakers())
-        return _apply_speaker_reconcile(store, plan)
+        result = _apply_speaker_reconcile(store, plan)
+        result["backup"] = backup
+        return result
 
     @app.get("/speakers/{name}/utterances")
     def speaker_utterances(name: str):

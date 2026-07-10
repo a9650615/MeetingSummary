@@ -157,6 +157,14 @@ def test_speakers_reconcile_route_merges_close_and_purges_noise(tmp_path):
     names = {s["name"] for s in store.list_speakers()}
     assert names == {"Jimmy", "Ann"}
 
+    # a full-DB snapshot was taken first, so the whole op is reversible.
+    import os
+    assert r["backup"] and os.path.exists(r["backup"])
+    import sqlite3
+    bak = sqlite3.connect(r["backup"])
+    assert bak.execute("SELECT COUNT(*) FROM speakers").fetchone()[0] == 5   # pre-reconcile state preserved
+    bak.close()
+
 
 def test_speakers_grouped_by_name(tmp_path):
     import struct
