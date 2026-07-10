@@ -402,6 +402,97 @@ def _consolidate_named(speakers, *, cohesion=0.45):
     return out
 
 
+def reconcile_speakers(speakers, *, merge_threshold=0.75, cohesion=0.45):
+    """Plan a global voiceprint cleanup. `speakers` = store.list_speakers() rows
+    (id, name, centroid, count). Read-only (no DB write) — returns
+    {"merge": [(keep_id, [drop_id, ...]), ...], "purge": [id, ...]} for the
+    caller to apply.
+
+    Pass 1 — same real name, single-linkage cluster (same idea as
+    _consolidate_named, but id-aware): naming appends a new row each time, so
+    one person accrues many centroids. A human already asserted "same person"
+    by giving them the same name, so cohesive groups (>=2, cosine >= cohesion)
+    just merge — no similarity judgment call here. Lone dissenters are left
+    alone (not silently dropped — could still be a real recording of that
+    person, just noisy; purging keyed-off names would need a human decision).
+
+    Pass 2 — remaining placeholder rows (我N/對方N/說話者N/混合N, never named by
+    a human) that are VERY close to a remaining real name fold into it.
+    merge_threshold is deliberately stricter than the 0.62 live/batch match
+    threshold: this runs unattended with no human glancing at the result, so a
+    false merge (two different people combined) is worse than a missed one.
+    Never auto-merges two DIFFERENT human-given real names — that judgment
+    call stays with the manual merge dropdown.
+
+    Pass 3 — whatever's left placeholder-named and never reinforced
+    (count<=1, still no merge partner) is a one-shot noisy embedding that
+    should never have been persisted -> purge.
+    """
+    import numpy as np  # noqa: PLC0415
+    from collections import defaultdict  # noqa: PLC0415
+
+    rows = [r for r in speakers if r["centroid"]]
+    vecs = {}
+    for r in rows:
+        v = np.frombuffer(r["centroid"], dtype=np.float32)
+        vecs[r["id"]] = v / (np.linalg.norm(v) + 1e-9)
+
+    def cos(i, j):
+        return float(vecs[i] @ vecs[j])
+
+    merges = defaultdict(list)   # keep_id -> [drop_id, ...], accumulated across both passes
+    consumed = set()
+
+    byname = defaultdict(list)
+    for r in rows:
+        if not _is_placeholder(r["name"]):
+            byname[r["name"]].append(r)
+    for grp in byname.values():
+        if len(grp) < 2:
+            continue
+        ids = [r["id"] for r in grp]
+        counts = {r["id"]: (r["count"] or 1) for r in grp}
+        n = len(ids)
+        parent = list(range(n))
+
+        def find(x, parent=parent):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        for i in range(n):
+            for j in range(i + 1, n):
+                if cos(ids[i], ids[j]) >= cohesion:
+                    parent[find(i)] = find(j)
+        groups = defaultdict(list)
+        for i in range(n):
+            groups[find(i)].append(ids[i])
+        for gid in groups.values():
+            if len(gid) < 2:
+                continue
+            keep = max(gid, key=lambda i: counts[i])
+            drops = [i for i in gid if i != keep]
+            merges[keep].extend(drops)
+            consumed.update(drops)   # keep stays available as a match target in pass 2
+
+    remaining_named = [r for r in rows if r["id"] not in consumed and not _is_placeholder(r["name"])]
+    remaining_ph = [r for r in rows if r["id"] not in consumed and _is_placeholder(r["name"])]
+    for r in remaining_ph:
+        best_id, best_sim = None, 0.0
+        for nr in remaining_named:
+            s = cos(r["id"], nr["id"])
+            if s > best_sim:
+                best_sim, best_id = s, nr["id"]
+        if best_id is not None and best_sim >= merge_threshold:
+            merges[best_id].append(r["id"])
+            consumed.add(r["id"])
+
+    purge = [r["id"] for r in rows
+             if r["id"] not in consumed and _is_placeholder(r["name"]) and (r["count"] or 1) <= 1]
+
+    return {"merge": [(keep, drops) for keep, drops in merges.items()], "purge": purge}
+
+
 def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
                          match_threshold=0.62, min_secs=1.2, sample_rate=16000,
                          on_promote=None, continuity_threshold=0.5):

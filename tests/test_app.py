@@ -141,6 +141,23 @@ def test_speakers_routes_list_rename_merge_delete(tmp_path):
     assert store.list_speakers() == []
 
 
+def test_speakers_reconcile_route_merges_close_and_purges_noise(tmp_path):
+    import struct
+    c, store = make_client(tmp_path)
+    store.add_speaker("Jimmy", struct.pack("2f", 1.0, 0.0))     # fragmented same-name row
+    store.add_speaker("Jimmy", struct.pack("2f", 0.9, 0.3))     # cohesive with the row above
+    store.add_speaker("對方5", struct.pack("2f", 1.0, 0.0))      # placeholder, very close to Jimmy
+    store.add_speaker("Ann", struct.pack("2f", 0.0, 1.0))       # different real name -> untouched
+    store.add_speaker("對方77", struct.pack("2f", 0.0, -1.0))    # noise: unmatched, never reinforced
+
+    r = c.post("/speakers/reconcile").json()
+    assert r["merged"] == 2   # Jimmy's own duplicate + the close placeholder
+    assert r["purged"] == 1   # the orthogonal placeholder
+
+    names = {s["name"] for s in store.list_speakers()}
+    assert names == {"Jimmy", "Ann"}
+
+
 def test_speakers_grouped_by_name(tmp_path):
     import struct
     c, store = make_client(tmp_path)

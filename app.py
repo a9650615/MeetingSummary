@@ -243,7 +243,10 @@ def _speakers_page():
             "跨會議記住說話者(聲紋)：分群時把每個人的聲紋存進語者庫，下次會議自動認出同一人並沿用名字。</label>"
             "<p class=hint style='margin:.5em 0 0'>關閉後分群只在單場內進行，不建立／比對全域聲紋。</p>"
             "<div class=setrow style='margin-top:10px'><label class=hint>辨識門檻(cosine，越高越保守、寧可分開) "
-            "<input id=thr type=number min=0.3 max=0.9 step=0.01 style='width:80px'></label></div></div>"
+            "<input id=thr type=number min=0.3 max=0.9 step=0.01 style='width:80px'></label></div>"
+            "<div class=setrow style='margin-top:10px'>"
+            "<button class=btn id=reconcile>🔁 一鍵重新比對</button>"
+            "<span class=hint id=reconcilemsg></span></div></div>"
             "<div class=card id=sugcard style='display:none'>"
             "<h2 style='margin-top:0;font-size:15px'>可能是同一人</h2>"
             "<div id=sugs></div></div>"
@@ -328,6 +331,13 @@ document.getElementById('persist').onchange=async(e)=>{
 async function loadThr(){const t=document.getElementById('thr');
   t.value=(await(await fetch('/settings/speaker_threshold')).json()).value;
   t.onchange=async()=>{await fetch('/settings/speaker_threshold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:t.value})});loadSugs();};}
+document.getElementById('reconcile').onclick=async()=>{
+  if(!confirm('重新比對所有聲紋：非常相近的會自動合併，從未被認出且只出現一次的雜訊會被刪除。確定要執行?'))return;
+  const m=document.getElementById('reconcilemsg');m.textContent='比對中…';
+  const r=await(await fetch('/speakers/reconcile',{method:'POST'})).json();
+  m.textContent=`已合併 ${r.merged} 筆、清除 ${r.purged} 筆雜訊`;
+  load();
+};
 loadThr();load();
 """
     return _shell("語者 · MeetingSummary", body, script=script, back=True)
@@ -1525,6 +1535,38 @@ def _persistent_names(store, embs, prefix, threshold=0.62):
             known.append((sid, emb))
             rows[sid] = {"id": sid, "name": nm, "centroid": emb.tobytes(), "count": 1}
     return names
+
+
+def _apply_speaker_reconcile(store, plan):
+    """Apply a diar.reconcile_speakers() plan: merge (count-weighted centroid
+    average + move the dropped rows' transcripts to the kept name) then purge
+    the noise rows. Returns {"merged": n, "purged": n}."""
+    import numpy as np  # noqa: PLC0415
+    rows = {r["id"]: r for r in store.list_speakers()}
+    merged = 0
+    for keep_id, drop_ids in plan["merge"]:
+        keep = rows.get(keep_id)
+        if not keep or not keep["centroid"]:
+            continue
+        cen = np.frombuffer(keep["centroid"], dtype=np.float32).astype(np.float64) * (keep["count"] or 1)
+        cnt = keep["count"] or 1
+        for did in drop_ids:
+            d = rows.get(did)
+            if not d:
+                continue
+            if d["centroid"]:
+                dc = d["count"] or 1
+                cen = cen + np.frombuffer(d["centroid"], dtype=np.float32).astype(np.float64) * dc
+                cnt += dc
+            if d["name"] != keep["name"]:
+                store.rename_speaker_global(d["name"], keep["name"])
+            store.delete_speaker(did)
+            merged += 1
+        cen = cen / (np.linalg.norm(cen) + 1e-9)
+        store.update_speaker_centroid(keep_id, cen.astype(np.float32).tobytes(), cnt)
+    for pid in plan["purge"]:
+        store.delete_speaker(pid)
+    return {"merged": merged, "purged": len(plan["purge"])}
 
 
 def _is_default_title(t):
@@ -3161,6 +3203,15 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def speaker_delete(body: NameIn):
         store.delete_speakers_by_name(body.name)
         return {"deleted": body.name}
+
+    @app.post("/speakers/reconcile")
+    def speaker_reconcile():
+        # One-click cleanup: merge fragmented voiceprints of the same named person,
+        # fold placeholder rows that are VERY close to a real name into it, purge
+        # one-shot noise. See diar.reconcile_speakers() for the full rationale.
+        import diarize as diar  # noqa: PLC0415
+        plan = diar.reconcile_speakers(store.list_speakers())
+        return _apply_speaker_reconcile(store, plan)
 
     @app.get("/speakers/{name}/utterances")
     def speaker_utterances(name: str):

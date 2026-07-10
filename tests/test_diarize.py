@@ -370,6 +370,39 @@ def test_consolidate_named_drops_outlier_and_merges():
     assert float(np.dot(hank, base_u)) > 0.9     # near coherent mean, not dragged to the orthogonal row
 
 
+def test_reconcile_speakers_merges_same_name_folds_close_placeholder_and_purges_noise():
+    import numpy as np
+    import diarize
+
+    def row(id_, name, vec, count):
+        v = np.asarray(vec, dtype=np.float32)
+        v = v / (np.linalg.norm(v) + 1e-9)
+        return {"id": id_, "name": name, "centroid": v.tobytes(), "count": count}
+
+    jimmy_a = [1.0, 0.0, 0.0, 0.0]
+    speakers = [
+        # same real name, cohesive -> must merge into the higher-count row (1).
+        row(1, "Jimmy", jimmy_a, 5),
+        row(2, "Jimmy", [0.9, 0.3, 0.0, 0.0], 2),
+        # different real name -> never auto-merged, even if it were close (it isn't).
+        row(3, "Ann", [0.0, 1.0, 0.0, 0.0], 4),
+        # placeholder, very close to Jimmy's centroid -> folds into Jimmy.
+        row(4, "對方17", [0.98, 0.1, 0.0, 0.0], 1),
+        # placeholder, far from everything, single utterance -> noise -> purge.
+        row(5, "對方88", [0.0, 0.0, 1.0, 0.0], 1),
+        # placeholder, far from everything but reinforced twice -> kept, not purged.
+        row(6, "說話者9", [0.0, 0.0, 0.0, 1.0], 2),
+    ]
+    plan = diarize.reconcile_speakers(speakers, merge_threshold=0.75, cohesion=0.45)
+
+    merge_map = {keep: set(drop) for keep, drop in plan["merge"]}
+    assert merge_map.get(1) == {2, 4}          # Jimmy's own row + the close placeholder
+    assert 3 not in {i for ids in merge_map.values() for i in ids}   # Ann untouched
+    assert 3 not in merge_map                                        # Ann never a merge target either
+    assert plan["purge"] == [5]                # only the never-reinforced, unmatched placeholder
+    assert 6 not in plan["purge"]               # reinforced placeholder survives untouched
+
+
 def test_live_speaker_labeler_continuity_keeps_last_speaker_on_noisy_utterance():
     # A recognized speaker's next short/noisy utterance can dip below match_threshold
     # (0.62) yet stay clearly the same voice (>= continuity 0.5). It must inherit the
