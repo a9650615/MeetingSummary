@@ -487,6 +487,39 @@ def reconcile_speakers(speakers, *, merge_threshold=0.75, cohesion=0.45):
             merges[best_id].append(r["id"])
             consumed.add(r["id"])
 
+    # Pass 2.5 — placeholder <-> placeholder: two unnamed fragments of the SAME
+    # unknown person. Single-linkage cluster the still-unconsumed placeholders at
+    # merge_threshold and fold each cohesive cluster into its highest-count member.
+    # Low risk (neither side is named; worst case merges two unknowns, splittable
+    # later) and it's what stops a recurring unnamed voice sprawling into N rows.
+    left = [r for r in rows if r["id"] not in consumed and _is_placeholder(r["name"])]
+    if len(left) >= 2:
+        ids = [r["id"] for r in left]
+        counts = {r["id"]: (r["count"] or 1) for r in left}
+        m = len(ids)
+        parent = list(range(m))
+
+        def find(x, parent=parent):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        for i in range(m):
+            for j in range(i + 1, m):
+                if cos(ids[i], ids[j]) >= merge_threshold:
+                    parent[find(i)] = find(j)
+        groups = defaultdict(list)
+        for i in range(m):
+            groups[find(i)].append(ids[i])
+        for gid in groups.values():
+            if len(gid) < 2:
+                continue
+            keep = max(gid, key=lambda i: counts[i])
+            for did in gid:
+                if did != keep:
+                    merges[keep].append(did)
+                    consumed.add(did)
+
     purge = [r["id"] for r in rows
              if r["id"] not in consumed and _is_placeholder(r["name"]) and (r["count"] or 1) <= 1]
 

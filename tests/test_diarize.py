@@ -403,6 +403,29 @@ def test_reconcile_speakers_merges_same_name_folds_close_placeholder_and_purges_
     assert 6 not in plan["purge"]               # reinforced placeholder survives untouched
 
 
+def test_reconcile_merges_two_placeholders_of_same_unknown_person():
+    import numpy as np
+    import diarize
+
+    def row(id_, name, vec, count):
+        v = np.asarray(vec, dtype=np.float32)
+        v = v / (np.linalg.norm(v) + 1e-9)
+        return {"id": id_, "name": name, "centroid": v.tobytes(), "count": count}
+
+    speakers = [
+        # two unnamed fragments, nearly identical -> should merge into the higher-count one
+        row(1, "對方12", [1.0, 0.02, 0.0], 3),
+        row(2, "對方34", [0.99, 0.01, 0.0], 2),
+        # a lone far-away unnamed, reinforced -> kept, not merged, not purged
+        row(3, "我7", [0.0, 1.0, 0.0], 2),
+    ]
+    plan = diarize.reconcile_speakers(speakers, merge_threshold=0.75)
+    merge_map = {keep: set(drop) for keep, drop in plan["merge"]}
+    assert merge_map.get(1) == {2}       # 對方34 folded into higher-count 對方12
+    assert plan["purge"] == []           # nothing was a lone one-shot
+    assert 3 not in {i for ids in merge_map.values() for i in ids}
+
+
 def test_live_speaker_labeler_continuity_keeps_last_speaker_on_noisy_utterance():
     # A recognized speaker's next short/noisy utterance can dip below match_threshold
     # (0.62) yet stay clearly the same voice (>= continuity 0.5). It must inherit the
