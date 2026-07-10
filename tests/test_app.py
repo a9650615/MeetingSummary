@@ -166,6 +166,39 @@ def test_speakers_reconcile_route_merges_close_and_purges_noise(tmp_path):
     bak.close()
 
 
+def test_persistent_names_matches_named_person_via_consolidated_centroid(tmp_path):
+    # A named person accrues several fragmented voiceprints. A new same-voice sample
+    # can sit just below threshold vs any SINGLE fragment yet clearly match the
+    # per-person CONSOLIDATED (averaged) centroid. _persistent_names must reuse the
+    # name (recall) instead of spawning yet another placeholder ("同一人被拆開").
+    import math
+    import numpy as np
+    import app
+    c, store = make_client(tmp_path)
+    store.set_setting("speaker_threshold", "0.97")
+
+    def unit(v):
+        v = np.asarray(v, dtype=np.float32)
+        return (v / (np.linalg.norm(v) + 1e-9))
+
+    g1 = unit([1.0, 0.0])
+    g2 = unit([math.cos(math.radians(40)), math.sin(math.radians(40))])  # 40° apart, cohesive
+    store.add_speaker("Alice", g1.tobytes())        # id 1
+    store.set_speaker_name(1, "Alice")
+    store.update_speaker_centroid(1, g1.tobytes(), 3)
+    store.add_speaker("Alice", g2.tobytes())        # id 2
+    store.set_speaker_name(2, "Alice")
+    store.update_speaker_centroid(2, g2.tobytes(), 3)
+
+    sample = unit([math.cos(math.radians(20)), math.sin(math.radians(20))])  # bisector ≈ consolidated
+    # sanity: sample vs each raw fragment is ~cos20≈0.94 < 0.97, so raw match alone misses
+    assert float(sample @ g1) < 0.97 and float(sample @ g2) < 0.97
+
+    names = app._persistent_names(store, {0: sample}, prefix="對方")
+    assert names[0] == "Alice"                       # matched via consolidated centroid, not a new 對方N
+    assert not any(s["name"].startswith("對方") for s in store.list_speakers())
+
+
 def test_speakers_grouped_by_name(tmp_path):
     import struct
     c, store = make_client(tmp_path)

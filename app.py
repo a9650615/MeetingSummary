@@ -1507,33 +1507,71 @@ def _persistent_names(store, embs, prefix, threshold=0.62):
     global speakers table (cosine); reuse the matched speaker's name + nudge its
     centroid, else enroll a new globally-unique speaker. So a voice you named "Alice"
     in one meeting auto-labels "Alice" in later ones; renaming propagates (see
-    /speaker route -> rename_global_speaker)."""
+    /speaker route -> rename_global_speaker).
+
+    Recall matters most here: naming appends a NEW row each time, so one person
+    accrues many fragmented centroids, none of which alone may reach threshold for
+    that person's next recording — so they'd spawn yet another placeholder (the
+    "同一人一直被拆開" bug). So match FIRST against per-person CONSOLIDATED centroids
+    (diar._consolidate_named — cohesive-group averages, much more representative
+    than any single fragment), and only fall back to raw-row matching for
+    placeholders you haven't named yet. Embeddings are unit-normalized so the dot
+    product is a true cosine."""
     import numpy as np  # noqa: PLC0415
     import diarize as diar  # noqa: PLC0415
     try:
         threshold = float(store.get_setting("speaker_threshold", str(threshold)))
     except (ValueError, TypeError):
         pass
-    known = [(r["id"], np.frombuffer(r["centroid"], dtype=np.float32))
-             for r in store.list_speakers() if r["centroid"]]
-    rows = {r["id"]: r for r in store.list_speakers()}
+
+    def _unit(v):
+        return v / (np.linalg.norm(v) + 1e-9)
+
+    speakers = store.list_speakers()
+    rows = {r["id"]: r for r in speakers}
+    raw_known = [(r["id"], _unit(np.frombuffer(r["centroid"], dtype=np.float32)))
+                 for r in speakers if r["centroid"]]
+    consolidated = diar._consolidate_named(speakers)   # [(name, unit_np)] — clean per person
+    # highest-count row per named person, to nudge on a consolidated-name match.
+    best_row_for = {}
+    for r in speakers:
+        if r["centroid"] and not diar._is_placeholder(r["name"]):
+            cur = best_row_for.get(r["name"])
+            if cur is None or (r["count"] or 1) > (rows[cur]["count"] or 1):
+                best_row_for[r["name"]] = r["id"]
+
+    def _nudge(rid, emb):
+        r = rows[rid]
+        n = r["count"] or 1
+        cen = np.frombuffer(r["centroid"], dtype=np.float32) * n + emb
+        store.update_speaker_centroid(rid, _unit(cen).astype(np.float32).tobytes(), n + 1)
+
     names = {}
     for spk, emb in embs.items():
-        mid, _sim = diar.match_speaker(emb, known, threshold)
-        if mid is not None:
-            r = rows[mid]
-            n = r["count"] or 1
-            cen = np.frombuffer(r["centroid"], dtype=np.float32) * n + emb
-            cen = (cen / (np.linalg.norm(cen) + 1e-9)).astype(np.float32)
-            store.update_speaker_centroid(mid, cen.tobytes(), n + 1)
-            names[spk] = r["name"]
-        else:
-            sid = store.add_speaker(prefix, emb.astype(np.float32).tobytes())
-            nm = f"{prefix}{sid}"  # globally-unique placeholder until the user renames
-            store.set_speaker_name(sid, nm)
+        e = _unit(emb)
+        # 1) clean named centroids first — best recall for an already-named person.
+        nm, sim = None, -1.0
+        for name, cvec in consolidated:
+            s = float(e @ cvec)
+            if s > sim:
+                sim, nm = s, name
+        if nm is not None and sim >= threshold:
             names[spk] = nm
-            known.append((sid, emb))
-            rows[sid] = {"id": sid, "name": nm, "centroid": emb.tobytes(), "count": 1}
+            if best_row_for.get(nm) is not None:
+                _nudge(best_row_for[nm], emb)
+            continue
+        # 2) fall back to raw rows (catches unnamed placeholders to reinforce).
+        mid, _sim = diar.match_speaker(e, raw_known, threshold)
+        if mid is not None:
+            _nudge(mid, emb)
+            names[spk] = rows[mid]["name"]
+        else:
+            sid = store.add_speaker(prefix, _unit(emb).astype(np.float32).tobytes())
+            nmp = f"{prefix}{sid}"  # globally-unique placeholder until the user renames
+            store.set_speaker_name(sid, nmp)
+            names[spk] = nmp
+            raw_known.append((sid, e))
+            rows[sid] = {"id": sid, "name": nmp, "centroid": _unit(emb).tobytes(), "count": 1}
     return names
 
 
