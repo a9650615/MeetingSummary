@@ -81,7 +81,9 @@ cd "\$WD"
 # Start the server detached, then exit immediately so the dock icon doesn't bounce.
 # bootstrap calls setsid() to survive the .app's process-group reap; it opens the
 # browser itself ONLY if the native panel isn't installed (else the panel is the UI).
-nohup /usr/bin/python3 bootstrap.py >/dev/null 2>&1 &
+# Log (not /dev/null) so a bootstrap-phase death before supervise.sh's own log
+# takes over still leaves a trace to diagnose — was previously silently discarded.
+nohup /usr/bin/python3 bootstrap.py >>"\$WD/launcher.log" 2>&1 &
 launch_panel   # server still coming up; the panel polls + connects when it's ready
 exit 0
 LAUNCH

@@ -297,6 +297,14 @@ final class Model: ObservableObject {
     private var userStopped = false
     private var reconnectAttempt = 0
     private var relayMid: Int?          // learned from the server's {"type":"meeting"} message
+    // Self-heal: the backend process tree (bootstrap/supervise/app) can die as a
+    // whole (whole process group killed) — nothing then brings it back, and this
+    // panel would poll "伺服器未連線" forever since supervise.sh's own watchdog
+    // died with it. After a run of failed polls, re-invoke the outer .app's
+    // launcher (cold-starts if dead, no-ops if already up) with a cooldown so a
+    // truly broken install doesn't get hammered every 1.5s.
+    private var pollFailStreak = 0
+    private var lastRelaunchAttempt: Date?
     private var micCap: PanelMicCapturer?
     private var sysCap: AnyObject?   // PanelSystemTapCapturer (macOS 14.2+); retained
     private var sink: WSFrameSink?
@@ -331,8 +339,12 @@ final class Model: ObservableObject {
             guard let self = self else { return }
             guard let d = data,
                   let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
-                self.connected = false; self.title = "伺服器未連線"; return
+                self.connected = false; self.title = "伺服器未連線"
+                self.pollFailStreak += 1
+                if self.pollFailStreak == 5 { self.tryRelaunchBackend() }  // ~7.5s of failures
+                return
             }
+            self.pollFailStreak = 0
             self.connected = true
             let rec = (o["recording"] as? Bool) ?? false
             if rec && !self.recording { self.startedAt = Date() }
@@ -382,6 +394,27 @@ final class Model: ObservableObject {
                 self.lastRev = rev
             }
         }
+    }
+
+    // Re-invoke the outer .app's launcher: it curl's /health itself and no-ops
+    // if a server already answers, so this is safe to call speculatively. Only
+    // wired up inside a built+nested bundle (Contents/Resources/panel/…) — a
+    // dev raw binary has no outer launcher to find and silently skips, same
+    // "degraded on dev" fallback build_app.sh already documents elsewhere.
+    private func tryRelaunchBackend() {
+        if let last = lastRelaunchAttempt, Date().timeIntervalSince(last) < 60 { return }
+        lastRelaunchAttempt = Date()
+        let panelBundle = URL(fileURLWithPath: Bundle.main.bundlePath)
+        let launcher = panelBundle
+            .deletingLastPathComponent()  // panel/
+            .deletingLastPathComponent()  // Resources/
+            .deletingLastPathComponent()  // Contents/
+            .appendingPathComponent("Contents/MacOS/launcher")
+        guard FileManager.default.isExecutableFile(atPath: launcher.path) else { return }
+        let p = Process()
+        p.executableURL = launcher
+        p.environment = ProcessInfo.processInfo.environment
+        try? p.run()
     }
 
     func pollTranscripts() {
