@@ -135,9 +135,16 @@ def mlx_lm_backend(model="mlx-community/Qwen2.5-14B-Instruct-4bit", max_tokens=1
     # "中午前將完成 Bug…" report). Widen the window to cover many lines + raise the
     # penalty; frequency_penalty additionally scales with how often a token recurs.
     sampler = make_sampler(temp=0.0)
+    # A MILD penalty only. 1.5 was catastrophic: over a long zh summary the real
+    # names/terms recur constantly (王小強…王小強), so a strong penalty over a
+    # 512-token window forbade repeating them and forced the model to substitute
+    # invented alternatives — the "瞎掰" report — plus garbled late-generation
+    # nonsense (「一侓」). 1.15 keeps output grounded and structured; _dedup_lines()
+    # is the real backstop for literal repeated-line loops, so the penalty doesn't
+    # have to be.
     logits_processors = make_logits_processors(
-        repetition_penalty=1.5, repetition_context_size=512,
-        frequency_penalty=0.4, frequency_context_size=512)
+        repetition_penalty=1.15, repetition_context_size=256,
+        frequency_penalty=0.1, frequency_context_size=256)
 
     def _run(prompt):
         messages = [{"role": "user", "content": prompt}]
