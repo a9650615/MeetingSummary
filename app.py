@@ -2087,6 +2087,10 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "td.textContent='';td.appendChild(inp);inp.focus();inp.select();"
         "const commit=async()=>{const nw=inp.value.trim();"
         "if(cancelled||!nw||nw===disp){td.textContent=disp;return;}"
+        # nw is an existing person -> this rename MERGES the two and can't be
+        # split back. Confirm before the fat-finger commits (server also snapshots).
+        "if(window._spk&&window._spk.has(nw)){"
+        "if(!confirm('「'+nw+'」已經是另一位人員。改名會把目前這位合併進「'+nw+'」，之後無法再分離。確定要合併？')){td.textContent=disp;return;}}"
         "const trk=td.closest('tr').dataset.track;"
         f"const r=await fetch('/meetings/{mid}/speaker',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({old:raw,new:nw,track:trk})});"
@@ -2096,7 +2100,8 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "(function(){fetch('/speakers').then(r=>r.json()).then(j=>{"
         "let dl=document.getElementById('spkdl');if(!dl){dl=document.createElement('datalist');"
         "dl.id='spkdl';document.body.appendChild(dl);}"
-        "dl.innerHTML=(j.speakers||[]).map(s=>`<option value=\"${_esc(s.name)}\">`).join('');});})();"
+        "dl.innerHTML=(j.speakers||[]).map(s=>`<option value=\"${_esc(s.name)}\">`).join('');"
+        "window._spk=new Set((j.speakers||[]).map(s=>s.name));});})();"
         # Tags: chips + remove (✕) + an add input (Enter to add).
         "function _esc(s){return (s||'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));}"
         f"const MID={mid};"
@@ -2998,11 +3003,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
         new = body.new.strip()
+        # A rename that lands on a name already used by ANOTHER speaker collapses
+        # the two. Transcripts key speakers by name string, so the merge is
+        # unsplittable — you can't recover which rows were originally whose.
+        # Snapshot the DB first so an accidental (fat-finger) merge is reversible
+        # by restoring one file. Only on a real merge, not every rename.
+        merged = bool(new) and new != body.old and (
+            new in store.meeting_speaker_names(mid, track=body.track)
+            or any(s["name"] == new for s in store.list_speakers()))
+        backup = _backup_db(store) if merged else None
         n = store.rename_speaker(mid, body.old, new, track=body.track)
         # propagate to the global voiceprint so future meetings auto-use the new name
         # (no-op when old is a raw live cluster label — no such global speaker exists yet)
         store.rename_global_speaker(body.old, new)
-        return {"renamed": n}
+        return {"renamed": n, "merged": merged, "backup": backup}
 
     @app.delete("/meetings/{mid}")
     def delete_meeting(mid: int):

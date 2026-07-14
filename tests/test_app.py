@@ -564,3 +564,24 @@ def test_notes_append_route(tmp_path):
     c.post(f"/meetings/{mid}/notes/append", json={"value": "b"})
     assert store.get_meeting(mid)["notes"] == "a\nb"
     assert c.post("/meetings/99999/notes/append", json={"value": "x"}).status_code == 404
+
+
+def test_rename_speaker_into_existing_person_backs_up_first(tmp_path):
+    # Renaming a speaker onto a name ALREADY used by another person merges the two
+    # unsplittably. The endpoint must snapshot the DB first so it's recoverable.
+    import os
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    store.add_transcript(mid, "accurate", "mic", 0, 1, "對方", "hi")
+    store.add_transcript(mid, "accurate", "mic", 1, 2, "王先生", "yo")
+
+    # merge: 對方 -> 王先生 (王先生 already present) -> backup taken
+    r = c.post(f"/meetings/{mid}/speaker",
+               json={"old": "對方", "new": "王先生", "track": "mic"}).json()
+    assert r["merged"] is True and r["backup"] and os.path.exists(r["backup"])
+
+    # non-merge: fresh name -> no backup, no wasted snapshot
+    store.add_transcript(mid, "accurate", "mic", 2, 3, "李四", "sup")
+    r2 = c.post(f"/meetings/{mid}/speaker",
+                json={"old": "李四", "new": "陌生人", "track": "mic"}).json()
+    assert r2["merged"] is False and r2["backup"] is None

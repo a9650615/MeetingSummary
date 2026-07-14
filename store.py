@@ -237,6 +237,21 @@ class Store:
         self.db.commit()
         return cur.rowcount
 
+    def meeting_speaker_names(self, meeting_id, track=None):
+        """Distinct speaker labels currently used in a meeting's transcripts
+        (track-scoped when given, since live cluster labels are per-track).
+        Used to detect whether a rename would land on a name already in use —
+        i.e. an unsplittable merge — so the caller can snapshot first."""
+        if track is None:
+            rows = self.db.execute(
+                "SELECT DISTINCT speaker FROM transcripts WHERE meeting_id=?",
+                (meeting_id,)).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT DISTINCT speaker FROM transcripts WHERE meeting_id=? AND track=?",
+                (meeting_id, track)).fetchall()
+        return {r["speaker"] for r in rows if r["speaker"]}
+
     def add_summary(self, meeting_id, kind, lang, text, model, created_at):
         return self._insert(
             "INSERT INTO summaries(meeting_id, kind, lang, text, model, "
