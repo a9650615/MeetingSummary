@@ -404,12 +404,17 @@ final class Model: ObservableObject {
     private func tryRelaunchBackend() {
         if let last = lastRelaunchAttempt, Date().timeIntervalSince(last) < 60 { return }
         lastRelaunchAttempt = Date()
+        // Bundle.main is the NESTED panel bundle (.../Contents/Resources/panel/
+        // MeetingSummary.app). Walk up to the OUTER .app's Contents, then to its
+        // launcher. Three deletions land on the OUTER Contents/ already, so append
+        // just MacOS/launcher — appending Contents/MacOS/launcher double-nests
+        // Contents/Contents and the file check silently fails (self-heal never ran).
         let panelBundle = URL(fileURLWithPath: Bundle.main.bundlePath)
         let launcher = panelBundle
             .deletingLastPathComponent()  // panel/
             .deletingLastPathComponent()  // Resources/
-            .deletingLastPathComponent()  // Contents/
-            .appendingPathComponent("Contents/MacOS/launcher")
+            .deletingLastPathComponent()  // Contents/  (of the OUTER .app)
+            .appendingPathComponent("MacOS/launcher")
         guard FileManager.default.isExecutableFile(atPath: launcher.path) else { return }
         let p = Process()
         p.executableURL = launcher
