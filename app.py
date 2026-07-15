@@ -383,6 +383,10 @@ def _models_page():
         "<h3 style='margin:0 0 8px;font-size:13px;color:var(--muted)'>即時辨識模型（預設）</h3>"
         "<select id=livemodel style='width:100%;padding:.5em;border-radius:8px;"
         "border:1px solid var(--line);background:var(--surface2);color:inherit'>"
+        + ("<optgroup label='🧠 NPU · ANE 省電'>"
+           "<option value='ane-qwen3-0.6b'>Qwen3-ASR 0.6B（省電·M系列）</option>"
+           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B（混合·快）</option>"
+           "</optgroup>" if _ane_available() else "") +
         "<optgroup label='🔧 .cpp · Metal'>"
         "<option value='qwen3-asr-0.6b-q4-k-m'>Qwen3-ASR 0.6B（預設·快）</option>"
         "<option value='qwen3-asr-1.7b'>Qwen3-ASR 1.7B（chatllm·慢·備用）</option>"
