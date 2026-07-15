@@ -592,6 +592,7 @@ final class Model: ObservableObject {
             case .success(let message):
                 var newMid: Int?
                 var interimLine: String??  // .some(nil) = clear; .some(str) = set; nil = no change
+                var finalLine: String?     // committed caption to show immediately (no poll gap)
                 if case .string(let text) = message,
                    let data = text.data(using: .utf8),
                    let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -603,6 +604,13 @@ final class Model: ObservableObject {
                         let tx = (obj["text"] as? String) ?? ""
                         if !tx.isEmpty { interimLine = .some(sp.isEmpty ? tx : sp + "  " + tx) }
                     case "final":
+                        // Commit the caption from the final push itself so the overlay
+                        // has NO gap between clearing the interim and the 1.5s poll
+                        // delivering the final line (that gap is the flicker). The poll
+                        // reconciles to the same text later.
+                        let sp = (obj["speaker"] as? String) ?? ""
+                        let tx = (obj["text"] as? String) ?? ""
+                        if !tx.isEmpty { finalLine = sp.isEmpty ? tx : sp + "：" + tx }
                         interimLine = .some(nil)  // utterance committed -> drop the tentative line
                     default: break
                     }
@@ -610,6 +618,10 @@ final class Model: ObservableObject {
                 DispatchQueue.main.async {
                     guard self.relayEpoch == epoch else { return }
                     if let mid = newMid { self.relayMid = mid }
+                    // Set the committed caption BEFORE clearing the interim so the
+                    // overlay's (interim ?? captions.last) never falls through to a
+                    // stale caption in the same tick — that fall-through is the flicker.
+                    if let fl = finalLine { self.captions = [fl] }
                     if let line = interimLine { self.interim = line ?? "" }
                     self.reconnectAttempt = 0  // a successful read = the socket is healthy again
                     if self.liveNotice == "重新連線中…" { self.liveNotice = "" }
