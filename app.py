@@ -2454,15 +2454,30 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # flush/cleanup ran inline here its `await`s would be cancelled mid-way and
         # live_active would never clear. Detached, it survives the disconnect and
         # finalizes cleanly; the handler only relays frames + signals stop.
+        _push_inflight = {"n": 0}
+
         async def _push(payload):
-            # Stream interim/final to the floatpanel over ITS relay socket so the
-            # panel shows a live updating caption. Best-effort: a dead socket (the
-            # panel reconnecting) just drops the push — the transcript poll still
-            # backfills finals from the store, so nothing is lost.
-            try:
-                await ws.send_json(payload)
-            except Exception:  # noqa: BLE001
-                pass
+            # Stream interim/final to the floatpanel for a live caption. MUST NOT
+            # block the consume loop: awaiting ws.send_json inline here would stall
+            # ALL transcription whenever the socket is slow/half-open (backpressure)
+            # — the "captions stop mid-recording, then a big batch dumps at once"
+            # bug (consume wedged on the send while audio piles in the pump). So
+            # fire-and-forget: schedule the send and return immediately. Bounded so
+            # a truly wedged socket can't pile tasks forever — drop when saturated
+            # (finals are still persisted; the panel's transcript poll backfills).
+            if _push_inflight["n"] > 32:
+                return
+            _push_inflight["n"] += 1
+
+            async def _send():
+                try:
+                    await ws.send_json(payload)
+                except Exception:  # noqa: BLE001
+                    pass
+                finally:
+                    _push_inflight["n"] -= 1
+
+            asyncio.create_task(_send())
 
         async def _run():
             try:
