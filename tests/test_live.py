@@ -74,6 +74,24 @@ def test_twopass_finalizes_on_silence():
     assert finals[0]["end_ms"] > finals[0]["start_ms"]
 
 
+def test_twopass_drops_silence_hallucination_by_char_rate():
+    # A fluent sentence far too long for the brief speech present = a silence
+    # hallucination (whisper confabulating over near-silence, the 對方-track report).
+    long_text = "This is meeting tonight she has a great job today that is it well"
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": long_text}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=90, interim_s=100)
+    finals = [e for e in s.feed(tone(300) + silence(150)) if e["kind"] == "final"]
+    assert finals == []  # char/sec gate zeroed it
+
+
+def test_twopass_keeps_short_text_matching_speech():
+    # A short line plausibly spoken in the window survives the char/sec gate.
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "好的"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=90, interim_s=100)
+    finals = [e for e in s.feed(tone(300) + silence(150)) if e["kind"] == "final"]
+    assert len(finals) == 1 and finals[0]["text"] == "好的"
+
+
 def test_twopass_emits_interim_while_speaking():
     s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "定"}],
                        interim_backend=lambda a: [{"start": 0, "end": 1, "text": "暫"}],

@@ -95,3 +95,12 @@ def test_latest_transcript(tmp_path):
     s.add_transcript(mid, "live", "mic", 0, 1000, "我", "你好")
     s.add_transcript(mid, "live", "mic", 1000, 2000, "我", "最新一句")
     assert s.latest_transcript(mid) == "我：最新一句"
+
+
+def test_last_caption_end_ms(tmp_path):
+    s = _store(tmp_path)
+    mid = s.create_meeting("m", 1.0, "zh-TW")
+    assert s.last_caption_end_ms(mid) is None
+    s.add_transcript(mid, "live", "mic", 0, 1000, "我", "你好")
+    s.add_transcript(mid, "live", "mic", 1000, 2500, "我", "最新一句")
+    assert s.last_caption_end_ms(mid) == 2500  # newest by insertion order

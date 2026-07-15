@@ -199,6 +199,15 @@ class Store:
         return [f"{_disp_speaker(r['speaker'], r['track'])}：{r['text']}"
                 for r in reversed(rows) if r["text"]]
 
+    def last_caption_end_ms(self, meeting_id):
+        """end_ms (relative to meeting start) of the most recent line — for the
+        live panel to tell how long ago anyone last spoke, so a stale caption can
+        be cleared after silence. None when there are no lines yet."""
+        r = self.db.execute(
+            "SELECT end_ms FROM transcripts WHERE meeting_id=? ORDER BY id DESC "
+            "LIMIT 1", (meeting_id,)).fetchone()
+        return r["end_ms"] if r else None
+
     def transcripts_after(self, meeting_id, after_id=0):
         """Finalized lines with id > after_id, oldest first — for the /live page's
         attach-on-load polling (pick up a session already recording server-side).

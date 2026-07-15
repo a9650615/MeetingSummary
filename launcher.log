@@ -1,0 +1,17 @@
+[supervise] started pid 15164 (10:02:43)
+[supervise] meeting watcher pid 15166
+[supervise] stopping
+supervise.sh: line 53: 15166 Killed: 9               "$PY" meeting_watch.py >> "$LOG" 2>&1
+[supervise] started pid 297 (10:36:22)
+[supervise] meeting watcher pid 299
+[supervise] stopping
+[supervise] started pid 9217 (10:39:08)
+[supervise] meeting watcher pid 9219
+[supervise] started pid 11606 (10:40:12)
+[supervise] meeting watcher pid 11608
+supervise.sh: line 90: 11606 Killed: 9               "$PY" -m app >> "$LOG" 2>&1
+supervise.sh: line 90: 11608 Killed: 9               "$PY" meeting_watch.py >> "$LOG" 2>&1
+[supervise] watcher died — restarting
+[supervise] meeting watcher pid 45955
+[supervise] server exited — restarting
+[supervise] started pid 45976 (17:40:32)

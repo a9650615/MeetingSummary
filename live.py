@@ -81,6 +81,14 @@ _HALLUCINATION_STRONG = [
     "請不吝點贊 訂閱 轉發 打賞", "请不吝点赞",
 ]
 
+# A finalized window that emits far more text than its measured speech duration
+# supports is a silence/noise hallucination — whisper/qwen confabulate a fluent
+# sentence over near-silence ("This is meeting tonight…" on the 對方 track). ~25
+# chars/sec is already generous for fast zh OR en; above it the words could not
+# have been spoken in the speech actually present. Universal — no per-model
+# metadata, no language assumption, no phrase blocklist to keep chasing.
+_MAX_CHARS_PER_SPEECH_S = 25
+
 
 def _norm(text):
     return text.strip().lower().strip(" .,!?。，、！？、")
@@ -356,6 +364,10 @@ class TwoPassSession:
             return []
         audio = bytes(self._utt)
         text = self._text(self.final_backend, audio)
+        # Silence-hallucination gate: drop text too long for the speech present.
+        speech_s = self._speech_frames * self.frame_bytes / (self.sr * 2)
+        if text and len(text) > 12 and len(text) > speech_s * _MAX_CHARS_PER_SPEECH_S:
+            text = ""
         offset_ms = round(self._committed_bytes / (self.sr * 2) * 1000)
         end_ms = round((self._committed_bytes + len(audio)) / (self.sr * 2) * 1000)
         self._committed_bytes += len(audio)

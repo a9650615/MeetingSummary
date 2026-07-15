@@ -1505,7 +1505,7 @@ def _ane_available():
     return _apple_silicon() and shutil.which("speech") is not None
 
 
-def _persistent_names(store, embs, prefix, threshold=0.62):
+def _persistent_names(store, embs, prefix, threshold=0.70):
     """cluster id -> persistent voiceprint label. Match each cluster embedding to the
     global speakers table (cosine); reuse the matched speaker's name + nudge its
     centroid, else enroll a new globally-unique speaker. So a voice you named "Alice"
@@ -2176,6 +2176,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
     # pruned, one int per meeting for the app's lifetime — trivial vs. tracking
     # session end here too.
     _live_rev = {}
+    _CAPTION_IDLE_S = 6  # clear the panel caption after this much silence
 
     def _open_panel():
         """Launch the native float panel if installed; idempotent (reuse if alive)."""
@@ -2270,6 +2271,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
             started_at = m["created_at"] if m else None  # session start epoch, for /live attach-on-load's timer
             caption = store.latest_transcript(mid)
             captions = store.recent_transcripts(mid, 3)
+            # Clear stale captions after silence: finals carry end_ms relative to
+            # the meeting start epoch, so meeting_start + end_ms ≈ the wall clock
+            # when the last line ended. Nobody's spoken for a while -> drop it so
+            # the overlay fades instead of freezing the last sentence forever.
+            last_end = store.last_caption_end_ms(mid)
+            if (last_end is not None and started_at is not None
+                    and time.time() - (started_at + last_end / 1000) > _CAPTION_IDLE_S):
+                caption, captions = None, []
             sess = native_sessions.get(mid)
             if sess is not None:
                 notice = sess["notice"]
@@ -3413,7 +3422,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             os.remove(path)
         return {"deleted": name}
 
-    _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
+    _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.70", "ane": "0",
                  "denoise": "0", "float_panel": "0",
                  # /live recording default, so the page never needs re-picking:
                  "live_source": "mic"}
@@ -3470,7 +3479,10 @@ if __name__ == "__main__":  # pragma: no cover
     live_interim_model = os.environ.get("LIVE_INTERIM_MODEL", rec["interim"])
     live_silence = int(os.environ.get("LIVE_SILENCE_MS", "500"))  # 500: less aggressive
     # split than 400 (measured: 350->4 frags, 450/500->1, 800->0 but +400ms lag)
-    live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "150"))  # keep short words
+    live_min_speech = int(os.environ.get("LIVE_MIN_SPEECH_MS", "350"))  # sub-350ms
+    # bursts are dropped BEFORE the ASR call (live._finalize) — kills the brief
+    # noise/blip that gets confabulated into a fluent hallucination. Cost: a very
+    # short one-syllable word said in isolation can drop; env-tunable.
     live_interim_s = float(os.environ.get("LIVE_INTERIM_S", "0.6"))  # snappy preview; duty-cycle caps GPU
     # target interim ASR duty cycle (compute/realtime); cadence auto-adapts to hold it
     live_interim_duty = float(os.environ.get("LIVE_INTERIM_DUTY", "0.75"))
