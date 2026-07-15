@@ -168,9 +168,9 @@ def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
         thr = float(os.environ.get("LIVE_DIAR_THRESHOLD", "0.4"))
         cont = float(os.environ.get("LIVE_DIAR_CONTINUITY", "0.5"))  # same-speaker continuity
         try:
-            gthr = float(store.get_setting("speaker_threshold", "0.70"))
+            gthr = float(store.get_setting("speaker_threshold", "0.62"))
         except (ValueError, TypeError):
-            gthr = 0.70
+            gthr = 0.62
         rows = store.list_speakers()  # known voiceprints, read-only for live
         # One embedding per finalized utterance (省效能): label the whole
         # utterance ONCE via speaker_fn. The within-utterance windowed split

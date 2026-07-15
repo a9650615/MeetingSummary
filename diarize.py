@@ -527,7 +527,7 @@ def reconcile_speakers(speakers, *, merge_threshold=0.75, cohesion=0.45):
 
 
 def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
-                         match_threshold=0.70, min_secs=1.2, sample_rate=16000,
+                         match_threshold=0.62, min_secs=1.2, sample_rate=16000,
                          on_promote=None, continuity_threshold=0.5):
     """Factory for the LIVE per-utterance speaker label fn: fn(pcm_bytes) -> label.
 

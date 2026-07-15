@@ -1535,7 +1535,7 @@ def _ane_available():
     return _apple_silicon() and shutil.which("speech") is not None
 
 
-def _persistent_names(store, embs, prefix, threshold=0.70):
+def _persistent_names(store, embs, prefix, threshold=0.62):
     """cluster id -> persistent voiceprint label. Match each cluster embedding to the
     global speakers table (cosine); reuse the matched speaker's name + nudge its
     centroid, else enroll a new globally-unique speaker. So a voice you named "Alice"
@@ -3518,7 +3518,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             os.remove(path)
         return {"deleted": name}
 
-    _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.70", "ane": "0",
+    _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
                  "denoise": "0", "float_panel": "0",
                  # /live recording default, so the page never needs re-picking:
                  "live_source": "mic"}
