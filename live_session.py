@@ -216,22 +216,30 @@ def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
         print(f"live diarize unavailable: {e}", file=sys.stderr)
 
 
-def make_store_emit(mid, conn_offset_ms, store):
-    """Build an emit(ev, label) that only persists finals (no push channel) —
-    for the /ws/native-capture pipeline, which has no per-event push to a
-    live page (the floatpanel polls /meetings/{mid}/transcripts instead).
-    /live/state reads finals back out of the store, so captions still show
-    up without a live push."""
+def make_store_emit(mid, conn_offset_ms, store, push=None):
+    """Build an emit(ev, label) that persists finals AND (when `push` is given)
+    streams interim + final events to the floatpanel over its /ws/native-capture
+    socket — so the panel shows a live, updating caption while someone speaks
+    (streaming), not just the finalized line after each utterance. push is an
+    async callable(payload_dict). Finals are still the source of truth via the
+    store (the panel's transcript poll reads them back); the pushed final only
+    tells the panel to clear its tentative interim line."""
     async def emit(ev, label):
-        if ev["kind"] != "final":
-            return
         track, speaker = label
+        if ev["kind"] != "final":
+            if push:
+                await push({"type": "interim", "track": track,
+                            "speaker": speaker, "text": ev["text"]})
+            return
         ev["ts"] = time.time()
         spk = store_speaker(ev.get("speaker"), speaker)
         store.add_transcript(mid, "live", track,
                               ev["start_ms"] + conn_offset_ms,
                               ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
                               spk, ev["text"])
+        if push:
+            await push({"type": "final", "track": track,
+                        "speaker": spk, "text": ev["text"]})
     return emit
 
 

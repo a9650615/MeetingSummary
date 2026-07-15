@@ -14,8 +14,8 @@ import time
 from typing import Optional  # not `X | None` — pydantic evals it, fails on 3.9 venvs
 from urllib.parse import quote
 
-from fastapi import (FastAPI, File, Form, HTTPException, UploadFile, WebSocket,
-                     WebSocketDisconnect)
+from fastapi import (FastAPI, File, Form, HTTPException, Request, UploadFile,
+                     WebSocket, WebSocketDisconnect)
 from fastapi.responses import (FileResponse, HTMLResponse, RedirectResponse,
                                Response)
 from pydantic import BaseModel
@@ -2424,11 +2424,22 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # flush/cleanup ran inline here its `await`s would be cancelled mid-way and
         # live_active would never clear. Detached, it survives the disconnect and
         # finalizes cleanly; the handler only relays frames + signals stop.
+        async def _push(payload):
+            # Stream interim/final to the floatpanel over ITS relay socket so the
+            # panel shows a live updating caption. Best-effort: a dead socket (the
+            # panel reconnecting) just drops the push — the transcript poll still
+            # backfills finals from the store, so nothing is lost.
+            try:
+                await ws.send_json(payload)
+            except Exception:  # noqa: BLE001
+                pass
+
         async def _run():
             try:
                 await live_session.consume(
                     pump, sessions, tracks, rec_on=lambda: False,
-                    emit=live_session.make_store_emit(mid, conn_offset_ms, store),
+                    emit=live_session.make_store_emit(mid, conn_offset_ms, store,
+                                                      push=_push),
                     should_stop=_should_stop,
                     interim_lag_bytes=int(2 * live_interim_s * 16000) * 2,
                     pop_notice=_pop_notice)
@@ -2451,6 +2462,61 @@ def create_app(store, *, summary_backend, asr_backend=None,
             # CancelledError (client disconnect) — plain statements, no await.
             live_stop.add(mid)
             pump.got.set()
+
+    @app.post("/native/backfill")
+    async def native_backfill(request: Request, session: int, start_ms: int = 0):
+        # Zero-loss across a backend restart: while the relay socket is down the
+        # floatpanel buffers the audio it keeps capturing, then POSTs that framed
+        # <track><len><payload> blob here on reconnect. We demux it, save the PCM,
+        # and batch-transcribe (accurate backend) into the SAME meeting at the
+        # outage's real timeline position (start_ms = ms since meeting start when
+        # buffering began) — so the gap the live socket couldn't cover is filled
+        # in, audio + STT, instead of lost. Runs in the background; returns at once.
+        if store.get_meeting(session) is None:
+            raise HTTPException(404, "no such meeting")
+        blob = await request.body()
+        import io  # noqa: PLC0415
+        import recorder  # noqa: PLC0415
+        by_track = {recorder.TRACK_MIC: bytearray(), recorder.TRACK_SYSTEM: bytearray()}
+        for trk, payload in recorder.parse_frames(io.BytesIO(blob)):
+            if trk in by_track:
+                by_track[trk].extend(payload)
+        label = {recorder.TRACK_MIC: ("mic", "我"),
+                 recorder.TRACK_SYSTEM: ("system", "對方")}
+        off = max(0, int(start_ms))
+
+        async def _backfill():
+            t0 = time.time()
+            adir = f"data/{session}-bf-{int(t0)}"
+            os.makedirs(adir, exist_ok=True)
+            store.add_segment(session, idx=len(store.list_segments(session)),
+                              dir_path=adir, started_at=t0, duration_s=0,
+                              origin="backfill")
+            for trk, pcm in by_track.items():
+                if not pcm:
+                    continue
+                trk_name, disp = label[trk]
+                with open(f"{adir}/{trk_name}.pcm", "wb") as f:
+                    f.write(bytes(pcm))
+                wav = f"{adir}/{trk_name}.wav"
+                with open(wav, "wb") as f:
+                    f.write(recorder.pcm_to_wav(bytes(pcm)))
+                try:
+                    segs = await run_in_threadpool(
+                        asr.transcribe, wav, profile="accurate",
+                        track=trk_name, backend=asr_backend)
+                except Exception as e:  # noqa: BLE001
+                    print(f"backfill transcribe error ({trk_name}): {e}", file=sys.stderr)
+                    continue
+                for s in segs:
+                    if s.get("text"):
+                        store.add_transcript(session, "accurate", trk_name,
+                                             off + s["start_ms"], off + s["end_ms"],
+                                             disp, s["text"])
+            _live_rev[session] = _live_rev.get(session, 0) + 1  # nudge panel re-fetch
+
+        asyncio.create_task(_backfill())
+        return {"ok": True, "bytes": n, "start_ms": off}
 
     @app.post("/live/stop")
     def live_stop_all():

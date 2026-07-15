@@ -33,6 +33,44 @@ class StubSession:
         return self._flush_events
 
 
+# --- make_store_emit streaming push ------------------------------------
+
+def test_store_emit_streams_interim_and_final(tmp_path):
+    store = Store(tmp_path / "m.db")
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    pushed = []
+
+    async def push(p):
+        pushed.append(p)
+
+    emit = live_session.make_store_emit(mid, 0, store, push=push)
+
+    async def run():
+        await emit({"kind": "interim", "text": "暫定"}, ("system", "對方"))
+        await emit({"kind": "final", "text": "定稿", "start_ms": 0, "end_ms": 1000},
+                   ("system", "對方"))
+
+    asyncio.run(run())
+    assert pushed[0]["type"] == "interim" and pushed[0]["text"] == "暫定"
+    assert pushed[1]["type"] == "final" and pushed[1]["text"] == "定稿"
+    # interim is NOT persisted; only the final lands in the store
+    assert store.latest_transcript(mid).endswith("定稿")
+
+
+def test_store_emit_without_push_still_persists_final(tmp_path):
+    store = Store(tmp_path / "m.db")
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    emit = live_session.make_store_emit(mid, 0, store)  # no push channel
+
+    async def run():
+        await emit({"kind": "interim", "text": "x"}, ("mic", "我"))  # dropped silently
+        await emit({"kind": "final", "text": "留下", "start_ms": 0, "end_ms": 500},
+                   ("mic", "我"))
+
+    asyncio.run(run())
+    assert store.latest_transcript(mid).endswith("留下")
+
+
 # --- WallClockPump -----------------------------------------------------
 
 def test_pump_feed_appends_payload_after_padding():

@@ -54,15 +54,34 @@ private let CAP_TRACK_MIC: UInt8 = 1
 /// one sink for their whole lifetime and must keep writing across reconnects.
 final class WSFrameSink {
     private var task: URLSessionWebSocketTask?
+    // While the socket is down (backend restart/reconnect) we BUFFER framed audio
+    // instead of dropping it, so the capture keeps running and the gap can be
+    // backfilled on reconnect (see Model.sendBackfill). Capped so a long outage
+    // can't grow memory unbounded — ~6 min of both tracks @16k int16; over that we
+    // drop the newest frame (never slice mid-frame, which would desync the demux).
+    private var pending = Data()
+    private let pendingCap = 6 * 60 * 16000 * 2 * 2
+    private let lock = NSLock()
     init(_ task: URLSessionWebSocketTask?) { self.task = task }
-    func setTask(_ t: URLSessionWebSocketTask?) { task = t }
+    func setTask(_ t: URLSessionWebSocketTask?) { lock.lock(); task = t; lock.unlock() }
     func write(track: UInt8, payload: Data) {
-        guard let task = task else { return }  // no live socket (e.g. reconnecting) — drop
         var frame = Data([track])
         var len = UInt32(payload.count).littleEndian
         withUnsafeBytes(of: &len) { frame.append(contentsOf: $0) }
         frame.append(payload)
-        task.send(.data(frame)) { _ in }
+        lock.lock()
+        if let task = task {
+            lock.unlock()
+            task.send(.data(frame)) { _ in }
+        } else {
+            if pending.count + frame.count <= pendingCap { pending.append(frame) }
+            lock.unlock()
+        }
+    }
+    // Take the buffered outage audio (framed) and empty the buffer.
+    func drainPending() -> Data {
+        lock.lock(); defer { lock.unlock() }
+        let d = pending; pending = Data(); return d
     }
 }
 
@@ -273,6 +292,10 @@ final class Model: ObservableObject {
     @Published var recording = false
     @Published var title = "待機"
     @Published var captions: [String] = []
+    // Tentative live line pushed over the relay socket while someone is still
+    // speaking (streaming) — updates in place, cleared when the utterance
+    // finalizes (a final push, or the transcript poll appending the committed row).
+    @Published var interim = ""
     @Published var elapsed = ""
     @Published var note = ""
     @Published var hint = ""
@@ -296,6 +319,10 @@ final class Model: ObservableObject {
     private var relayEpoch = 0
     private var userStopped = false
     private var reconnectAttempt = 0
+    // When the relay socket first dropped this outage (nil = connected). Set on the
+    // first reconnect attempt, used to backfill the buffered gap on reconnect, then
+    // cleared. start_ms of the gap = outageStart − startedAt.
+    private var outageStart: Date?
     private var relayMid: Int?          // learned from the server's {"type":"meeting"} message
     // Self-heal: the backend process tree (bootstrap/supervise/app) can die as a
     // whole (whole process group killed) — nothing then brings it back, and this
@@ -355,11 +382,13 @@ final class Model: ObservableObject {
             // preserved: reset only on the recording -> not-recording transition.
             if self.recording && !rec { self.starting = false; self.audioLive = false; self.liveNotice = "" }
             self.recording = rec
+            if !rec { self.interim = "" }  // no tentative line when not recording
             let newMid = o["mid"] as? Int
             if newMid != self.trackedMid {  // new session (or ended) -> reset transcript cursor
                 self.trackedMid = newMid
                 self.transcripts = []
                 self.lastId = 0
+                self.interim = ""
             }
             self.mid = newMid
             self.title = rec ? ((o["title"] as? String) ?? "錄音中") : "待機"
@@ -435,6 +464,7 @@ final class Model: ObservableObject {
                 self.transcripts.append(Row(id: id, speaker: sp, text: tx))
                 if id > self.lastId { self.lastId = id }
             }
+            if !rows.isEmpty { self.interim = "" }  // committed row landed -> drop tentative line
         }
     }
 
@@ -461,6 +491,7 @@ final class Model: ObservableObject {
         userStopped = false
         reconnectAttempt = 0
         relayMid = nil  // a fresh start() always begins a NEW meeting, never resumes the last one
+        outageStart = nil
 
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 3600   // long-lived socket, not a short HTTP request
@@ -560,17 +591,34 @@ final class Model: ObservableObject {
             switch result {
             case .success(let message):
                 var newMid: Int?
+                var interimLine: String??  // .some(nil) = clear; .some(str) = set; nil = no change
                 if case .string(let text) = message,
                    let data = text.data(using: .utf8),
-                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   obj["type"] as? String == "meeting", let mid = obj["id"] as? Int {
-                    newMid = mid
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    switch obj["type"] as? String {
+                    case "meeting": newMid = obj["id"] as? Int
+                    case "interim":
+                        // Tentative line while speaking: "說話者 文字" (dimmed in the UI).
+                        let sp = (obj["speaker"] as? String) ?? ""
+                        let tx = (obj["text"] as? String) ?? ""
+                        if !tx.isEmpty { interimLine = .some(sp.isEmpty ? tx : sp + "  " + tx) }
+                    case "final":
+                        interimLine = .some(nil)  // utterance committed -> drop the tentative line
+                    default: break
+                    }
                 }
                 DispatchQueue.main.async {
                     guard self.relayEpoch == epoch else { return }
                     if let mid = newMid { self.relayMid = mid }
+                    if let line = interimLine { self.interim = line ?? "" }
                     self.reconnectAttempt = 0  // a successful read = the socket is healthy again
                     if self.liveNotice == "重新連線中…" { self.liveNotice = "" }
+                    // First healthy read after an outage: the server's back, so
+                    // ship the buffered gap audio for backfill (once per outage).
+                    if let start = self.outageStart {
+                        self.outageStart = nil
+                        self.sendBackfill(gapStart: start)
+                    }
                 }
                 self.pumpReceive(task: task, epoch: epoch)
             case .failure:
@@ -604,6 +652,7 @@ final class Model: ObservableObject {
     // writing to the same `sink`) — only swaps a fresh task under it.
     private func scheduleReconnect(epoch: Int) {
         guard relayEpoch == epoch, !userStopped else { return }
+        if outageStart == nil { outageStart = Date() }  // mark gap start for backfill
         guard reconnectAttempt < 6 else {
             liveNotice = "重新連線失敗，請手動重新開始錄音"
             return
@@ -620,6 +669,23 @@ final class Model: ObservableObject {
             }
             self.sink?.setTask(task)
         }
+    }
+
+    // Ship the audio buffered during an outage to the server for backfill, so the
+    // gap the reconnected live socket couldn't cover is filled in (audio + STT) at
+    // its real timeline position. Fire-and-forget HTTP, independent of the ws.
+    private func sendBackfill(gapStart: Date) {
+        guard let sink = self.sink, let m = relayMid ?? mid else { return }
+        let blob = sink.drainPending()
+        guard !blob.isEmpty else { return }
+        let startMs = max(0, Int(gapStart.timeIntervalSince(startedAt ?? gapStart) * 1000))
+        guard let url = URL(string: base + "/native/backfill?session=\(m)&start_ms=\(startMs)")
+        else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        req.httpBody = blob
+        URLSession.shared.dataTask(with: req).resume()
     }
 
     private func stopNativeRelay() {
@@ -738,6 +804,12 @@ struct PanelView: View {
                                 .id(r.id)
                         }
                     }
+                    if !m.interim.isEmpty {
+                        Text(m.interim)
+                            .font(.callout).foregroundStyle(.secondary).italic()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id("interim")
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
@@ -746,6 +818,9 @@ struct PanelView: View {
                 if let last = m.transcripts.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
+            }
+            .onChange(of: m.interim) { _ in
+                if !m.interim.isEmpty { proxy.scrollTo("interim", anchor: .bottom) }
             }
         }
     }

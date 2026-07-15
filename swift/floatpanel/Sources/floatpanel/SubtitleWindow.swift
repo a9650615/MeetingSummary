@@ -9,7 +9,9 @@ import SwiftUI
 struct SubtitleOverlayView: View {
     @ObservedObject var m: Model
     var body: some View {
-        let line = m.captions.last ?? ""
+        // Prefer the tentative interim (updates live while speaking) over the last
+        // finalized caption, so the overlay streams instead of jumping per utterance.
+        let line = m.interim.isEmpty ? (m.captions.last ?? "") : m.interim
         Text(line.isEmpty ? "…" : line)
             .font(.system(size: 28, weight: .semibold))
             .foregroundStyle(.white)
