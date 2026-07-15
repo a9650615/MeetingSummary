@@ -17,3 +17,8 @@ supervise.sh: line 90: 11608 Killed: 9               "$PY" meeting_watch.py >> "
 [supervise] started pid 45976 (17:40:32)
 [supervise] server exited — restarting
 [supervise] started pid 17370 (11:41:28)
+[supervise] server exited — restarting
+[supervise] started pid 11753 (13:55:01)
+[supervise] already running (pid 11575) on port 8765 — exiting
+[supervise] server exited — restarting
+[supervise] started pid 12504 (13:55:13)

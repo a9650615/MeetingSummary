@@ -379,6 +379,27 @@ def _models_page():
         "釋放會清掉閒置模型權重(下次用會重載)。</p></div></section>"
 
         "<section id=sec-models><h2>模型</h2>"
+        "<div class=card style='margin-bottom:12px'>"
+        "<h3 style='margin:0 0 8px;font-size:13px;color:var(--muted)'>即時辨識模型（預設）</h3>"
+        "<select id=livemodel style='width:100%;padding:.5em;border-radius:8px;"
+        "border:1px solid var(--line);background:var(--surface2);color:inherit'>"
+        "<optgroup label='🔧 .cpp · Metal'>"
+        "<option value='qwen3-asr-0.6b-q4-k-m'>Qwen3-ASR 0.6B（預設·快）</option>"
+        "<option value='qwen3-asr-1.7b'>Qwen3-ASR 1.7B（chatllm·慢·備用）</option>"
+        "</optgroup>"
+        "<optgroup label='⚡ MLX · Metal/GPU'>"
+        "<option value='mlx-community/Qwen3-ASR-1.7B-8bit'>Qwen3-ASR 1.7B（準·快）</option>"
+        "<option value='mlx-community/whisper-small-mlx-q4'>whisper small-q4（快·省）</option>"
+        "<option value='mlx-community/whisper-large-v3-turbo-q4'>whisper turbo-q4（較準）</option>"
+        "<option value='mlx-community/whisper-large-v3-turbo'>whisper turbo（最準·較吃）</option>"
+        "<option value='mlx-community/whisper-base-mlx-q4'>whisper base-q4（更快）</option>"
+        "<option value='mlx-community/whisper-tiny-mlx-q4'>whisper tiny-q4（最省）</option>"
+        "</optgroup>"
+        "<optgroup label='🐢 transformers · 慢'>"
+        "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B</option>"
+        "</optgroup>"
+        "</select>"
+        "<p class=hint style='margin:.6em 0 0' id=livemodelmsg>原生浮動面板與網頁錄音都會用這個模型（下次開始錄音起生效）。</p></div>"
         "<div class=card><h3 style='margin:0 0 8px;font-size:13px;color:var(--muted)'>支援的模型</h3>"
         "<table class=tx id=sup><tr><th>模型</th><th>大小</th><th></th></tr></table></div>"
         "<div class=card><h3 style='margin:0 0 8px;font-size:13px;color:var(--muted)'>其他快取</h3>"
@@ -531,6 +552,11 @@ def _models_page():
     (function(){const s=document.getElementById('live_source_opt');if(!s)return;
       fetch('/settings/live_source').then(r=>r.json()).then(j=>{if(j.value)s.value=j.value;});
       s.onchange=()=>fetch('/settings/live_source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
+    (function(){const s=document.getElementById('livemodel');if(!s)return;
+      fetch('/models').then(r=>r.json()).then(j=>{const v=j.live_requested||j.live;if(v)s.value=v;});
+      s.onchange=async()=>{const m=document.getElementById('livemodelmsg');m.textContent=' 套用中…';
+        const r=await fetch('/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({live:s.value})});
+        m.textContent=r.ok?' 已設定，下次開始錄音起生效（原生面板與網頁都套用）。':' 設定失敗';};})();
     function fmtB(b){if(b>=1e9)return (b/1e9).toFixed(2)+' GB';
       if(b>=1e6)return (b/1e6).toFixed(1)+' MB';
       if(b>=1e3)return (b/1e3).toFixed(0)+' KB';return b+' B';}
