@@ -3653,7 +3653,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         return {"deleted": name}
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
-                 "denoise": "0", "float_panel": "0",
+                 "denoise": "0", "float_panel": "0", "summary_correct": "1",
                  # /live recording default, so the page never needs re-picking:
                  "live_source": "mic"}
 
