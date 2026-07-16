@@ -1,0 +1,11 @@
+services:
+  app:
+    build:
+      context: ../..           # repo root, so store.py + viewer/ are in context
+      dockerfile: server/Dockerfile
+    ports:
+      - "${HOST_PORT:-5556}:3000"
+    volumes:
+      - ./data:/app/data       # meetings DB + M4A live only on the VM
+      - ./models:/app/models   # FireRed model cache, persisted across redeploys
+    restart: unless-stopped
