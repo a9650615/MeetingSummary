@@ -5,7 +5,6 @@ callables (lazy — weights load on first use, so hot-swapping is instant). The
 LiveModelManager lets the running server switch the live model with no restart:
 TwoPassSession calls `manager.backend` through a thin shim, so set_model() takes
 effect on the next utterance — even mid-session."""
-from live import AdaptiveBackend, mlx_whisper_live_backend
 
 
 def route(model):
@@ -168,6 +167,7 @@ def make_live_backend(model, language=None):
         return qwen3_cpp_live_backend(language)
     if r == "qwen3":
         return qwen3_live_backend(model, language)
+    from live import mlx_whisper_live_backend
     return mlx_whisper_live_backend(model, language)
 
 
@@ -847,6 +847,7 @@ class LiveModelManager:
 
     def set_model(self, model):
         chain = [model] + [m for m in self._fallback if m != model]
+        from live import AdaptiveBackend
         self.backend = AdaptiveBackend(
             [self._make(m, self.language) for m in chain], chain,
             rtf_budget=self._rtf_budget, on_change=self._on_change)
