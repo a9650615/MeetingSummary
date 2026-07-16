@@ -116,10 +116,11 @@ FireRedASR for higher accuracy, non-destructively.
   text while **keeping the segment's original speaker label + start/end**. This
   preserves 斷句 and speaker attribution exactly — the VM never runs voiceprint
   or diarization; it only sharpens the words inside each pre-labeled turn.
-- **Long-segment chunking**: a long turn is VAD-segmented (Silero VAD) before
-  FireRed so the model does not OOM / mis-decode, then the chunk texts are
-  stitched back into the one segment. Decode M4A → 16kHz mono PCM with
-  **ffmpeg** (not afconvert).
+- **Chunking = the existing sentence rows.** The Mac already sentence-split the
+  transcript (`asr._sentence_split`), so each re-transcribed unit is a short
+  sentence — no Silero VAD needed. Only an unusually long row (>30s) is split by
+  fixed windows as a safety net. Decode each row's span from the track M4A →
+  16kHz mono PCM with **ffmpeg** `-ss/-t` (not afconvert).
 - **Non-destructive storage**: results written under `profile="firered"`. The
   Mac-pushed transcript set is **never cleared** — the VM must NOT reuse the
   base app's `clear_transcripts(mid)` full-replace behavior (app.py:3262/3295);
