@@ -1,3 +1,10 @@
+# Explicit project name — WITHOUT this, Compose derives the project from this
+# file's parent dir ("docker"), which COLLIDES with acp_playground's compose
+# (also in a docker/ dir): same project => same container name (docker-app-1),
+# same image tag (docker-app), same network. Our deploy would then recreate acp's
+# container and clobber its image. Pinning the name isolates everything:
+# container meeting_store-app-1, image meeting_store-app, network meeting_store_default.
+name: meeting_store
 services:
   app:
     build:
