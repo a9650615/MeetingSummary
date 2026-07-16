@@ -93,6 +93,64 @@ def pcm_to_wav(pcm_bytes, sample_rate=16000, channels=1, bytes_per_sample=2):
     return buf.getvalue()
 
 
+def pcm_to_m4a(pcm_path, out_path, sample_rate=16000, channels=1):
+    """Compress a raw .pcm track to AAC/.m4a via macOS afconvert (no extra deps).
+    ~10x smaller than PCM; 32 kbps mono is transparent for 16 kHz speech. Streams
+    the pcm through a temp wav so memory stays bounded on multi-hour recordings.
+    Raises on afconvert failure (missing/error) so callers keep the .pcm."""
+    import os
+    import subprocess
+    import tempfile
+    import wave
+
+    fd, wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        with wave.open(wav, "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(2)
+            w.setframerate(sample_rate)
+            with open(pcm_path, "rb") as f:
+                while chunk := f.read(1 << 20):
+                    w.writeframes(chunk)
+        subprocess.run(
+            ["afconvert", "-f", "m4af", "-d", "aac", "-b", "32000", wav, out_path],
+            check=True, capture_output=True)
+    finally:
+        os.unlink(wav)
+
+
+def m4a_to_pcm(path, sample_rate=16000):
+    """Decode an .m4a back to raw s16le PCM bytes (inverse of pcm_to_m4a) via
+    afconvert. Reads the WAVE `data` chunk directly — afconvert emits
+    WAVE_FORMAT_EXTENSIBLE, which stdlib `wave` rejects, but the payload is plain
+    little-endian s16le regardless."""
+    import os
+    import subprocess
+    import tempfile
+
+    fd, wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        subprocess.run(
+            ["afconvert", "-f", "WAVE", "-d", f"LEI16@{sample_rate}", path, wav],
+            check=True, capture_output=True)
+        with open(wav, "rb") as f:
+            if f.read(4) != b"RIFF":
+                return b""
+            f.read(8)  # size + "WAVE"
+            while True:
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    return b""
+                cid, sz = hdr[0:4], struct.unpack("<I", hdr[4:8])[0]
+                if cid == b"data":
+                    return f.read(sz)
+                f.seek(sz + (sz & 1), 1)  # chunks are word-aligned
+    finally:
+        os.unlink(wav)
+
+
 def pcm_duration_s(path, sample_rate, channels=1, bytes_per_sample=2):
     """Duration recomputed from raw byte count — never trusts a written field
     (spec M2). 16-bit mono by default."""

@@ -1257,18 +1257,41 @@ def _export_text(meeting, transcripts, summaries):
 _TRACKS = ("system", "mic", "mixed")
 
 
+def _seg_track_file(seg_dir, track):
+    """A segment track's audio file: raw .pcm (live) preferred, else compressed
+    .m4a (post-finalize). None if neither is present/non-empty."""
+    for ext in ("pcm", "m4a"):
+        p = os.path.join(seg_dir, f"{track}.{ext}")
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            return p
+    return None
+
+
+def _seg_track_bytes(seg_dir, track):
+    """Raw PCM bytes for one segment's track, decoding .m4a on the fly when the
+    .pcm was compressed away at finalize. None if the track is absent."""
+    p = _seg_track_file(seg_dir, track)
+    if p is None:
+        return None
+    if p.endswith(".m4a"):
+        import recorder
+        return recorder.m4a_to_pcm(p)
+    with open(p, "rb") as f:
+        return f.read()
+
+
 def _track_source_pcms(store, mid, track):
-    """The pcm files that feed a track. For 'mixed' with no real mixed.pcm, that's
-    the mic+system files (dual is mixed on demand for one unified player)."""
+    """The audio files that feed a track. For 'mixed' with no real mixed track,
+    that's the mic+system files (dual is mixed on demand for one unified player)."""
     segs = store.list_segments(mid)
-    real = [os.path.join(s["dir_path"], f"{track}.pcm") for s in segs]
-    real = [p for p in real if os.path.exists(p) and os.path.getsize(p) > 0]
+    real = [_seg_track_file(s["dir_path"], track) for s in segs]
+    real = [p for p in real if p]
     if track == "mixed" and not real:
         out = []
         for s in segs:
             for t in ("mic", "system"):
-                p = os.path.join(s["dir_path"], f"{t}.pcm")
-                if os.path.exists(p) and os.path.getsize(p) > 0:
+                p = _seg_track_file(s["dir_path"], t)
+                if p:
                     out.append(p)
         return out
     return real
@@ -1296,10 +1319,9 @@ def _assemble_track(store, mid, track, sample_rate=16000):
     meeting = store.get_meeting(mid)
     if meeting is None:
         return None
-    if track == "mixed":  # derive from mic+system when no real mixed.pcm exists
-        has_real = any(
-            os.path.exists(p := os.path.join(s["dir_path"], "mixed.pcm"))
-            and os.path.getsize(p) > 0 for s in store.list_segments(mid))
+    if track == "mixed":  # derive from mic+system when no real mixed track exists
+        has_real = any(_seg_track_file(s["dir_path"], "mixed")
+                       for s in store.list_segments(mid))
         if not has_real:
             mic = _assemble_track(store, mid, "mic", sample_rate)
             sysd = _assemble_track(store, mid, "system", sample_rate)
@@ -1312,14 +1334,12 @@ def _assemble_track(store, mid, track, sample_rate=16000):
         d = seg["dir_path"]
         if d in seen:
             continue
-        pcm_path = os.path.join(d, f"{track}.pcm")
-        if not os.path.exists(pcm_path) or os.path.getsize(pcm_path) == 0:
+        data = _seg_track_bytes(d, track)  # decodes .m4a if pcm was compressed away
+        if not data:
             continue
         seen.add(d)
         found = True
         off_bytes = max(0, int(round((seg["started_at"] - base) * sample_rate))) * 2
-        with open(pcm_path, "rb") as f:
-            data = f.read()
         end = off_bytes + len(data)
         if end > len(buf):
             buf.extend(b"\x00" * (end - len(buf)))
@@ -1365,13 +1385,42 @@ def _meeting_tracks(store, mid):
     present = []
     for t in _TRACKS:
         for seg in store.list_segments(mid):
-            p = os.path.join(seg["dir_path"], f"{t}.pcm")
-            if os.path.exists(p) and os.path.getsize(p) > 0:
+            if _seg_track_file(seg["dir_path"], t):
                 present.append(t)
                 break
     if "mic" in present and "system" in present and "mixed" not in present:
         return ["mixed"]
     return present
+
+
+def _compress_meeting_audio(store, mid):
+    """Post-finalize: replace each segment's raw .pcm with AAC .m4a (~10x smaller)
+    via afconvert. Idempotent (skips dirs already compressed) and best-effort per
+    file — if afconvert is missing or fails, the .pcm is left untouched so nothing
+    breaks and no disk is lost. Playback/re-ASR read .m4a transparently.
+    ponytail: no lock vs a concurrent playback deleting mid-read; finalize is a
+    manual post-stop action so overlap is unlikely — add a lock if it ever bites."""
+    import recorder
+    seen = set()
+    for seg in store.list_segments(mid):
+        d = seg["dir_path"]
+        if d in seen:
+            continue
+        seen.add(d)
+        for name in ("system", "mic", "mixed"):
+            pcm = os.path.join(d, f"{name}.pcm")
+            if not os.path.exists(pcm) or os.path.getsize(pcm) == 0:
+                continue
+            m4a = os.path.join(d, f"{name}.m4a")
+            try:
+                recorder.pcm_to_m4a(pcm, m4a)
+                if os.path.exists(m4a) and os.path.getsize(m4a) > 0:
+                    os.remove(pcm)
+                else:
+                    raise RuntimeError("empty m4a")
+            except Exception:
+                if os.path.exists(m4a):
+                    os.remove(m4a)  # drop a partial; keep the .pcm intact
 
 
 # Model cache roots across the runtimes we use (HF for mlx/transformers, femelo
@@ -3194,10 +3243,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         n = 0
         for seg in store.list_segments(mid):
             off_ms = max(0, int((seg["started_at"] - base) * 1000))  # align to timeline
-            for track_label, name in (("system", "system.pcm"), ("mic", "mic.pcm")):
-                pcm = f"{seg['dir_path']}/{name}"
-                if not os.path.exists(pcm) or os.path.getsize(pcm) == 0:
-                    continue  # track not present for this segment
+            for track_label in ("system", "mic"):
+                pcm = _seg_track_file(seg["dir_path"], track_label)
+                if pcm is None:
+                    continue  # track not present for this segment (.pcm or .m4a)
                 speaker = _TRACK_LABEL.get(track_label, track_label)
                 for t in asr.transcribe(pcm, profile="accurate",
                                         track=track_label, backend=backend):
@@ -3316,6 +3365,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
         store.finalize_meeting(mid)  # explicit only — stopping live does not
+        # Compress raw .pcm -> .m4a in the background so the response stays instant
+        # (afconvert on a multi-hour meeting takes seconds, not ms).
+        import threading
+        threading.Thread(
+            target=_compress_meeting_audio, args=(store, mid), daemon=True).start()
         return {"status": "finalized"}
 
     @app.post("/meetings/merge")

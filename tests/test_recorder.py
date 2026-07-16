@@ -5,10 +5,16 @@ import struct
 
 import wave
 
+import shutil
+
+import pytest
+
 from recorder import (
     aiter_frames,
+    m4a_to_pcm,
     parse_frames,
     pcm_duration_s,
+    pcm_to_m4a,
     pcm_to_wav,
     record_stream,
     SegmentWriter,
@@ -114,3 +120,22 @@ def test_pcm_to_wav_roundtrips(tmp_path):
         assert w.getnchannels() == 1
         assert w.getsampwidth() == 2
         assert w.readframes(w.getnframes()) == pcm
+
+
+@pytest.mark.skipif(not shutil.which("afconvert"), reason="afconvert is macOS-only")
+def test_pcm_m4a_roundtrip_compresses(tmp_path):
+    import math
+
+    sr = 16000
+    pcm = b"".join(
+        int(8000 * math.sin(2 * math.pi * 440 * i / sr)).to_bytes(2, "little", signed=True)
+        for i in range(sr * 3)  # 3 s tone -> real audio afconvert can encode
+    )
+    src = tmp_path / "system.pcm"
+    src.write_bytes(pcm)
+    m4a = tmp_path / "system.m4a"
+    pcm_to_m4a(str(src), str(m4a))
+    assert m4a.stat().st_size < len(pcm) // 4  # AAC is >>4x smaller than raw PCM
+    back = m4a_to_pcm(str(m4a))
+    # AAC is lossy + adds encoder priming/padding: sample count is close, not exact
+    assert abs(len(back) - len(pcm)) < sr * 2  # within ~0.5 s
