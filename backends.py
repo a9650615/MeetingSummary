@@ -738,7 +738,8 @@ def _firered_recognizer(progress=None):
         enc, dec, tok = _ensure_firered(progress)
         _FIRERED["rec"] = sherpa_onnx.OfflineRecognizer.from_fire_red_asr(
             encoder=enc, decoder=dec, tokens=tok,
-            num_threads=max(2, (_os.cpu_count() or 4) - 2))
+            # never oversubscribe: 1-core boxes get 1 thread, not 2 fighting for it
+            num_threads=max(1, (_os.cpu_count() or 4) - 2))
     return _FIRERED["rec"]
 
 
