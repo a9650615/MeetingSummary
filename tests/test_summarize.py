@@ -1,4 +1,25 @@
-from summarize import summarize, build_prompt, _dedup_lines, _ground
+from summarize import (build_correction_prompt, correct_transcript, summarize,
+                       build_prompt, _dedup_lines, _ground)
+
+
+def test_correction_prompt_carries_roster():
+    p = build_correction_prompt("我: 找史考特", roster=["Scott", "David"], lang="zh-TW")
+    assert "Scott" in p and "David" in p and "校正" in p
+
+
+def test_correct_transcript_uses_backend_output():
+    backend = lambda p: "我: 找 Scott 處理"  # LLM fixed 史考特 -> Scott
+    out = correct_transcript("我: 找史考特", roster=["Scott"], lang="zh-TW",
+                             backend=backend, max_chars=1000)
+    assert out == "我: 找 Scott 處理"
+
+
+def test_correct_transcript_falls_back_on_backend_error():
+    def backend(p):
+        raise RuntimeError("model down")
+    text = "我: 原文保留"
+    # best-effort: a failed correction must not lose the transcript
+    assert correct_transcript(text, roster=[], lang="zh-TW", backend=backend) == text
 
 
 def test_ground_replaces_fabricated_owner_and_time():

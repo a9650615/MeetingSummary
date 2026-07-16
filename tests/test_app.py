@@ -337,6 +337,7 @@ def test_summary_job_runs_backend_and_stores(tmp_path):
         return "會議記錄"
 
     store = Store(tmp_path / "m.db")
+    store.set_setting("summary_correct", "0")  # isolate summary flow from the correction pass
     mid = store.create_meeting("m", 1.0, "zh-TW")
     store.add_transcript(mid, "accurate", "mic", 0, 1000, "我", "討論預算")
     jobs = {}
