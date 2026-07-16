@@ -189,6 +189,12 @@ class FireRedWorker:
                                 restart=restart)
             except Exception:
                 traceback.print_exc()  # a bad meeting must not kill the worker
+                # don't leave progress stuck at "running" after a crash; "paused"
+                # is resumable and honest about the interruption.
+                try:
+                    set_progress(self.store, mid, state="paused")
+                except Exception:
+                    pass
             finally:
                 self.q.task_done()
 

@@ -6,6 +6,11 @@ COPY server/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 # shared modules copied from the repo root at build context
 COPY store.py ./store.py
+# backends.py is the FireRed engine the worker imports (firered_batch_backend,
+# sherpa-onnx CPU). Its module top is Linux-clean after the lazy `from live import`
+# fix; only os is imported at load time. Without this the worker's `import backends`
+# raises ModuleNotFoundError and every correction pass fails.
+COPY backends.py ./backends.py
 COPY viewer ./viewer
 COPY server ./server
 RUN useradd -u 1001 -m appuser && mkdir -p /app/data /app/models \
