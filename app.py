@@ -1256,6 +1256,10 @@ def _export_text(meeting, transcripts, summaries):
 
 _TRACKS = ("system", "mic", "mixed")
 
+# Set True by create_app() when plugins/remote_store/ is present and imports
+# cleanly; the base build (folder absent) leaves this False forever.
+REMOTE_PLUGIN = False
+
 
 def _seg_track_file(seg_dir, track):
     """A segment track's audio file: raw .pcm (live) preferred, else compressed
@@ -2014,6 +2018,11 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
                   "<p class=hint style='margin:.5em 0 0'>點逐字稿任一行可跳到該段落播放。"
                   "捲動時播放器固定在頂部。</p></div>") if audio_tracks else ""
     badge = "done" if meeting["status"] == "finalized" else "live"
+    remote_btn = ""
+    if globals().get("REMOTE_PLUGIN"):
+        remote_btn = (f"<button class=btn id=rpush onclick=\"fetch('/remote/push/{mid}',{{method:'POST'}})"
+                      f".then(r=>r.json()).then(j=>alert(j.ok?'已上傳到 server':'上傳失敗'))"
+                      f".catch(()=>alert('上傳失敗'))\">上傳到 server</button>")
     body = (
         f"<h1><span id=mtitle>{html.escape(meeting['title'])}</span> "
         f"<button class=btn id=edittitle title='改標題' style='padding:.25em .5em;font-size:13px'>✏️</button> "
@@ -2036,6 +2045,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<details class=menu><summary class=btn>⋯ 更多</summary><div class=menupop>"
         "<button class=btn id=dia>多人分群</button>"
         f"<a class=btn href='/meetings/{mid}/export'>匯出 Markdown</a>"
+        f"{remote_btn}"
         "<button class=btn id=cpsum>複製摘要</button>"
         "<button class=btn id=cptx>複製逐字稿</button>"
         "<button class=btn id=fin>完成會議</button>"
@@ -3630,6 +3640,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
             v = v if v in ("mic", "system", "both", "dual") else "mic"
         store.set_setting(key, v)
         return {"value": store.get_setting(key, _SETTINGS[key])}
+
+    # --- opt-in remote-store plugin (absent in the base build) ---
+    try:
+        import plugins.remote_store as _remote_plugin
+        _remote_plugin.register(app, store)
+        globals()["REMOTE_PLUGIN"] = True
+    except Exception:
+        globals()["REMOTE_PLUGIN"] = False
 
     return app
 
