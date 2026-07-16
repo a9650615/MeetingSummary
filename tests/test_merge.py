@@ -26,6 +26,35 @@ def test_iter_transcribe_streams_progress(tmp_path):
     assert not os.path.exists(os.path.join(d, "_win.pcm"))  # temp cleaned
 
 
+def test_iter_transcribe_reads_compressed_m4a(tmp_path):
+    # After 完成會議 compresses .pcm -> .m4a, re-recognition must still find audio
+    # (regression: iter_transcribe read .pcm directly, saw nothing on compressed
+    # meetings). Decodes the m4a to a temp pcm, windows it, cleans up.
+    import shutil
+
+    import pytest
+    if not shutil.which("afconvert"):
+        pytest.skip("afconvert is macOS-only")
+    import recorder
+
+    s = Store(tmp_path / "m.db")
+    mid = s.create_meeting("M", 1000.0, "zh-TW")
+    d = str(tmp_path / "seg")
+    os.makedirs(d)
+    pcm = os.path.join(d, "mic.pcm")
+    with open(pcm, "wb") as f:
+        f.write(b"\x00\x01" * 32000)  # 2 s @ 16k
+    recorder.pcm_to_m4a(pcm, os.path.join(d, "mic.m4a"))
+    os.remove(pcm)  # simulate finalize compression
+    s.add_segment(mid, 0, d, started_at=1000.0, duration_s=2, origin="recorded")
+    backend = lambda p: [{"start": 0.0, "end": 1.0, "text": "視窗"}]
+    evs = list(iter_transcribe(s, mid, backend, window_s=1))
+    assert evs[0]["type"] == "start" and evs[0]["total"] >= 1
+    assert evs[-1]["type"] == "done" and evs[-1]["transcripts"] >= 1
+    assert len(s.list_transcripts(mid)) >= 1
+    assert not os.path.exists(os.path.join(d, "_reasr_mic.pcm"))  # decode temp cleaned
+
+
 def test_run_transcribe_job_records_progress(tmp_path):
     s = Store(tmp_path / "m.db")
     mid = s.create_meeting("M", 1000.0, "zh-TW")

@@ -1730,13 +1730,24 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
     for a single long file; each window's text streams to the client live."""
     base = store.get_meeting(mid)["created_at"]
     win_bytes = int(window_s * sample_rate) * 2
-    units = []  # (track, pcm_path, base_off_ms)
+    units = []  # (track, pcm_path, base_off_ms, byte_start, byte_len)
+    decoded_tmps = []  # m4a-decoded raw pcm temps to remove when the job ends
     for seg in store.list_segments(mid):
         seg_off = max(0, int((seg["started_at"] - base) * 1000))
         for track in ("system", "mic", "mixed"):
             p = os.path.join(seg["dir_path"], f"{track}.pcm")
             if not os.path.exists(p) or os.path.getsize(p) == 0:
-                continue
+                # compressed at finalize -> decode the .m4a back to a raw pcm temp so
+                # byte-range windowing (seek below) still works.
+                m4a = os.path.join(seg["dir_path"], f"{track}.m4a")
+                if not os.path.exists(m4a) or os.path.getsize(m4a) == 0:
+                    continue
+                import recorder
+                p = os.path.join(seg["dir_path"], f"_reasr_{track}.pcm")
+                if not os.path.exists(p):
+                    with open(p, "wb") as w:
+                        w.write(recorder.m4a_to_pcm(m4a))
+                    decoded_tmps.append(p)
             size = os.path.getsize(p)
             for bs in range(0, size, win_bytes):
                 units.append((track, p, seg_off, bs, min(win_bytes, size - bs)))
@@ -1754,7 +1765,8 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
             _clean[path] = backends.denoise_file(path, raw_pcm=True)
         return _clean[path]
 
-    for i, (track, p, seg_off, bs, bl) in enumerate(units):
+    try:
+      for i, (track, p, seg_off, bs, bl) in enumerate(units):
         win_off_ms = seg_off + int(bs / 2 / sample_rate * 1000)
         win_dur_ms = int(bl / 2 / sample_rate * 1000)   # so untimed backends spread within the window
         tmp = f"{os.path.dirname(p)}/_win.pcm"
@@ -1779,7 +1791,13 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
                 pass
         yield {"type": "progress", "done": i + 1, "total": len(units),
                "text": " ".join(texts)[:60]}
-    yield {"type": "done", "transcripts": n}
+      yield {"type": "done", "transcripts": n}
+    finally:
+        for tp in decoded_tmps:
+            try:
+                os.remove(tp)  # drop the m4a-decode temps regardless of how we exit
+            except OSError:
+                pass
 
 
 def _run_transcribe_job(store, mid, backend, jobs):
@@ -2040,6 +2058,9 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<option value='mlx-community/whisper-large-v3-mlx'>whisper large-v3(最準·吃)</option>"
         "<option value='mlx-community/whisper-small-mlx-q4'>whisper small-q4(快)</option>"
         "<option value='mlx-community/Qwen3-ASR-1.7B-8bit'>Qwen3-ASR 1.7B(準·快)</option>"
+        "</optgroup>"
+        "<optgroup label='🎯 最高準度 · CPU（慢）'>"
+        "<option value='firered'>FireRedASR-AED-L(最準·CPU慢·首次下載1GB)</option>"
         "</optgroup>"
         "<optgroup label='🔧 .cpp · Metal'>"
         "<option value='qwen3-asr-0.6b-q4-k-m'>Qwen3-ASR 0.6B(快)</option>"

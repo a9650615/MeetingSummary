@@ -23,6 +23,8 @@ def route(model):
         return "qwen3cpp"
     if "qwen3-asr" in m:
         return "qwen3"
+    if m == "firered" or "fire-red" in m:  # FireRedASR-AED via sherpa-onnx (CPU, batch)
+        return "firered"
     return "whisper"
 
 
@@ -291,6 +293,9 @@ def release_all():
     if _QWEN3_MLX:
         _QWEN3_MLX.clear()                     # drop MLX Qwen3-ASR weights
         freed.append("qwen3-asr-mlx")
+    if _FIRERED:
+        _FIRERED.clear()                       # drop FireRedASR onnx recognizer
+        freed.append("firered")
     gc.collect()
     return freed
 
@@ -674,8 +679,89 @@ def make_batch_backend(model, language=None):
         return qwen3_cpp_batch_backend(model, language)
     if r == "qwen3":
         return qwen3_batch_backend(model, language)
+    if r == "firered":
+        return firered_batch_backend(model, language)
     import asr
     return asr.mlx_whisper_backend(model, language)
+
+
+import os as _os
+
+_MODELS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "models")
+# FireRedASR-AED-L (int8) from the sherpa-onnx model zoo (public, no auth). SOTA zh
+# CER but CPU-only — re-recognition (offline batch) only, never live.
+_FIRERED_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                "asr-models/sherpa-onnx-fire-red-asr-large-zh_en-2025-02-16.tar.bz2")
+_FIRERED_DIR = _os.path.join(_MODELS, "sherpa-onnx-fire-red-asr-large-zh_en-2025-02-16")
+_FIRERED = {}  # lazy recognizer cache
+
+
+def _ensure_firered(progress=None):
+    """(encoder, decoder, tokens) paths — download+extract the ~1GB model on first
+    use so a fresh machine needs no manual setup. Globs the extracted dir so a
+    renamed onnx (int8 vs fp32) still resolves."""
+    import glob
+    import tarfile
+    import urllib.request
+
+    def _pick(paths):
+        # prefer the int8 quant (smaller/faster) when both are present
+        return next((p for p in paths if "int8" in p), paths[0]) if paths else None
+
+    enc = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "encoder*.onnx")))
+    dec = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "decoder*.onnx")))
+    tok = _os.path.join(_FIRERED_DIR, "tokens.txt")
+    if enc and dec and _os.path.exists(tok):
+        return enc, dec, tok
+    _os.makedirs(_MODELS, exist_ok=True)
+    tar = _os.path.join(_MODELS, "firered.tar.bz2")
+    if not _os.path.exists(tar):
+        if progress:
+            progress("下載 FireRedASR 模型（約 1GB，首次較久）…")
+        tmp = tar + ".part"
+        urllib.request.urlretrieve(_FIRERED_URL, tmp)
+        _os.replace(tmp, tar)
+    if progress:
+        progress("解壓 FireRedASR…")
+    with tarfile.open(tar) as tf:
+        tf.extractall(_MODELS)
+    enc = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "encoder*.onnx")))
+    dec = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "decoder*.onnx")))
+    if not (enc and dec and _os.path.exists(tok)):
+        raise RuntimeError("FireRedASR model files missing after extract")
+    return enc, dec, tok
+
+
+def _firered_recognizer(progress=None):
+    if "rec" not in _FIRERED:
+        import sherpa_onnx  # noqa: PLC0415
+        enc, dec, tok = _ensure_firered(progress)
+        _FIRERED["rec"] = sherpa_onnx.OfflineRecognizer.from_fire_red_asr(
+            encoder=enc, decoder=dec, tokens=tok,
+            num_threads=max(2, (_os.cpu_count() or 4) - 2))
+    return _FIRERED["rec"]
+
+
+def firered_batch_backend(model="firered", language=None):
+    """Batch FireRedASR-AED-L via sherpa-onnx (CPU). Highest zh accuracy of our
+    options; no ANE/GPU so it's offline re-recognition only. Lazy: the ~1GB model
+    downloads + loads on the first call (inside the transcribe job thread), so the
+    endpoint stays fast. Windowed 30s chunks come from iter_transcribe; returns one
+    untimed blob per window (asr.transcribe spreads it over clip_ms)."""
+    def _run(audio_path):
+        import numpy as np  # noqa: PLC0415
+        rec = _firered_recognizer()
+        with open(str(audio_path), "rb") as f:  # window temp is raw s16le pcm
+            samples = np.frombuffer(f.read(), dtype=np.int16).astype(np.float32) / 32768.0
+        if samples.size == 0:
+            return []
+        st = rec.create_stream()
+        st.accept_waveform(16000, samples)
+        rec.decode_stream(st)
+        text = st.result.text.strip()
+        return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
+
+    return _run
 
 
 def qwen3_cpp_batch_backend(model="qwen3-asr-0.6b-q4-k-m", language=None):
