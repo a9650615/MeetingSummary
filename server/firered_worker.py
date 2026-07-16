@@ -11,6 +11,7 @@ import os
 import queue
 import subprocess
 import threading
+import traceback
 
 
 def decode_span_pcm(m4a_path, start_ms, end_ms, ffmpeg="ffmpeg"):
@@ -178,7 +179,7 @@ class FireRedWorker:
                                 should_stop=lambda: stop_requested(self.store, mid),
                                 restart=restart)
             except Exception:
-                pass  # a bad meeting must not kill the worker
+                traceback.print_exc()  # a bad meeting must not kill the worker
             finally:
                 self.q.task_done()
 

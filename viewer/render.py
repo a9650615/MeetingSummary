@@ -5,7 +5,7 @@ import time
 
 
 def pick_transcripts(transcripts):
-    rows = [dict(t) for t in transcripts]
+    rows = [dict(t) for t in transcripts if dict(t).get("profile") != "firered_staging"]
     fr = [t for t in rows if t.get("profile") == "firered"]
     chosen = fr if fr else [t for t in rows if t.get("profile") != "firered"]
     return sorted(chosen, key=lambda t: t.get("start_ms") or 0)
@@ -74,6 +74,15 @@ def render_detail(meeting, transcripts, summaries, tracks, tags):
     prof = active_profile(transcripts)
     badge = ("<span class='badge'>FireRed 校正版</span>" if prof == "firered"
              else "<span class='badge'>本地版（校正中…）</span>")
+    progress = (f"<div id='fr-prog' class='badge' style='display:none'></div>"
+                f"<script>(function(){{var el=document.getElementById('fr-prog');"
+                f"function tick(){{fetch('/meetings/{m['id']}/firered/progress')"
+                f".then(r=>r.json()).then(p=>{{"
+                f"if(p.state==='running'||p.state==='paused'){{el.style.display='';"
+                f"el.textContent='FireRed 校正 '+(p.done||0)+'/'+(p.total||0)+"
+                f"(p.state==='paused'?'（已暫停）':'…');setTimeout(tick,3000);}}"
+                f"else if(p.state==='done'){{el.style.display='';el.textContent='FireRed 校正完成';}}"
+                f"}}).catch(()=>{{}});}}tick();}})();</script>")
     audio = "".join(
         f"<div><b>{_e(t)}</b><audio controls preload='none' "
         f"src='/meetings/{m['id']}/audio/{_e(t)}.m4a'></audio></div>" for t in tracks)
@@ -81,7 +90,7 @@ def render_detail(meeting, transcripts, summaries, tracks, tags):
                    for s in summaries)
     lines = "".join(f"<div class='line'><span class='spk'>{_e(l['speaker'])}</span>"
                     f"{_e(l['text'])}</div>" for l in group_lines(transcripts))
-    body = (f"<p><a href='/'>← 全部</a></p><h1>{_e(m.get('title') or '未命名')}{badge}</h1>"
+    body = (f"<p><a href='/'>← 全部</a></p><h1>{_e(m.get('title') or '未命名')}{badge}{progress}</h1>"
             f"<p><a href='/meetings/{m['id']}/export'>下載逐字稿 (.md)</a></p>"
             f"{audio}{sums}<h2>逐字稿</h2>{lines}")
     return _page(m.get("title") or "會議", body)

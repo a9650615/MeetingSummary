@@ -6,6 +6,7 @@ import zipfile
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
+from server import firered_worker
 from store import Store
 from viewer import bundle
 from viewer.routes import mount_viewer
@@ -21,12 +22,37 @@ def build_server(db_path=None, data_dir=None):
     app = FastAPI()
     app.state.store = store
     app.state.data_dir = data
-    app.state.on_ingest = None  # Task 9 sets this to the FireRed worker's enqueue
+    if os.environ.get("FIRERED_DISABLED") == "1":
+        app.state.on_ingest = None
+        app.state.firered = None
+    else:
+        worker = firered_worker.FireRedWorker(store, data)
+        worker.start()
+        app.state.firered = worker
+        app.state.on_ingest = worker.enqueue
     mount_viewer(app, store, data)
 
     @app.get("/health")
     def health():
         return {"ok": True}
+
+    @app.get("/meetings/{mid}/firered/progress")
+    def firered_progress(mid: int):
+        return firered_worker.get_progress(store, mid)
+
+    @app.post("/meetings/{mid}/firered/stop")
+    def firered_stop(mid: int):
+        if app.state.firered:
+            app.state.firered.stop(mid)
+        return {"stopped": True}
+
+    @app.post("/meetings/{mid}/firered/resume")
+    def firered_resume(mid: int, restart: int = 0):
+        if not restart and firered_worker.get_progress(store, mid)["state"] == "done":
+            return {"resumed": False, "reason": "already done"}
+        if app.state.firered:
+            app.state.firered.enqueue(mid, restart=bool(restart))
+        return {"resumed": True}
 
     @app.post("/ingest-bundle")
     async def ingest_bundle(bundle_file: UploadFile = File(..., alias="bundle")):

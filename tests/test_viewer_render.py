@@ -27,6 +27,15 @@ def test_export_md_has_title_and_lines():
     assert "# 週會" in md and "我：hi" in md and "重點" in md
 
 
+def test_pick_excludes_firered_staging():
+    ts = [{"profile": "accurate", "track": "m", "start_ms": 0, "end_ms": 1,
+           "speaker": "我", "text": "local"},
+          {"profile": "firered_staging", "track": "m", "start_ms": 0, "end_ms": 1,
+           "speaker": "我", "text": "half"}]
+    picked = render.pick_transcripts(ts)
+    assert [p["text"] for p in picked] == ["local"]   # staging never shown
+
+
 def test_render_detail_contains_audio_and_text():
     html = render.render_detail(
         {"id": 7, "title": "週會", "created_at": 1721111111.0},
