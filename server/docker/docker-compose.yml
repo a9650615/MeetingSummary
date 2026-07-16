@@ -8,4 +8,10 @@ services:
     volumes:
       - ./data:/app/data       # meetings DB + M4A live only on the VM
       - ./models:/app/models   # FireRed model cache, persisted across redeploys
+    # Blast-radius cap on a VM SHARED with acp: if FireRed (sherpa+onnx arena)
+    # balloons, Docker OOM-kills THIS container, never acp. 2.5G fits FireRed
+    # (~1.5G) + viewer; host is 7.7G (acp ~2.7G) + 4G swap. taskset -c 1 (in the
+    # Dockerfile CMD) keeps us off acp's core too.
+    mem_limit: 2500m
+    cpus: 1.0
     restart: unless-stopped
