@@ -160,6 +160,46 @@ def test_consume_feeds_session_and_emits_finals():
     assert len(feed_calls) == 1
 
 
+def test_consume_survives_wedged_feed(monkeypatch):
+    # A hung backend must NOT freeze consume forever (the "captions stop mid-record
+    # and never recover" bug). feed() times out -> window skipped -> loop continues.
+    import threading
+    monkeypatch.setattr(live_session, "FEED_TIMEOUT_S", 0.2)
+
+    class WedgedSession:
+        def __init__(self):
+            self.released = threading.Event()
+
+        def feed(self, chunk, want_interim):
+            self.released.wait(5)  # blocks past the patched timeout; bounded so the
+            return []              # leaked pool thread can't outlive the test
+
+        def flush(self):
+            return []
+
+    async def run():
+        tracks = {"t": ("mic", "我")}
+        pump = live_session.WallClockPump(tracks, {"t": io.BytesIO()}, t0=time.time())
+        pump.feed("t", b"\x00" * 10)
+        sess = WedgedSession()
+        emitted = []
+
+        async def emit(ev, label):
+            emitted.append(ev)
+
+        # If the timeout guard regressed, consume hangs on feed and THIS wait_for
+        # fires -> the test fails instead of hanging the whole suite.
+        await asyncio.wait_for(
+            live_session.consume(pump, {"t": sess}, tracks, rec_on=lambda: False,
+                                 emit=emit, should_stop=lambda: True,
+                                 interim_lag_bytes=10**9),
+            timeout=3)
+        sess.released.set()
+        return emitted
+
+    assert asyncio.run(run()) == []  # wedged feed -> no finals, but consume returned
+
+
 def test_consume_skips_asr_when_record_only():
     async def run():
         tracks = {"t": ("mic", "我")}
