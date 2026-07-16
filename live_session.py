@@ -23,6 +23,9 @@ from starlette.websockets import WebSocketDisconnect
 import recorder
 
 TRACK_BACKLOG_MAXB = 45 * 16000 * 2  # ~45s cap; full audio is on disk for re-transcribe
+FEED_TIMEOUT_S = 40  # safety net so a wedged backend can't freeze consume forever
+                     # (> the 30s daemon watchdog so it respawns first). Never fires
+                     # in normal operation (feed is <1s).
 
 _PLACEHOLDER = re.compile(r"^(我|對方|說話者|混合)\d+$")
 
@@ -284,12 +287,22 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
                 chunk = chunk[-TRACK_BACKLOG_MAXB:]
             want_interim = len(chunk) <= interim_lag_bytes
             try:
-                events = await run_in_threadpool(sessions[tag].feed, chunk, want_interim)
+                # Safety net: a wedged backend must NOT hang consume forever (the
+                # "live captions stop mid-recording and never recover" bug). flush
+                # already had this guard; the live feed path didn't, so a stalled
+                # inference (e.g. a Metal/whisper-mlx stall with no backend watchdog)
+                # froze all further transcription. 40s > the 30s daemon watchdog, so
+                # a daemon backend kills+respawns first and returns cleanly; on
+                # timeout we skip this window and continue (audio is on disk for
+                # re-transcribe). Normal feed is <1s, so this never fires in practice.
+                events = await asyncio.wait_for(
+                    run_in_threadpool(sessions[tag].feed, chunk, want_interim),
+                    timeout=FEED_TIMEOUT_S)
                 for ev in events:
                     await emit(ev, tracks[tag])
             except WebSocketDisconnect:
                 raise
-            except Exception as e:  # transient ASR error -> keep going
+            except Exception as e:  # transient ASR error / timeout -> keep going
                 print(f"live consumer error (continuing): {e}", file=sys.stderr)
         if pop_notice and (msg := pop_notice()):
             if on_notice:
