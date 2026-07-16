@@ -458,6 +458,12 @@ def _models_page():
            "系統音(對方)/兩者/雙軌會用瀏覽器 getDisplayMedia 分享分頁或畫面的音訊 — 免安裝任何原生元件。"
            "另外，浮動控制面板（下方安裝 <code>floatpanel</code>）錄音時是完全獨立的原生擷取，"
            "不受這裡的設定影響。</p></div>")
+        + ("<div class=card style='margin-top:12px'>"
+           "<label class=chk><input type=checkbox id=correct_opt> "
+           "✏️ 摘要前保守校正逐字稿</label>"
+           "<p class=hint style='margin:.6em 0 0'>摘要前先讓 LLM 保守修正明顯的同音／錯字，"
+           "並把逐字稿提到的人名對齊已辨識的聲紋名單；不改數字、日期，不杜撰。"
+           "只影響摘要輸入，逐字稿原文不動；會多一次 LLM 運算、增加摘要耗時，預設開啟。</p></div>")
         + "</section>"
 
         "<section id=sec-rt><h2>加速 runtime（.cpp · Metal）</h2>"
@@ -550,6 +556,9 @@ def _models_page():
     (function(){const d=document.getElementById('denoise_opt');if(!d)return;
       fetch('/settings/denoise').then(r=>r.json()).then(j=>d.checked=j.value==='1');
       d.onchange=()=>fetch('/settings/denoise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:d.checked?'1':'0'})});})();
+    (function(){const c=document.getElementById('correct_opt');if(!c)return;
+      fetch('/settings/summary_correct').then(r=>r.json()).then(j=>c.checked=j.value!=='0');  // default on
+      c.onchange=()=>fetch('/settings/summary_correct',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:c.checked?'1':'0'})});})();
     (function(){const f=document.getElementById('floatpanel_opt');if(!f)return;
       fetch('/settings/float_panel').then(r=>r.json()).then(j=>f.checked=j.value==='1');
       f.onchange=()=>fetch('/settings/float_panel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:f.checked?'1':'0'})});})();
@@ -1222,6 +1231,31 @@ def _transcript_text(rows):
     import live  # noqa: PLC0415
     return "\n".join(f"{live_session.display_speaker(r['speaker'], _row_track(r))}: {r['text']}"
                      for r in rows if not live._is_hallucination(r["text"]))
+
+
+def _speaker_roster(store):
+    """Named voiceprint speakers, to anchor name correction. Drops the generic
+    我/對方/說話者N placeholders — only human-assigned names help align mentions."""
+    import re  # noqa: PLC0415
+    out = []
+    for s in store.list_speakers():
+        n = (s["name"] or "").strip()
+        if n and not re.fullmatch(r"說話者\d+|對方\d*|我|Speaker\s*\d+", n):
+            out.append(n)
+    return sorted(set(out))
+
+
+def _summary_input(store, mid, meeting, backend):
+    """Transcript text fed to the summarizer, with an optional conservative ASR
+    correction pass (homophones/typos + mentioned names aligned to the voiceprint
+    roster). Gated by the summary_correct setting (default on). Non-destructive —
+    the stored transcript is untouched; only the summary's input is cleaned."""
+    text = _transcript_text(store.list_transcripts(mid))
+    if text and store.get_setting("summary_correct", "1") == "1":
+        from summarize import correct_transcript  # noqa: PLC0415
+        text = correct_transcript(text, roster=_speaker_roster(store),
+                                  lang=meeting["lang"], backend=backend)
+    return text
 
 
 def _snippet(text, q, span=44):
@@ -1898,7 +1932,7 @@ def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs):
         if meeting is None:
             jobs[mid] = {"state": "error", "msg": "meeting not found"}
             return
-        text = _transcript_text(store.list_transcripts(mid))
+        text = _summary_input(store, mid, meeting, summary_backend)
         out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend,
                         notes=(meeting["notes"] or ""))
         store.add_summary(mid, kind, meeting["lang"], out, summary_model, time.time())
@@ -1936,7 +1970,7 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
         if meeting is None:  # deleted mid-job (race with DELETE /meetings/{mid})
             jobs[mid] = {"state": "error", "msg": "meeting was deleted"}
             return
-        text = _transcript_text(store.list_transcripts(mid))
+        text = _summary_input(store, mid, meeting, summary_backend)
         out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend,
                         notes=(meeting["notes"] or ""))
         store.add_summary(mid, kind, meeting["lang"], out, summary_model, time.time())

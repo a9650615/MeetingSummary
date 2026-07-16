@@ -63,6 +63,44 @@ def build_prompt(text, *, kind, lang, notes=""):
     return f"{_GUARD}{_INSTRUCTION[kind]}\n輸出語言:{lang}{ref}\n\n逐字稿:\n{text}"
 
 
+_CORRECT = (
+    "你是逐字稿校正員。以下是語音辨識(ASR)產生的會議逐字稿,可能含同音字、錯別字、"
+    "斷詞錯誤。只做保守校正:\n"
+    "- 修正明顯的同音/錯別字與斷詞,使語句通順\n"
+    "- 逐字稿提到的人名,若與【已知與會者名單】某人明顯同音或近音,改為名單上的正確寫法\n"
+    "- 嚴禁改動數字、日期、金額、時間,以及任何你不確定的字詞\n"
+    "- 嚴禁新增或刪除實質內容、嚴禁杜撰\n"
+    "- 保留每行「說話者: 內容」的格式,逐行輸出,不要加任何說明、標題或程式碼框\n")
+
+
+def build_correction_prompt(text, *, roster, lang):
+    names = "、".join(roster) if roster else "(無)"
+    return f"{_CORRECT}\n已知與會者名單:{names}\n輸出語言:{lang}\n\n逐字稿:\n{text}"
+
+
+def correct_transcript(text, *, roster, lang, backend, max_chars=24000):
+    """Conservative ASR-error correction of the text FED TO the summarizer:
+    homophones/typos + align mentioned person names to the voiceprint roster.
+    Never invents; numbers/dates/amounts left alone. Best-effort — any backend
+    error returns that piece unchanged so the summary still runs. Non-destructive:
+    the stored transcript is untouched, only the summary's input is cleaned."""
+    if not (text or "").strip():
+        return text
+
+    def _one(t):
+        if not t.strip():
+            return t
+        try:
+            out = backend(build_correction_prompt(t, roster=roster, lang=lang)).strip()
+        except Exception:
+            return t
+        return _post(out, lang) or t
+
+    if len(text) <= max_chars:
+        return _one(text)
+    return "\n".join(_one(c) for c in _chunk(text, max_chars))
+
+
 def _dedup_lines(out):
     """Collapse a runaway LLM loop — consecutive lines with identical content (a
     numbered/bulleted list that repeats the same item 18x, see report). Compare
