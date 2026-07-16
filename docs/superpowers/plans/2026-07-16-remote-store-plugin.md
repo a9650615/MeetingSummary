@@ -1108,9 +1108,31 @@ git commit -m "feat(server): dockerize + az-ssh deploy (:5556, isolated from acp
 
 ---
 
-## Phase D — FireRed correction worker (VM, background, non-destructive)
+## Phase D — FireRed correction worker (VM, background, resumable)
 
-### Task 8: `server/firered_worker.py` — per-row re-transcribe
+FireRed on the VM is long-running (~20–30 min per hour of audio on 1 core), so
+the worker must (a) report fine-grained progress, and (b) support **stop** and
+**resume/continue** without losing completed work.
+
+**Design — staging profile + durable progress (no store.py changes):**
+- Corrected lines are written incrementally under `profile="firered_staging"`
+  (one row per source sentence). This is durable: a stop/restart keeps what's
+  done, and resume skips rows already staged.
+- When ALL source rows are staged, the worker **promotes** in one step:
+  `clear_transcripts(mid, "firered")` then a single `UPDATE transcripts SET
+  profile='firered' WHERE meeting_id=? AND profile='firered_staging'`. Only then
+  does the viewer flip to the corrected version — no half-corrected transcript
+  is ever shown.
+- Progress + stop are persisted via the existing `store` key/value settings
+  (`get_setting`/`set_setting`) — no schema change:
+  - `firered:{mid}` → JSON `{state, done, total}`; `state ∈
+    idle|running|paused|done`.
+  - `firered_stop:{mid}` → `"1"` requests a stop; the loop checks it between rows.
+- Because staging rows carry `profile="firered_staging"` (not `"firered"`), the
+  viewer's `pick_transcripts` must exclude them from BOTH the firered set and the
+  local fallback — a one-line fix in `viewer/render.py` (Task 9).
+
+### Task 8: `server/firered_worker.py` — resumable per-row re-transcribe
 
 **Files:**
 - Create: `server/firered_worker.py`
@@ -1118,18 +1140,32 @@ git commit -m "feat(server): dockerize + az-ssh deploy (:5556, isolated from acp
 
 **Interfaces:**
 - Produces:
-  - `decode_span_pcm(m4a_path, start_ms, end_ms, ffmpeg="ffmpeg") -> bytes` — slice+decode via ffmpeg to raw s16le/16k/mono. Returns `b""` on failure.
-  - `chunk_ranges(start_ms, end_ms, max_ms=30000) -> list[tuple[int,int]]` — split an over-long span into ≤max_ms windows (the sentence rows are already short, so this is a rare safety net).
-  - `correct_meeting(store, data_dir, mid, recognize, *, decode=None) -> int` — for each pushed transcript row (profile != "firered"), decode its span from the row's track M4A (fallback to any available track), run `recognize(pcm_bytes) -> str` over each chunk, join, and write a `firered`-profile row with the SAME start/end/speaker/track. Clears only the `firered` profile first. Returns rows written.
-  - `class FireRedWorker` — a background thread with `enqueue(mid)` + `start()`; pulls the real recognizer from `backends.firered_batch_backend` lazily.
-- Consumes: `store.py`, `backends.firered_batch_backend` (server-side; sherpa-onnx CPU).
+  - `decode_span_pcm(m4a_path, start_ms, end_ms, ffmpeg="ffmpeg") -> bytes` — ffmpeg slice+decode to raw s16le/16k/mono; `b""` on failure.
+  - `chunk_ranges(start_ms, end_ms, max_ms=30000) -> list[tuple[int,int]]`.
+  - `get_progress(store, mid) -> dict` — `{state, done, total}` (defaults `{"state":"idle","done":0,"total":0}`).
+  - `set_progress(store, mid, state=None, done=None, total=None)` — merge+persist.
+  - `request_stop(store, mid)` / `clear_stop(store, mid)` / `stop_requested(store, mid) -> bool`.
+  - `correct_meeting(store, data_dir, mid, recognize, *, decode=None, should_stop=None, restart=False) -> dict` — returns `{state, done, total}`. Resumable + non-destructive (see steps).
+  - `class FireRedWorker` — `enqueue(mid, restart=False)`, `stop(mid)`, `start()`; lazy sherpa backend.
+- Consumes: `store.py` (`list_transcripts`, `add_transcript`, `clear_transcripts`, `get_setting`, `set_setting`, `.db`), `backends.firered_batch_backend` (worker only, lazy).
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_firered_worker.py
+import json
 from store import Store
 from server import firered_worker as fw
+
+
+def _seed(tmp_path):
+    store = Store(tmp_path / "s.db")
+    mid = store.create_meeting("m", 1721111111.0, "zh-TW")
+    store.add_transcript(mid, "accurate", "mixed", 0, 1000, "我", "wrong a")
+    store.add_transcript(mid, "accurate", "mixed", 1000, 2000, "對方", "wrong b")
+    d = tmp_path / "data" / str(mid); d.mkdir(parents=True)
+    (d / "mixed.m4a").write_bytes(b"AUDIO")
+    return store, mid
 
 
 def test_chunk_ranges_splits_long_spans():
@@ -1137,45 +1173,67 @@ def test_chunk_ranges_splits_long_spans():
     assert fw.chunk_ranges(0, 70000, max_ms=30000) == [(0, 30000), (30000, 60000), (60000, 70000)]
 
 
-def test_correct_meeting_is_nondestructive_and_inherits_labels(tmp_path):
-    store = Store(tmp_path / "s.db")
-    mid = store.create_meeting("m", 1721111111.0, "zh-TW")
-    store.add_transcript(mid, "accurate", "mixed", 0, 1000, "我", "wrong text")
-    store.add_transcript(mid, "accurate", "mixed", 1000, 2000, "對方", "also wrong")
-    data = tmp_path / "data" / str(mid); data.mkdir(parents=True)
-    (data / "mixed.m4a").write_bytes(b"AUDIO")
-
-    calls = []
-    def fake_decode(path, s, e, ffmpeg="ffmpeg"):
-        return b"PCM"  # non-empty so recognize runs
-    def fake_recognize(pcm):
-        calls.append(pcm)
-        return "corrected"
-
-    n = fw.correct_meeting(store, str(tmp_path / "data"), mid, fake_recognize,
-                           decode=fake_decode)
+def test_full_run_promotes_and_inherits_labels(tmp_path):
+    store, mid = _seed(tmp_path)
+    res = fw.correct_meeting(store, str(tmp_path / "data"), mid,
+                             lambda pcm: "corrected", decode=lambda *a, **k: b"P")
     rows = store.list_transcripts(mid)
     local = [r for r in rows if r["profile"] == "accurate"]
     fr = [r for r in rows if r["profile"] == "firered"]
-    assert n == 2
-    assert len(local) == 2                    # local rows untouched
-    assert [r["text"] for r in local] == ["wrong text", "also wrong"]
+    staging = [r for r in rows if r["profile"] == "firered_staging"]
+    assert res == {"state": "done", "done": 2, "total": 2}
+    assert len(local) == 2 and [r["text"] for r in local] == ["wrong a", "wrong b"]
+    assert not staging                                   # promoted, staging cleared
     assert [(r["speaker"], r["start_ms"], r["end_ms"]) for r in fr] == \
-           [("我", 0, 1000), ("對方", 1000, 2000)]     # labels + timing inherited
+           [("我", 0, 1000), ("對方", 1000, 2000)]        # labels + timing inherited
     assert all(r["text"] == "corrected" for r in fr)
+    assert fw.get_progress(store, mid)["state"] == "done"
 
 
-def test_correct_meeting_reruns_clean(tmp_path):
-    # running twice must not double the firered rows (clears firered profile first)
-    store = Store(tmp_path / "s.db")
-    mid = store.create_meeting("m", 1721111111.0, "zh-TW")
-    store.add_transcript(mid, "accurate", "mixed", 0, 1000, "我", "x")
-    data = tmp_path / "data" / str(mid); data.mkdir(parents=True)
-    (data / "mixed.m4a").write_bytes(b"A")
-    for _ in range(2):
-        fw.correct_meeting(store, str(tmp_path / "data"), mid,
-                           lambda pcm: "y", decode=lambda *a, **k: b"P")
-    assert len([r for r in store.list_transcripts(mid) if r["profile"] == "firered"]) == 1
+def test_stop_pauses_and_keeps_partial(tmp_path):
+    store, mid = _seed(tmp_path)
+    # stop after the first row is staged
+    calls = {"n": 0}
+    def should_stop():
+        calls["n"] += 1
+        return calls["n"] > 1          # allow row 0, stop before row 1
+    res = fw.correct_meeting(store, str(tmp_path / "data"), mid,
+                             lambda pcm: "c", decode=lambda *a, **k: b"P",
+                             should_stop=should_stop)
+    rows = store.list_transcripts(mid)
+    assert res["state"] == "paused" and res["done"] == 1
+    assert len([r for r in rows if r["profile"] == "firered_staging"]) == 1
+    assert not [r for r in rows if r["profile"] == "firered"]   # not promoted
+    assert fw.get_progress(store, mid) == {"state": "paused", "done": 1, "total": 2}
+
+
+def test_resume_continues_from_staging(tmp_path):
+    store, mid = _seed(tmp_path)
+    # first pass: stop after row 0
+    calls = {"n": 0}
+    fw.correct_meeting(store, str(tmp_path / "data"), mid, lambda pcm: "c",
+                       decode=lambda *a, **k: b"P",
+                       should_stop=lambda: (calls.__setitem__("n", calls["n"] + 1) or calls["n"] > 1))
+    seen = []
+    def recognize(pcm):
+        seen.append(pcm); return "c2"
+    # resume: must only re-transcribe the ONE remaining row, then promote
+    res = fw.correct_meeting(store, str(tmp_path / "data"), mid, recognize,
+                             decode=lambda *a, **k: b"P")
+    assert res == {"state": "done", "done": 2, "total": 2}
+    assert len(seen) == 1                                  # only the un-staged row ran
+    fr = [r for r in store.list_transcripts(mid) if r["profile"] == "firered"]
+    assert len(fr) == 2
+
+
+def test_restart_rebuilds_from_scratch(tmp_path):
+    store, mid = _seed(tmp_path)
+    fw.correct_meeting(store, str(tmp_path / "data"), mid, lambda pcm: "old",
+                       decode=lambda *a, **k: b"P")
+    fw.correct_meeting(store, str(tmp_path / "data"), mid, lambda pcm: "new",
+                       decode=lambda *a, **k: b"P", restart=True)
+    fr = [r for r in store.list_transcripts(mid) if r["profile"] == "firered"]
+    assert len(fr) == 2 and all(r["text"] == "new" for r in fr)   # replaced, not doubled
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1187,11 +1245,15 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'server.firered_worker'
 
 ```python
 # server/firered_worker.py
-"""Background FireRed re-correction on the VM. Non-destructive: writes a parallel
-profile="firered" transcript, inheriting each pushed row's speaker + timing.
-CPU-only (sherpa-onnx). Re-transcribes per already-split sentence row, so the
-Mac's segmentation (斷句) and speaker labels are preserved exactly."""
+"""Background FireRed re-correction on the VM. Long-running, so it is resumable:
+corrected lines land under profile="firered_staging" one at a time, and only when
+every source sentence is staged does the worker promote them to profile="firered"
+in one step (so the viewer never shows a half-corrected transcript). Progress and
+a stop request live in the store's key/value settings — durable across restarts.
+CPU-only (sherpa-onnx). Speaker labels + timing are inherited from each source
+row; the VM never diarizes."""
 import glob
+import json
 import os
 import queue
 import subprocess
@@ -1199,7 +1261,6 @@ import threading
 
 
 def decode_span_pcm(m4a_path, start_ms, end_ms, ffmpeg="ffmpeg"):
-    """Slice [start,end] from an M4A and decode to raw s16le 16k mono."""
     dur = max(0.0, (end_ms - start_ms) / 1000.0)
     if dur <= 0:
         return b""
@@ -1207,15 +1268,13 @@ def decode_span_pcm(m4a_path, start_ms, end_ms, ffmpeg="ffmpeg"):
            "-ss", f"{start_ms/1000.0:.3f}", "-t", f"{dur:.3f}",
            "-i", m4a_path, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"]
     try:
-        out = subprocess.run(cmd, capture_output=True, check=True)
-        return out.stdout
+        return subprocess.run(cmd, capture_output=True, check=True).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         return b""
 
 
 def chunk_ranges(start_ms, end_ms, max_ms=30000):
-    out = []
-    s = start_ms
+    out, s = [], start_ms
     while s < end_ms:
         e = min(s + max_ms, end_ms)
         out.append((s, e))
@@ -1223,8 +1282,46 @@ def chunk_ranges(start_ms, end_ms, max_ms=30000):
     return out or [(start_ms, end_ms)]
 
 
+def _pkey(mid):
+    return f"firered:{mid}"
+
+
+def _skey(mid):
+    return f"firered_stop:{mid}"
+
+
+def get_progress(store, mid):
+    raw = store.get_setting(_pkey(mid))
+    if not raw:
+        return {"state": "idle", "done": 0, "total": 0}
+    return json.loads(raw)
+
+
+def set_progress(store, mid, state=None, done=None, total=None):
+    p = get_progress(store, mid)
+    if state is not None:
+        p["state"] = state
+    if done is not None:
+        p["done"] = done
+    if total is not None:
+        p["total"] = total
+    store.set_setting(_pkey(mid), json.dumps(p))
+    return p
+
+
+def request_stop(store, mid):
+    store.set_setting(_skey(mid), "1")
+
+
+def clear_stop(store, mid):
+    store.set_setting(_skey(mid), "0")
+
+
+def stop_requested(store, mid):
+    return store.get_setting(_skey(mid)) == "1"
+
+
 def _track_path(data_dir, mid, track):
-    """The M4A to slice for a row: its own track, else any available track."""
     direct = os.path.join(data_dir, str(mid), f"{track}.m4a")
     if os.path.exists(direct):
         return direct
@@ -1232,48 +1329,77 @@ def _track_path(data_dir, mid, track):
     return others[0] if others else None
 
 
-def correct_meeting(store, data_dir, mid, recognize, *, decode=None):
-    """Re-transcribe each pushed row with `recognize(pcm)->str`; store as firered.
-    Returns rows written."""
+def _source_rows(store, mid):
+    return [r for r in store.list_transcripts(mid)
+            if r["profile"] not in ("firered", "firered_staging")]
+
+
+def _staged_keys(store, mid):
+    return {(r["track"], r["start_ms"], r["end_ms"])
+            for r in store.list_transcripts(mid) if r["profile"] == "firered_staging"}
+
+
+def _promote(store, mid):
+    """Atomically swap the staged set in as the firered profile."""
+    store.clear_transcripts(mid, profile="firered")
+    store.db.execute(
+        "UPDATE transcripts SET profile='firered' "
+        "WHERE meeting_id=? AND profile='firered_staging'", (mid,))
+    store.db.commit()
+
+
+def correct_meeting(store, data_dir, mid, recognize, *, decode=None,
+                    should_stop=None, restart=False):
+    """Re-transcribe each source sentence with recognize(pcm)->str, staging as we
+    go, and promote when complete. Resumable: rows already staged are skipped.
+    restart=True wipes prior staging + firered and starts over."""
     decode = decode or decode_span_pcm
-    store.clear_transcripts(mid, profile="firered")  # idempotent re-run
-    rows = [r for r in store.list_transcripts(mid) if r["profile"] != "firered"]
-    written = 0
-    for r in rows:
+    if restart:
+        store.clear_transcripts(mid, profile="firered_staging")
+        store.clear_transcripts(mid, profile="firered")
+    source = _source_rows(store, mid)
+    total = len(source)
+    staged = _staged_keys(store, mid)
+    set_progress(store, mid, state="running", done=len(staged), total=total)
+    done = len(staged)
+    for r in source:
+        key = (r["track"], r["start_ms"], r["end_ms"])
+        if key in staged:
+            continue
+        if should_stop and should_stop():
+            return set_progress(store, mid, state="paused")
         path = _track_path(data_dir, mid, r["track"])
-        if path is None:
-            continue
-        parts = []
-        for cs, ce in chunk_ranges(r["start_ms"], r["end_ms"]):
-            pcm = decode(path, cs, ce)
-            if not pcm:
-                continue
-            txt = (recognize(pcm) or "").strip()
-            if txt:
-                parts.append(txt)
-        text = "".join(parts)
-        if not text:
-            continue
-        store.add_transcript(mid, "firered", r["track"], r["start_ms"],
+        text = ""
+        if path is not None:
+            parts = []
+            for cs, ce in chunk_ranges(r["start_ms"], r["end_ms"]):
+                pcm = decode(path, cs, ce)
+                if pcm:
+                    t = (recognize(pcm) or "").strip()
+                    if t:
+                        parts.append(t)
+            text = "".join(parts)
+        # stage even an empty result so the row counts as done and won't be retried
+        store.add_transcript(mid, "firered_staging", r["track"], r["start_ms"],
                              r["end_ms"], r["speaker"], text)
-        written += 1
-    return written
+        done += 1
+        set_progress(store, mid, done=done)
+    _promote(store, mid)
+    return set_progress(store, mid, state="done", done=total, total=total)
 
 
 class FireRedWorker:
-    """One-at-a-time background corrector. enqueue(mid) then start()."""
+    """One-at-a-time background corrector. enqueue(mid), stop(mid), start()."""
     def __init__(self, store, data_dir):
         self.store = store
         self.data_dir = data_dir
         self.q = queue.Queue()
-        self._rec = None
+        self._backend = None
 
     def _recognize(self, pcm_bytes):
-        if self._rec is None:
-            import backends  # sherpa-onnx CPU; lazy so import stays cheap
+        if self._backend is None:
+            import backends  # sherpa-onnx CPU; lazy
             self._backend = backends.firered_batch_backend("firered")
-            self._rec = True
-        # backend takes a path; write the chunk to a temp raw file
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".pcm", delete=False) as f:
             f.write(pcm_bytes)
@@ -1284,14 +1410,20 @@ class FireRedWorker:
         finally:
             os.remove(tmp)
 
-    def enqueue(self, mid):
-        self.q.put(mid)
+    def enqueue(self, mid, restart=False):
+        self.q.put((mid, restart))
+
+    def stop(self, mid):
+        request_stop(self.store, mid)
 
     def _loop(self):
         while True:
-            mid = self.q.get()
+            mid, restart = self.q.get()
             try:
-                correct_meeting(self.store, self.data_dir, mid, self._recognize)
+                clear_stop(self.store, mid)
+                correct_meeting(self.store, self.data_dir, mid, self._recognize,
+                                should_stop=lambda: stop_requested(self.store, mid),
+                                restart=restart)
             except Exception:
                 pass  # a bad meeting must not kill the worker
             finally:
@@ -1304,26 +1436,31 @@ class FireRedWorker:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/pytest tests/test_firered_worker.py -v`
-Expected: PASS (3 tests)
+Expected: PASS (6 tests)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add server/firered_worker.py tests/test_firered_worker.py
-git commit -m "feat(server): FireRed per-row re-correction worker (non-destructive)"
+git commit -m "feat(server): resumable FireRed worker (staging + progress + stop/resume)"
 ```
 
 ---
 
-### Task 9: Wire worker into server startup + enqueue on ingest
+### Task 9: Wire worker + progress/stop/resume routes + viewer progress UI
 
 **Files:**
-- Modify: `server/main.py`
+- Modify: `server/main.py`, `viewer/render.py`
 - Test: `tests/test_server_worker_wire.py`
 
 **Interfaces:**
-- Consumes: `server.firered_worker.FireRedWorker`.
-- Produces: on startup, `build_server` creates a `FireRedWorker`, starts it, and sets `app.state.on_ingest = worker.enqueue`, so every ingest enqueues a correction pass. A `FIRERED_DISABLED=1` env skips starting it (for tests / a viewer-only deploy).
+- Consumes: `server.firered_worker` (`FireRedWorker`, `get_progress`).
+- Produces (on `server/main.py`'s app):
+  - startup: create+start a `FireRedWorker`, set `app.state.on_ingest = worker.enqueue` (unless `FIRERED_DISABLED=1`), store it on `app.state.firered`.
+  - `GET /meetings/{mid}/firered/progress` → `{state, done, total}`.
+  - `POST /meetings/{mid}/firered/stop` → `{"stopped": True}`.
+  - `POST /meetings/{mid}/firered/resume` → `{"resumed": True}` (re-enqueues; `?restart=1` for a full redo).
+- `viewer/render.py`: `pick_transcripts` excludes `firered_staging`; `render_detail` shows a progress line + a tiny poller that hits the progress endpoint.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1334,8 +1471,8 @@ from fastapi.testclient import TestClient
 import server.main as sm
 
 
-def _zip():
-    meta = {"meeting": {"title": "m", "created_at": 1721111111.0, "lang": "zh-TW",
+def _zip(created_at=1721111111.0):
+    meta = {"meeting": {"title": "m", "created_at": created_at, "lang": "zh-TW",
                         "status": "finalized", "notes": ""},
             "segments": [], "transcripts": [], "summaries": [], "tracks": []}
     buf = io.BytesIO()
@@ -1344,11 +1481,10 @@ def _zip():
     return buf.getvalue()
 
 
-def test_ingest_enqueues(tmp_path, monkeypatch):
+def test_ingest_enqueues(tmp_path):
+    app = sm.build_server(db_path=str(tmp_path / "s.db"), data_dir=str(tmp_path / "d"))
     seen = []
-    app = sm.build_server(db_path=str(tmp_path / "s.db"),
-                          data_dir=str(tmp_path / "d"))
-    app.state.on_ingest = seen.append   # stand in for the worker
+    app.state.on_ingest = lambda mid, restart=False: seen.append(mid)
     c = TestClient(app)
     c.post("/ingest-bundle", files={"bundle": ("b.zip", _zip(), "application/zip")})
     assert len(seen) == 1
@@ -1359,56 +1495,131 @@ def test_worker_started_by_default(tmp_path, monkeypatch):
     class FakeWorker:
         def __init__(self, *a): pass
         def start(self): started["yes"] = True
-        def enqueue(self, mid): pass
+        def enqueue(self, mid, restart=False): pass
+        def stop(self, mid): pass
     monkeypatch.setattr(sm.firered_worker, "FireRedWorker", FakeWorker)
     monkeypatch.delenv("FIRERED_DISABLED", raising=False)
-    app = sm.build_server(db_path=str(tmp_path / "s.db"),
-                          data_dir=str(tmp_path / "d"))
+    app = sm.build_server(db_path=str(tmp_path / "s.db"), data_dir=str(tmp_path / "d"))
     assert started.get("yes") and app.state.on_ingest is not None
+
+
+def test_progress_and_stop_resume_routes(tmp_path, monkeypatch):
+    stops, resumes = [], []
+    class FakeWorker:
+        def __init__(self, *a): pass
+        def start(self): pass
+        def enqueue(self, mid, restart=False): resumes.append((mid, restart))
+        def stop(self, mid): stops.append(mid)
+    monkeypatch.setattr(sm.firered_worker, "FireRedWorker", FakeWorker)
+    app = sm.build_server(db_path=str(tmp_path / "s.db"), data_dir=str(tmp_path / "d"))
+    c = TestClient(app)
+    assert c.get("/meetings/1/firered/progress").json() == {"state": "idle", "done": 0, "total": 0}
+    assert c.post("/meetings/1/firered/stop").json() == {"stopped": True}
+    assert stops == [1]
+    assert c.post("/meetings/1/firered/resume").json() == {"resumed": True}
+    assert resumes[-1] == (1, False)
+    c.post("/meetings/1/firered/resume?restart=1")
+    assert resumes[-1] == (1, True)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `.venv/bin/pytest tests/test_server_worker_wire.py -v`
-Expected: FAIL — `AttributeError: module 'server.main' has no attribute 'firered_worker'`
-
-- [ ] **Step 3: Wire the worker**
-
-In `server/main.py`, add the import at the top:
+Also add to `tests/test_viewer_render.py`:
 
 ```python
-from server import firered_worker
+def test_pick_excludes_firered_staging():
+    ts = [{"profile": "accurate", "track": "m", "start_ms": 0, "end_ms": 1,
+           "speaker": "我", "text": "local"},
+          {"profile": "firered_staging", "track": "m", "start_ms": 0, "end_ms": 1,
+           "speaker": "我", "text": "half"}]
+    picked = render.pick_transcripts(ts)
+    assert [p["text"] for p in picked] == ["local"]   # staging never shown
 ```
 
-In `build_server`, after `mount_viewer(...)` and before defining routes, replace the `app.state.on_ingest = None` line with:
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/pytest tests/test_server_worker_wire.py tests/test_viewer_render.py::test_pick_excludes_firered_staging -v`
+Expected: FAIL — worker attr / staging rows leak into picked set.
+
+- [ ] **Step 3: Implement**
+
+In `viewer/render.py`, change `pick_transcripts` to exclude staging from both sets:
 
 ```python
+def pick_transcripts(transcripts):
+    rows = [dict(t) for t in transcripts if dict(t).get("profile") != "firered_staging"]
+    fr = [t for t in rows if t.get("profile") == "firered"]
+    chosen = fr if fr else [t for t in rows if t.get("profile") != "firered"]
+    return sorted(chosen, key=lambda t: t.get("start_ms") or 0)
+```
+
+In `viewer/render.py`, `render_detail`: add a progress line + poller. Insert into `body` (after the `badge`, before the audio block):
+
+```python
+    progress = (f"<div id='fr-prog' class='badge' style='display:none'></div>"
+                f"<script>(function(){{var el=document.getElementById('fr-prog');"
+                f"function tick(){{fetch('/meetings/{m['id']}/firered/progress')"
+                f".then(r=>r.json()).then(p=>{{"
+                f"if(p.state==='running'||p.state==='paused'){{el.style.display='';"
+                f"el.textContent='FireRed 校正 '+(p.done||0)+'/'+(p.total||0)+"
+                f"(p.state==='paused'?'（已暫停）':'…');setTimeout(tick,3000);}}"
+                f"else if(p.state==='done'){{el.style.display='';el.textContent='FireRed 校正完成';}}"
+                f"}}).catch(()=>{{}});}}tick();}})();</script>")
+```
+
+Then include `{progress}` in the `body` f-string next to `{badge}`.
+
+In `server/main.py`, add the import and wiring. Replace the `app.state.on_ingest = None` block with:
+
+```python
+    from server import firered_worker  # (add at top of file with other imports)
+    ...
     if os.environ.get("FIRERED_DISABLED") == "1":
         app.state.on_ingest = None
+        app.state.firered = None
     else:
         worker = firered_worker.FireRedWorker(store, data)
         worker.start()
+        app.state.firered = worker
         app.state.on_ingest = worker.enqueue
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+And add the routes (after the ingest route):
 
-Run: `.venv/bin/pytest tests/test_server_worker_wire.py -v`
-Expected: PASS (2 tests)
+```python
+    @app.get("/meetings/{mid}/firered/progress")
+    def firered_progress(mid: int):
+        return firered_worker.get_progress(store, mid)
 
-- [ ] **Step 5: Full server-side suite green**
+    @app.post("/meetings/{mid}/firered/stop")
+    def firered_stop(mid: int):
+        if app.state.firered:
+            app.state.firered.stop(mid)
+        return {"stopped": True}
+
+    @app.post("/meetings/{mid}/firered/resume")
+    def firered_resume(mid: int, restart: int = 0):
+        if app.state.firered:
+            app.state.firered.enqueue(mid, restart=bool(restart))
+        return {"resumed": True}
+```
+
+Note: the ingest route calls `app.state.on_ingest(mid)`. Since `on_ingest` is now `worker.enqueue(mid, restart=False)`, that call stays valid. Confirm the ingest handler passes only `mid`.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/bin/pytest tests/test_server_worker_wire.py tests/test_viewer_render.py -v`
+Expected: PASS
+
+Then the full server-side suite:
 
 Run: `.venv/bin/pytest tests/test_viewer_bundle.py tests/test_viewer_render.py tests/test_viewer_routes.py tests/test_server_ingest.py tests/test_firered_worker.py tests/test_server_worker_wire.py -q`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add server/main.py tests/test_server_worker_wire.py
-git commit -m "feat(server): start FireRed worker + enqueue every ingest"
+git add server/main.py viewer/render.py tests/test_server_worker_wire.py tests/test_viewer_render.py
+git commit -m "feat(server): FireRed progress + stop/resume routes + viewer progress poller"
 ```
-
----
 
 ## Post-implementation (manual, after all tasks)
 
