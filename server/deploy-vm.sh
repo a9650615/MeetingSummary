@@ -22,6 +22,9 @@ rsync -az --delete -e "ssh -F $SSH_CFG" \
   "$REPO_ROOT/store.py" "$REPO_ROOT/viewer" "$REPO_ROOT/server" \
   "$VM_IP:$REMOTE_DIR/"
 
+echo "==> ensure data/model dirs owned by container uid 1001"
+run 'mkdir -p '"$REMOTE_DIR"'/server/docker/data '"$REMOTE_DIR"'/server/docker/models && sudo chown -R 1001:1001 '"$REMOTE_DIR"'/server/docker/data '"$REMOTE_DIR"'/server/docker/models'
+
 echo "==> build + recreate (HOST_PORT=$HOST_PORT)"
 run 'cd '"$REMOTE_DIR"' && HOST_PORT='"$HOST_PORT"' '"$COMPOSE"' up -d --build'
 
@@ -32,5 +35,5 @@ run 'cd '"$REMOTE_DIR"' && '"$COMPOSE"' ps | tail -2
       [ "$code" = "200" ] && { echo "HTTP 200"; break; }
       sleep 2
     done
-    [ "$code" = "200" ] || echo "HTTP $code (not healthy after 30s)"'
+    [ "$code" = "200" ] || { echo "HTTP $code (not healthy after 30s)"; exit 1; }'
 echo "==> done: http://$VM_IP:$HOST_PORT"
