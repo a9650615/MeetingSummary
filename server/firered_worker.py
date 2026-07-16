@@ -167,6 +167,15 @@ class FireRedWorker:
     def enqueue(self, mid, restart=False):
         self.q.put((mid, restart))
 
+    def resume_incomplete(self):
+        """Re-enqueue meetings whose correction was running/paused when the
+        process died — the in-memory queue does not survive a restart/redeploy,
+        so without this every redeploy orphans an in-flight FireRed pass. Progress
+        is persisted, so a re-enqueued run resumes from the staged rows."""
+        for m in self.store.list_meetings():
+            if get_progress(self.store, m["id"])["state"] in ("running", "paused"):
+                self.enqueue(m["id"])
+
     def stop(self, mid):
         request_stop(self.store, mid)
 

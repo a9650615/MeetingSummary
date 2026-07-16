@@ -55,23 +55,47 @@ def read_bundle_zip(zip_path, dest_dir):
     return bundle_dict, tracks
 
 
+def _copy_tracks(data_dir, mid, track_files):
+    dst_dir = os.path.join(data_dir, str(mid))
+    os.makedirs(dst_dir, exist_ok=True)
+    for track, path in (track_files or {}).items():
+        shutil.copyfile(path, os.path.join(dst_dir, f"{track}.m4a"))
+
+
 def ingest_bundle(store, data_dir, bundle_dict, track_files):
-    """Insert a bundle into store; copy track m4a to data_dir/<mid>/<t>.m4a.
-    Idempotent by created_at: an existing meeting with the same start is deleted
-    first (re-push replaces)."""
+    """Insert or top-up a bundle, keyed by created_at. Returns (mid, is_new).
+
+    NEW meeting (unseen created_at) -> full insert (segments + transcripts +
+    summaries + tracks).
+
+    EXISTING meeting -> top-up: refresh the non-transcript info the user may add
+    after the first push (title, notes, status, summaries, tracks) but PRESERVE
+    the transcripts, including any FireRed correction rows / progress. Summaries
+    are replaced only when the bundle actually carries some (an early push before
+    the summary exists must not wipe a later one). The transcript is owned by the
+    first push + the VM's FireRed pass; a top-up never touches it."""
     m = bundle_dict["meeting"]
     created_at = m["created_at"]
-    to_replace = [e for e in store.list_meetings() if e["created_at"] == created_at]
-    # ponytail: meetings.id has no AUTOINCREMENT, so SQLite reuses a freed rowid.
-    # Create the replacement first (while the old row still holds the max id),
-    # then delete the old one, so the new mid is guaranteed to differ.
+    existing = next((e for e in store.list_meetings()
+                     if e["created_at"] == created_at), None)
+
+    if existing is not None:  # top-up: metadata/summary/tracks only
+        mid = existing["id"]
+        store.update_title(mid, m.get("title") or existing["title"])
+        if m.get("notes"):
+            store.set_notes(mid, m["notes"])
+        if m.get("status") == "finalized":
+            store.finalize_meeting(mid)
+        if bundle_dict.get("summaries"):  # replace only when bundle brings some
+            store.db.execute("DELETE FROM summaries WHERE meeting_id=?", (mid,))
+            store.db.commit()
+            for s in bundle_dict["summaries"]:
+                store.add_summary(mid, s["kind"], s["lang"], s["text"],
+                                  s["model"], s["created_at"])
+        _copy_tracks(data_dir, mid, track_files)
+        return mid, False
+
     mid = store.create_meeting(m["title"], created_at, m["lang"])
-    for existing in to_replace:
-        for d in store.delete_meeting(existing["id"]):
-            if d and os.path.isdir(d):
-                shutil.rmtree(d, ignore_errors=True)
-        shutil.rmtree(os.path.join(data_dir, str(existing["id"])),
-                      ignore_errors=True)
     if m.get("notes"):
         store.set_notes(mid, m["notes"])
     if m.get("status") == "finalized":
@@ -85,8 +109,5 @@ def ingest_bundle(store, data_dir, bundle_dict, track_files):
     for s in bundle_dict.get("summaries", []):
         store.add_summary(mid, s["kind"], s["lang"], s["text"],
                           s["model"], s["created_at"])
-    dst_dir = os.path.join(data_dir, str(mid))
-    os.makedirs(dst_dir, exist_ok=True)
-    for track, path in (track_files or {}).items():
-        shutil.copyfile(path, os.path.join(dst_dir, f"{track}.m4a"))
-    return mid
+    _copy_tracks(data_dir, mid, track_files)
+    return mid, True

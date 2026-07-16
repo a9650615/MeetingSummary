@@ -79,3 +79,19 @@ def test_restart_rebuilds_from_scratch(tmp_path):
                        decode=lambda *a, **k: b"P", restart=True)
     fr = [r for r in store.list_transcripts(mid) if r["profile"] == "firered"]
     assert len(fr) == 2 and all(r["text"] == "new" for r in fr)   # replaced, not doubled
+
+
+def test_resume_incomplete_reenqueues_running(tmp_path):
+    store = Store(tmp_path / "s.db")
+    done = store.create_meeting("done", 1.0, "zh-TW")
+    running = store.create_meeting("running", 2.0, "zh-TW")
+    idle = store.create_meeting("idle", 3.0, "zh-TW")
+    fw.set_progress(store, done, state="done", done=1, total=1)
+    fw.set_progress(store, running, state="running", done=0, total=5)
+    # `idle` has no progress row -> state defaults to "idle"
+    w = fw.FireRedWorker(store, str(tmp_path / "data"))
+    w.resume_incomplete()
+    queued = []
+    while not w.q.empty():
+        queued.append(w.q.get()[0])
+    assert queued == [running]        # only the running one re-enqueued

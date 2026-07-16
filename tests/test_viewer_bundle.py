@@ -34,18 +34,52 @@ def test_roundtrip_zip_and_ingest(tmp_path):
     dst = Store(tmp_path / "dst.db")
     data_dir = tmp_path / "data"
     b2, tracks = bundle.read_bundle_zip(zp, tmp_path / "extract")
-    new_mid = bundle.ingest_bundle(dst, str(data_dir), b2, tracks)
+    new_mid, is_new = bundle.ingest_bundle(dst, str(data_dir), b2, tracks)
 
+    assert is_new is True
     rows = dst.list_transcripts(new_mid)
     assert rows[0]["text"] == "開始開會"
     assert (data_dir / str(new_mid) / "mixed.m4a").read_bytes() == b"FAKE_M4A"
 
 
-def test_ingest_is_idempotent_by_created_at(tmp_path):
-    src = Store(tmp_path / "src.db"); mid = _seed(src)
-    b = bundle.meeting_to_bundle(src, mid, [])
+def test_reingest_same_created_at_is_a_topup(tmp_path):
+    # Same created_at -> same meeting id, is_new False (top-up, not a new row).
+    src = Store(tmp_path / "src.db"); _seed(src)
+    b = bundle.meeting_to_bundle(src, 1, [])
     dst = Store(tmp_path / "dst.db")
-    m1 = bundle.ingest_bundle(dst, str(tmp_path / "d"), b, {})
-    m2 = bundle.ingest_bundle(dst, str(tmp_path / "d"), b, {})
+    m1, new1 = bundle.ingest_bundle(dst, str(tmp_path / "d"), b, {})
+    m2, new2 = bundle.ingest_bundle(dst, str(tmp_path / "d"), b, {})
+    assert new1 is True and new2 is False
+    assert m2 == m1
     assert len([m for m in dst.list_meetings() if m["created_at"] == 1721111111.0]) == 1
-    assert m2 != m1  # replaced, new row id
+
+
+def test_topup_updates_meta_and_summary_but_preserves_transcript(tmp_path):
+    dst = Store(tmp_path / "dst.db")
+    # first push: transcript present, no summary yet, title A
+    first = {"meeting": {"title": "會議 A", "created_at": 99.0, "lang": "zh-TW",
+                         "status": "recording", "notes": ""},
+             "segments": [], "summaries": [],
+             "transcripts": [{"profile": "accurate", "track": "mic", "start_ms": 0,
+                              "end_ms": 1000, "speaker": "我", "text": "原始逐字"}],
+             "tracks": []}
+    mid, new1 = bundle.ingest_bundle(dst, str(tmp_path / "d"), first, {})
+    # simulate FireRed having corrected a line on the VM
+    dst.add_transcript(mid, "firered", "mic", 0, 1000, "我", "校正後")
+    # top-up: renamed title, added notes + a summary, status finalized; no transcript
+    topup = {"meeting": {"title": "會議 A（正式）", "created_at": 99.0, "lang": "zh-TW",
+                         "status": "finalized", "notes": "補充筆記"},
+             "segments": [], "transcripts": [],
+             "summaries": [{"kind": "minutes", "lang": "zh-TW", "text": "會議摘要",
+                            "model": "m", "created_at": 100.0}],
+             "tracks": []}
+    mid2, new2 = bundle.ingest_bundle(dst, str(tmp_path / "d"), topup, {})
+    assert mid2 == mid and new2 is False
+    meeting = dst.get_meeting(mid)
+    assert meeting["title"] == "會議 A（正式）"
+    assert meeting["notes"] == "補充筆記"
+    assert meeting["status"] == "finalized"
+    assert dst.list_summaries(mid)[0]["text"] == "會議摘要"
+    # transcript (incl the FireRed row) untouched — top-up never wipes it
+    texts = {r["text"] for r in dst.list_transcripts(mid)}
+    assert texts == {"原始逐字", "校正後"}

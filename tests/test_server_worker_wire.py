@@ -27,6 +27,7 @@ def test_worker_started_by_default(tmp_path, monkeypatch):
     class FakeWorker:
         def __init__(self, *a): pass
         def start(self): started["yes"] = True
+        def resume_incomplete(self): pass
         def enqueue(self, mid, restart=False): pass
         def stop(self, mid): pass
     monkeypatch.setattr(sm.firered_worker, "FireRedWorker", FakeWorker)
@@ -40,6 +41,7 @@ def test_progress_and_stop_resume_routes(tmp_path, monkeypatch):
     class FakeWorker:
         def __init__(self, *a): pass
         def start(self): pass
+        def resume_incomplete(self): pass
         def enqueue(self, mid, restart=False): resumes.append((mid, restart))
         def stop(self, mid): stops.append(mid)
     monkeypatch.setattr(sm.firered_worker, "FireRedWorker", FakeWorker)
@@ -59,6 +61,7 @@ def test_resume_noop_when_already_done(tmp_path, monkeypatch):
     class FakeWorker:
         def __init__(self, *a): pass
         def start(self): pass
+        def resume_incomplete(self): pass
         def enqueue(self, mid, restart=False): resumes.append((mid, restart))
         def stop(self, mid): pass
     monkeypatch.setattr(sm.firered_worker, "FireRedWorker", FakeWorker)

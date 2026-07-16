@@ -28,6 +28,7 @@ def build_server(db_path=None, data_dir=None):
     else:
         worker = firered_worker.FireRedWorker(store, data)
         worker.start()
+        worker.resume_incomplete()  # re-pick meetings left running/paused by a restart
         app.state.firered = worker
         app.state.on_ingest = worker.enqueue
     mount_viewer(app, store, data)
@@ -63,12 +64,14 @@ def build_server(db_path=None, data_dir=None):
                 f.write(raw)
             try:
                 bd, tracks = bundle.read_bundle_zip(zp, os.path.join(td, "x"))
-                mid = bundle.ingest_bundle(store, data, bd, tracks)
+                mid, is_new = bundle.ingest_bundle(store, data, bd, tracks)
             except (zipfile.BadZipFile, KeyError, ValueError) as e:
                 raise HTTPException(400, f"bad bundle: {e}")
-        if app.state.on_ingest:
+        # Only a NEW meeting needs FireRed; a top-up (metadata/summary only) must
+        # not re-run the ~20-30min/hr correction over an unchanged transcript.
+        if is_new and app.state.on_ingest:
             app.state.on_ingest(mid)
-        return {"mid": mid}
+        return {"mid": mid, "is_new": is_new}
 
     return app
 
