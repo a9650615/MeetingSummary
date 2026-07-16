@@ -37,9 +37,9 @@ def build_server(db_path=None, data_dir=None):
                 f.write(raw)
             try:
                 bd, tracks = bundle.read_bundle_zip(zp, os.path.join(td, "x"))
+                mid = bundle.ingest_bundle(store, data, bd, tracks)
             except (zipfile.BadZipFile, KeyError, ValueError) as e:
                 raise HTTPException(400, f"bad bundle: {e}")
-            mid = bundle.ingest_bundle(store, data, bd, tracks)
         if app.state.on_ingest:
             app.state.on_ingest(mid)
         return {"mid": mid}

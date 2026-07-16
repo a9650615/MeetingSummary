@@ -38,3 +38,15 @@ def test_ingest_rejects_bad_zip(tmp_path):
     r = c.post("/ingest-bundle",
                files={"bundle": ("b.zip", b"not a zip", "application/zip")})
     assert r.status_code == 400
+
+
+def test_ingest_rejects_valid_zip_missing_meeting_key(tmp_path):
+    app = build_server(db_path=str(tmp_path / "s.db"),
+                       data_dir=str(tmp_path / "data"))
+    c = TestClient(app)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("meeting.json", json.dumps({"tracks": []}))
+    r = c.post("/ingest-bundle",
+               files={"bundle": ("b.zip", buf.getvalue(), "application/zip")})
+    assert r.status_code == 400
