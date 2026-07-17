@@ -14,14 +14,24 @@ def enabled():
         or bool(os.environ.get("REMOTE_STORE_URL_ENABLE"))
 
 
+def is_on(store):
+    """Feature enabled? The `remote_store` setting (UI toggle) OR the env flag.
+    Default OFF so a normal build is dormant even with the folder present."""
+    return enabled() or (store is not None
+                         and store.get_setting("remote_store", "0") == "1")
+
+
 def register(app, store):
-    """Add the push route. The detail-page button is injected by the app.py seam
-    guarded on this module importing."""
+    """Add the push route. Registered whenever the plugin is present, but the
+    handler refuses unless is_on() — so a release can't push until toggled on.
+    The detail-page button is gated on the same is_on() at render time."""
     from fastapi import HTTPException
     from plugins.remote_store import push as _push
 
     @app.post("/remote/push/{mid}")
     def remote_push(mid: int):
+        if not is_on(store):
+            raise HTTPException(404, "remote store disabled")
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
         res = _push.build_and_push(store, mid, VM_URL)

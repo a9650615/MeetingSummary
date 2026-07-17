@@ -487,6 +487,11 @@ def _models_page():
            "原生小窗(狀態＋計時＋停止)。需先到下方「加速 runtime」安裝 <code>floatpanel</code>。</p></div>"
            if _apple_silicon() else "")
         + ("<div class=card style='margin-top:12px'>"
+           "<label class=chk><input type=checkbox id=remote_opt> "
+           "☁️ 上傳到 server（遠端儲存）：於各會議詳情頁顯示「上傳到 server」，把逐字稿／摘要／音檔推到共用伺服器。</label>"
+           "<p class=hint style='margin:.6em 0 0'>預設關閉；一般版本無此功能。開啟後每場會議詳情頁會出現上傳鈕。</p></div>"
+           if globals().get("REMOTE_PLUGIN") else "")
+        + ("<div class=card style='margin-top:12px'>"
            "<label style='font-weight:600'>🎙️ 錄音預設（免每次重選）</label>"
            "<div class=row style='margin-top:8px'>"
            "<label>來源 <select id=live_source_opt>"
@@ -603,6 +608,9 @@ def _models_page():
     (function(){const f=document.getElementById('floatpanel_opt');if(!f)return;
       fetch('/settings/float_panel').then(r=>r.json()).then(j=>f.checked=j.value==='1');
       f.onchange=()=>fetch('/settings/float_panel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:f.checked?'1':'0'})});})();
+    (function(){const r=document.getElementById('remote_opt');if(!r)return;
+      fetch('/settings/remote_store').then(x=>x.json()).then(j=>r.checked=j.value==='1');
+      r.onchange=()=>fetch('/settings/remote_store',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:r.checked?'1':'0'})});})();
     (function(){const s=document.getElementById('live_source_opt');if(!s)return;
       fetch('/settings/live_source').then(r=>r.json()).then(j=>{if(j.value)s.value=j.value;});
       s.onchange=()=>fetch('/settings/live_source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
@@ -2211,7 +2219,7 @@ _TRACK_LABEL = {"system": "對方", "mic": "我", "mixed": "混合"}
 
 
 def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
-                 recognized=(), ane_on=False):
+                 recognized=(), ane_on=False, remote_enabled=False):
     try:
         m_notes = meeting["notes"] or ""
     except (KeyError, IndexError):  # older row / test stub without the column
@@ -2242,7 +2250,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
                   "捲動時播放器固定在頂部。</p></div>") if audio_tracks else ""
     badge = "done" if meeting["status"] == "finalized" else "live"
     remote_btn = ""
-    if globals().get("REMOTE_PLUGIN"):
+    if remote_enabled:
         remote_btn = (f"<button class=btn id=rpush onclick=\"fetch('/remote/push/{mid}',{{method:'POST'}})"
                       f".then(r=>r.json()).then(j=>alert(j.ok?'已上傳到 server':'上傳失敗'))"
                       f".catch(()=>alert('上傳失敗'))\">上傳到 server</button>")
@@ -2966,9 +2974,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
         known = {s["name"]: s for s in store.speakers_with_stats()}
         recognized = sorted(n for n in here if known.get(n, {}).get("meetings", 0) > 1)
         ane_on = _ane_available() and store.get_setting("ane", "0") == "1"
+        remote_enabled = (globals().get("REMOTE_PLUGIN")
+                          and store.get_setting("remote_store", "0") == "1")
         return _detail_page(mid, dict(meeting), transcripts,
                             _rows(store.list_summaries(mid)), audio_tracks,
-                            tags=store.tags_for(mid), recognized=recognized, ane_on=ane_on)
+                            tags=store.tags_for(mid), recognized=recognized, ane_on=ane_on,
+                            remote_enabled=remote_enabled)
 
     @app.get("/meetings/{mid}/audio/{track}.wav")
     def meeting_audio(mid: int, track: str):
@@ -3925,6 +3936,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
                  "denoise": "0", "float_panel": "0", "summary_correct": "1",
+                 "remote_store": "0",  # ☁️ 上傳到 server toggle (default OFF)
                  # /live recording default, so the page never needs re-picking:
                  "live_source": "mic"}
 
@@ -3946,17 +3958,16 @@ def create_app(store, *, summary_backend, asr_backend=None,
         store.set_setting(key, v)
         return {"value": store.get_setting(key, _SETTINGS[key])}
 
-    # --- opt-in remote-store plugin: FLAG-gated, default OFF ---
-    # A normal release ships the folder but the feature stays dormant unless
-    # REMOTE_STORE=1 is set (enabled()). So the standard local build has no
-    # server-side integration (no push button, no /remote route).
+    # --- opt-in remote-store plugin ---
+    # The route is registered whenever the plugin folder is present (a release can
+    # ship without it). It stays DORMANT until turned on: the push handler + the
+    # UI button both gate on the `remote_store` setting (default OFF) or a
+    # REMOTE_STORE env flag — so a normal build shows nothing and can't push until
+    # the user flips the toggle in 設定. REMOTE_PLUGIN = "the folder is here".
     try:
         import plugins.remote_store as _remote_plugin
-        if _remote_plugin.enabled():
-            _remote_plugin.register(app, store)
-            globals()["REMOTE_PLUGIN"] = True
-        else:
-            globals()["REMOTE_PLUGIN"] = False
+        _remote_plugin.register(app, store)
+        globals()["REMOTE_PLUGIN"] = True
     except Exception:
         globals()["REMOTE_PLUGIN"] = False
 
