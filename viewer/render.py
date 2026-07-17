@@ -4,22 +4,26 @@ import html
 import time
 
 
-def pick_transcripts(transcripts):
-    rows = [dict(t) for t in transcripts if dict(t).get("profile") != "firered_staging"]
-    fr = [t for t in rows if t.get("profile") == "firered"]
-    chosen = fr if fr else [t for t in rows if t.get("profile") != "firered"]
+def pick_transcripts(transcripts, prefer="local"):
+    """Default to the LOCAL (Mac-pushed) transcript. FireRed is a side-by-side
+    comparison, never a silent auto-upgrade — it isn't always more accurate than
+    local, so firered is returned only when the viewer explicitly asks for it
+    (prefer='firered'). firered_staging (in-progress) is never shown."""
+    fr = [dict(t) for t in transcripts if dict(t).get("profile") == "firered"]
+    local = [dict(t) for t in transcripts
+             if dict(t).get("profile") not in ("firered", "firered_staging")]
+    chosen = fr if (prefer == "firered" and fr) else local
     return sorted(chosen, key=lambda t: t.get("start_ms") or 0)
 
 
-def active_profile(transcripts):
-    return "firered" if any(dict(t).get("profile") == "firered"
-                            for t in transcripts) else "local"
+def has_firered(transcripts):
+    return any(dict(t).get("profile") == "firered" for t in transcripts)
 
 
-def group_lines(transcripts):
+def group_lines(transcripts, prefer="local"):
     return [{"speaker": t.get("speaker") or "", "text": t.get("text") or "",
              "start_ms": t.get("start_ms") or 0, "track": t.get("track")}
-            for t in pick_transcripts(transcripts)]
+            for t in pick_transcripts(transcripts, prefer)]
 
 
 def export_md(meeting, transcripts, summaries):
@@ -71,9 +75,7 @@ def render_search(q, results):
 
 def render_detail(meeting, transcripts, summaries, tracks, tags):
     m = dict(meeting)
-    prof = active_profile(transcripts)
-    badge = ("<span class='badge'>FireRed 校正版</span>" if prof == "firered"
-             else "<span class='badge'>本地版（校正中…）</span>")
+    has_fr = has_firered(transcripts)
     progress = (f"<div id='fr-prog' class='badge' style='display:none'></div>"
                 f"<script>(function(){{var el=document.getElementById('fr-prog');"
                 f"function tick(){{fetch('/meetings/{m['id']}/firered/progress')"
@@ -88,9 +90,27 @@ def render_detail(meeting, transcripts, summaries, tracks, tags):
         f"src='/meetings/{m['id']}/audio/{_e(t)}.m4a'></audio></div>" for t in tracks)
     sums = "".join(f"<h2>摘要（{_e(s.get('kind',''))}）</h2><p>{_e(s.get('text'))}</p>"
                    for s in summaries)
-    lines = "".join(f"<div class='line'><span class='spk'>{_e(l['speaker'])}</span>"
-                    f"{_e(l['text'])}</div>" for l in group_lines(transcripts))
-    body = (f"<p><a href='/'>← 全部</a></p><h1>{_e(m.get('title') or '未命名')}{badge}{progress}</h1>"
+
+    def _lines_html(prefer):
+        return "".join(f"<div class='line'><span class='spk'>{_e(l['speaker'])}</span>"
+                       f"{_e(l['text'])}</div>" for l in group_lines(transcripts, prefer))
+
+    # Default view = local (Mac Qwen). FireRed is a comparison, not an override:
+    # a toggle swaps between the two; local never gets silently replaced.
+    if has_fr:
+        toggle = (
+            "<button id='tx-toggle' class='badge' style='cursor:pointer' onclick=\""
+            "var l=document.getElementById('tx-local'),f=document.getElementById('tx-firered'),"
+            "b=document.getElementById('tx-toggle');var showF=l.style.display!=='none';"
+            "l.style.display=showF?'none':'';f.style.display=showF?'':'none';"
+            "b.textContent=showF?'← 顯示本地版':'顯示 FireRed 校正版 →';\">顯示 FireRed 校正版 →</button>")
+        tx = (f"<h2>逐字稿 <small>本地版（預設）</small> {toggle}</h2>"
+              f"<div id='tx-local'>{_lines_html('local')}</div>"
+              f"<div id='tx-firered' style='display:none'>{_lines_html('firered')}</div>")
+    else:
+        tx = f"<h2>逐字稿</h2><div id='tx-local'>{_lines_html('local')}</div>"
+
+    body = (f"<p><a href='/'>← 全部</a></p><h1>{_e(m.get('title') or '未命名')}{progress}</h1>"
             f"<p><a href='/meetings/{m['id']}/export'>下載逐字稿 (.md)</a></p>"
-            f"{audio}{sums}<h2>逐字稿</h2>{lines}")
+            f"{audio}{sums}{tx}")
     return _page(m.get("title") or "會議", body)
