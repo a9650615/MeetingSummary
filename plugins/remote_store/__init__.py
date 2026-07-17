@@ -1,12 +1,17 @@
-"""Opt-in remote-store plugin. Present == feature on. A minimal try-import seam
-in app.py calls register(); the base build ships without this folder."""
+"""Opt-in remote-store plugin. Gated by an env FLAG, default OFF — a normal
+release ships this folder but the feature stays dormant (no push button, no
+/remote route) unless REMOTE_STORE=1 is set. So the standard local build has
+none of the server-side integration; only an explicitly-enabled machine does."""
 import os
 
 VM_URL = os.environ.get("REMOTE_STORE_URL", "http://10.102.0.7:5556")
 
 
 def enabled():
-    return True  # presence of this package is the switch
+    # default OFF: the feature is absent from a normal release unless the flag is
+    # set (REMOTE_STORE=1, or a REMOTE_STORE_URL explicitly configured).
+    return os.environ.get("REMOTE_STORE", "").strip() in ("1", "true", "on") \
+        or bool(os.environ.get("REMOTE_STORE_URL_ENABLE"))
 
 
 def register(app, store):

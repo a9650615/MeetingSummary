@@ -3855,11 +3855,17 @@ def create_app(store, *, summary_backend, asr_backend=None,
         store.set_setting(key, v)
         return {"value": store.get_setting(key, _SETTINGS[key])}
 
-    # --- opt-in remote-store plugin (absent in the base build) ---
+    # --- opt-in remote-store plugin: FLAG-gated, default OFF ---
+    # A normal release ships the folder but the feature stays dormant unless
+    # REMOTE_STORE=1 is set (enabled()). So the standard local build has no
+    # server-side integration (no push button, no /remote route).
     try:
         import plugins.remote_store as _remote_plugin
-        _remote_plugin.register(app, store)
-        globals()["REMOTE_PLUGIN"] = True
+        if _remote_plugin.enabled():
+            _remote_plugin.register(app, store)
+            globals()["REMOTE_PLUGIN"] = True
+        else:
+            globals()["REMOTE_PLUGIN"] = False
     except Exception:
         globals()["REMOTE_PLUGIN"] = False
 
