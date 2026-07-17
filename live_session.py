@@ -167,7 +167,15 @@ def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
     import os  # noqa: PLC0415
     try:
         import diarize as diar  # noqa: PLC0415
-        extractor = diar.embedding_extractor()
+        # Live voiceprint embedding on CoreML/ANE (off the CPU): measured ~113ms vs
+        # ~156ms/utterance on CPU here — faster AND frees the CPU, unlike the diarize
+        # SEG model whose onnx ops fall back on CoreML (kept CPU). Falls back to CPU
+        # if CoreML init fails on a given machine. Override via LIVE_DIAR_PROVIDER.
+        _prov = os.environ.get("LIVE_DIAR_PROVIDER", "coreml")
+        try:
+            extractor = diar.embedding_extractor(provider=_prov)
+        except Exception:
+            extractor = diar.embedding_extractor(provider="cpu")
         thr = float(os.environ.get("LIVE_DIAR_THRESHOLD", "0.4"))
         cont = float(os.environ.get("LIVE_DIAR_CONTINUITY", "0.5"))  # same-speaker continuity
         try:
