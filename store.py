@@ -246,6 +246,16 @@ class Store:
         self.db.commit()
         return cur.rowcount
 
+    def set_transcript_speaker(self, meeting_id, transcript_id, speaker):
+        """Reassign ONE transcript line's speaker (抽離 a mislabeled line — e.g. a
+        line tagged Imp that's actually Angle). Scoped to the meeting so a stray id
+        can't touch another meeting. Returns rows changed (0/1)."""
+        cur = self.db.execute(
+            "UPDATE transcripts SET speaker=? WHERE id=? AND meeting_id=?",
+            (speaker, transcript_id, meeting_id))
+        self.db.commit()
+        return cur.rowcount
+
     def meeting_speaker_names(self, meeting_id, track=None):
         """Distinct speaker labels currently used in a meeting's transcripts
         (track-scoped when given, since live cluster labels are per-track).

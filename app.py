@@ -1193,6 +1193,11 @@ class SpeakerRenameIn(BaseModel):
     track: str | None = None   # scopes /meetings/{mid}/speaker; ignored by the global rename
 
 
+class LineSpeakerIn(BaseModel):
+    speaker: str               # reassign ONE line (抽離 a mislabeled line)
+    track: str | None = None   # the line's track, for enroll scope
+
+
 class MergeIn(BaseModel):
     ids: list[int]
 
@@ -2206,7 +2211,8 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         s = (ms or 0) // 1000
         return f"{s // 60:d}:{s % 60:02d}"
     rows = "".join(
-        f"<tr data-track='{html.escape(str(r['track']))}' data-ts='{(r['start_ms'] or 0)/1000:.2f}'>"
+        f"<tr data-track='{html.escape(str(r['track']))}' data-ts='{(r['start_ms'] or 0)/1000:.2f}'"
+        f" data-id='{r.get('id', '')}'>"
         f"<td class=ts>{ts_str(r['start_ms'])}</td>"
         f"<td class=who data-spk='{html.escape(str(r.get('speaker_raw', r['speaker'])))}' "
         f"title='點擊改名'>{html.escape(str(r['speaker']))}</td>"
@@ -2399,18 +2405,30 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         # disp = the friendly collapsed label shown/edited (對方/我/混合 or a
         # promoted name) — they differ for un-promoted live cluster labels.
         "const raw=td.dataset.spk;const disp=td.textContent;let cancelled=false;"
+        "const tr=td.closest('tr');"
         "const inp=document.createElement('input');inp.value=disp;inp.setAttribute('list','spkdl');"
         "inp.autocomplete='off';inp.style.cssText='font:inherit;width:7em';"
-        "td.textContent='';td.appendChild(inp);inp.focus();inp.select();"
+        # 只改此行 = 抽離：把辨識錯的單行改成正確的人，其他行不動。mousedown
+        # preventDefault 讓勾選時輸入框不失焦(不會提前送出)。
+        "const lab=document.createElement('label');lab.style.cssText='font-size:11px;color:#888;display:block;margin-top:2px;cursor:pointer';"
+        "const cb=document.createElement('input');cb.type='checkbox';cb.style.marginRight='3px';"
+        "cb.addEventListener('mousedown',ev=>ev.preventDefault());"
+        "lab.appendChild(cb);lab.appendChild(document.createTextNode('只改此行(抽離)'));"
+        "td.textContent='';td.appendChild(inp);td.appendChild(lab);inp.focus();inp.select();"
         "const commit=async()=>{const nw=inp.value.trim();"
         "if(cancelled||!nw||nw===disp){td.textContent=disp;return;}"
+        "const trk=tr.dataset.track;let r;"
+        "if(cb.checked){"   # 抽離單行：只改這一列
+        f"r=await fetch(`/meetings/{mid}/transcript/${{tr.dataset.id}}/speaker`,{{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:nw,track:trk})});"
+        "}else{"
         # nw is an existing person -> this rename MERGES the two and can't be
         # split back. Confirm before the fat-finger commits (server also snapshots).
         "if(window._spk&&window._spk.has(nw)){"
         "if(!confirm('「'+nw+'」已經是另一位人員。改名會把目前這位合併進「'+nw+'」，之後無法再分離。確定要合併？')){td.textContent=disp;return;}}"
-        "const trk=td.closest('tr').dataset.track;"
-        f"const r=await fetch('/meetings/{mid}/speaker',{{method:'POST',"
+        f"r=await fetch('/meetings/{mid}/speaker',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({old:raw,new:nw,track:trk})});"
+        "}"
         "if(r.ok)location.reload();else td.textContent=disp;};"
         "inp.onkeydown=(ev)=>{if(ev.key==='Enter')inp.blur();"
         "else if(ev.key==='Escape'){cancelled=true;inp.blur();}};inp.onblur=commit;};});"
@@ -3435,6 +3453,28 @@ def create_app(store, *, summary_backend, asr_backend=None,
         except Exception as e:
             print(f"enroll on assign failed: {e}", file=sys.stderr)
         return {"renamed": n, "merged": merged, "backup": backup, "enrolled": enrolled}
+
+    @app.post("/meetings/{mid}/transcript/{tid}/speaker")
+    def set_line_speaker(mid: int, tid: int, body: LineSpeakerIn):
+        # Reassign a SINGLE line's speaker — 抽離 a line the diarizer put under the
+        # wrong person (e.g. an "Imp" line that's actually "Angle"). Only this row
+        # changes; the rest of that speaker's lines stay put.
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        sp = body.speaker.strip()
+        if not sp:
+            raise HTTPException(400, "empty speaker")
+        n = store.set_transcript_speaker(mid, tid, sp)
+        # Assignment enrolls: if the line moved onto a real name not yet in the 語者庫,
+        # teach it from that person's audio in this meeting (best-effort).
+        enrolled = False
+        try:
+            import diarize as diar  # noqa: PLC0415
+            if not diar._is_placeholder(sp):
+                enrolled = _enroll_meeting_speaker(store, mid, body.track, sp)
+        except Exception as e:
+            print(f"enroll on line-assign failed: {e}", file=sys.stderr)
+        return {"changed": n, "enrolled": enrolled}
 
     @app.delete("/meetings/{mid}")
     def delete_meeting(mid: int):

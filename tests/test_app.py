@@ -663,3 +663,19 @@ def test_enroll_meeting_speaker_on_assignment(tmp_path, monkeypatch):
     assert app._enroll_meeting_speaker(s, mid, "system", "Alice") is True
     assert any(r["name"] == "Alice" for r in s.list_speakers())
     assert app._enroll_meeting_speaker(s, mid, "system", "Alice") is False   # idempotent
+
+
+def test_set_line_speaker_reassigns_one_line(tmp_path, monkeypatch):
+    # 抽離: a single mislabeled line moves to the right person; siblings stay put.
+    import app
+    import diarize
+    client, store = make_client(tmp_path)
+    mid = store.create_meeting(title="m", created_at=0.0, lang="zh-TW")
+    t1 = store.add_transcript(mid, "accurate", "system", 0, 3000, "Imp", "line one")
+    t2 = store.add_transcript(mid, "accurate", "system", 3000, 6000, "Imp", "line two")
+    monkeypatch.setattr(app, "_enroll_meeting_speaker", lambda *a, **k: False)  # skip audio
+    r = client.post(f"/meetings/{mid}/transcript/{t2}/speaker",
+                    json={"speaker": "Angle", "track": "system"})
+    assert r.status_code == 200 and r.json()["changed"] == 1
+    by_id = {row["id"]: row["speaker"] for row in store.list_transcripts(mid)}
+    assert by_id[t1] == "Imp" and by_id[t2] == "Angle"      # only the one line moved
