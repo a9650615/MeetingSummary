@@ -92,6 +92,23 @@ def ingest_bundle(store, data_dir, bundle_dict, track_files):
             for s in bundle_dict["summaries"]:
                 store.add_summary(mid, s["kind"], s["lang"], s["text"],
                                   s["model"], s["created_at"])
+        # sync speaker labels (人員命名 the user did on the Mac after the first
+        # push). Speakers live on transcript rows, but a top-up must NOT rewrite
+        # transcript text (preserving FireRed). So match rows by (track, start_ms,
+        # end_ms) and update ONLY the speaker — this propagates a rename to both
+        # the local rows AND the FireRed rows (which inherited the same span).
+        spk = {(t["track"], t["start_ms"], t["end_ms"]): t["speaker"]
+               for t in bundle_dict.get("transcripts", [])}
+        if spk:
+            changed = False
+            for r in store.list_transcripts(mid):
+                key = (r["track"], r["start_ms"], r["end_ms"])
+                if key in spk and spk[key] != r["speaker"]:
+                    store.db.execute("UPDATE transcripts SET speaker=? WHERE id=?",
+                                     (spk[key], r["id"]))
+                    changed = True
+            if changed:
+                store.db.commit()
         _copy_tracks(data_dir, mid, track_files)
         return mid, False
 

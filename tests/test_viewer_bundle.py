@@ -83,3 +83,29 @@ def test_topup_updates_meta_and_summary_but_preserves_transcript(tmp_path):
     # transcript (incl the FireRed row) untouched — top-up never wipes it
     texts = {r["text"] for r in dst.list_transcripts(mid)}
     assert texts == {"原始逐字", "校正後"}
+
+
+def test_topup_syncs_speaker_names_without_touching_text(tmp_path):
+    dst = Store(tmp_path / "s.db")
+    first = {"meeting": {"title": "m", "created_at": 5.0, "lang": "zh-TW",
+                         "status": "recording", "notes": ""},
+             "segments": [], "summaries": [],
+             "transcripts": [{"profile": "accurate", "track": "mic", "start_ms": 0,
+                              "end_ms": 1000, "speaker": "說話者1", "text": "哈囉"}],
+             "tracks": []}
+    mid, _ = bundle.ingest_bundle(dst, str(tmp_path / "d"), first, {})
+    # FireRed corrected the same span, inheriting the speaker label
+    dst.add_transcript(mid, "firered", "mic", 0, 1000, "說話者1", "哈囉（校正）")
+    # re-push after renaming 說話者1 -> Scott on the Mac (same span, same text)
+    topup = {"meeting": {"title": "m", "created_at": 5.0, "lang": "zh-TW",
+                         "status": "recording", "notes": ""},
+             "segments": [], "summaries": [],
+             "transcripts": [{"profile": "accurate", "track": "mic", "start_ms": 0,
+                              "end_ms": 1000, "speaker": "Scott", "text": "哈囉"}],
+             "tracks": []}
+    bundle.ingest_bundle(dst, str(tmp_path / "d"), topup, {})
+    rows = {r["profile"]: r for r in dst.list_transcripts(mid)}
+    assert rows["accurate"]["speaker"] == "Scott"        # renamed
+    assert rows["firered"]["speaker"] == "Scott"         # rename propagated to FireRed
+    assert rows["accurate"]["text"] == "哈囉"             # text untouched
+    assert rows["firered"]["text"] == "哈囉（校正）"       # FireRed text preserved
