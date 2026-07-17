@@ -1721,18 +1721,16 @@ def _persistent_names(store, embs, prefix, threshold=0.62):
             if best_row_for.get(nm) is not None:
                 _nudge(best_row_for[nm], emb)
             continue
-        # 2) fall back to raw rows (catches unnamed placeholders to reinforce).
+        # 2) fall back to raw rows — but ONLY match named voiceprints; never enroll.
         mid, _sim = diar.match_speaker(e, raw_known, threshold)
-        if mid is not None:
+        if mid is not None and not diar._is_placeholder(rows[mid]["name"]):
             _nudge(mid, emb)
             names[spk] = rows[mid]["name"]
-        else:
-            sid = store.add_speaker(prefix, _unit(emb).astype(np.float32).tobytes())
-            nmp = f"{prefix}{sid}"  # globally-unique placeholder until the user renames
-            store.set_speaker_name(sid, nmp)
-            names[spk] = nmp
-            raw_known.append((sid, e))
-            rows[sid] = {"id": sid, "name": nmp, "centroid": _unit(emb).tobytes(), "count": 1}
+        # else: unrecognized voice -> DO NOT write a global voiceprint. Leave spk out
+        # of `names` so assign_speakers auto-labels it 對方N (numbered per meeting).
+        # A voiceprint enters the global 語者庫 only when a human ASSIGNS a real name
+        # (see /meetings/{mid}/speaker -> _enroll_meeting_speaker). This kills the
+        # placeholder flood — every unmatched cluster used to add a 對方N global row.
     return names
 
 
@@ -1883,6 +1881,38 @@ def _apply_speaker_split(store, name, new_name):
     store.add_speaker(new_name, centroid(small))
     return {"ok": True, "sep": round(sep, 3), "kept": name, "new": new_name,
             "backup": backup}
+
+
+def _enroll_meeting_speaker(store, mid, track, name):
+    """The 'assignment enrolls' half of the model: unrecognized voices stay
+    meeting-local (對方N), and a HUMAN naming one is what writes a global voiceprint —
+    computed from that person's audio in THIS meeting. Skips if `name` is already a
+    known global speaker (no dup rows) or there's too little audio. Best-effort;
+    returns True if a voiceprint was added."""
+    import numpy as np  # noqa: PLC0415
+    import diarize as diar  # noqa: PLC0415
+    if any(s["name"] == name for s in store.list_speakers()):
+        return False  # already in the 語者庫 -> future meetings already recognize it
+    ext = diar.embedding_extractor()
+    cache, embs = {}, []
+    for s in store.meeting_speaker_spans(mid, name, track=track):
+        key = (s["meeting_id"], s["track"])
+        if key not in cache:
+            cache[key] = _assemble_track(store, s["meeting_id"], s["track"])
+        pcm = cache[key]
+        if not pcm:
+            continue
+        a = int(s["start_ms"] / 1000 * 16000) * 2
+        b = int(s["end_ms"] / 1000 * 16000) * 2
+        clip = pcm[a:b]
+        if len(clip) < 16000:   # < 0.5s
+            continue
+        embs.append(np.asarray(ext(clip), dtype=np.float32))
+    if not embs:
+        return False
+    v = np.mean([e / (np.linalg.norm(e) + 1e-9) for e in embs], axis=0)
+    store.add_speaker(name, (v / (np.linalg.norm(v) + 1e-9)).astype(np.float32).tobytes())
+    return True
 
 
 def _is_default_title(t):
@@ -3393,7 +3423,18 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # propagate to the global voiceprint so future meetings auto-use the new name
         # (no-op when old is a raw live cluster label — no such global speaker exists yet)
         store.rename_global_speaker(body.old, new)
-        return {"renamed": n, "merged": merged, "backup": backup}
+        # Assignment enrolls: naming a meeting-local placeholder (對方N) with a REAL
+        # name is what teaches the global 語者庫 — enroll its voiceprint now from this
+        # meeting's audio. (rename_global_speaker was a no-op above since no global row
+        # existed for the placeholder.) Best-effort; never blocks the rename.
+        enrolled = False
+        try:
+            import diarize as diar  # noqa: PLC0415
+            if new and diar._is_placeholder(body.old) and not diar._is_placeholder(new):
+                enrolled = _enroll_meeting_speaker(store, mid, body.track, new)
+        except Exception as e:
+            print(f"enroll on assign failed: {e}", file=sys.stderr)
+        return {"renamed": n, "merged": merged, "backup": backup, "enrolled": enrolled}
 
     @app.delete("/meetings/{mid}")
     def delete_meeting(mid: int):

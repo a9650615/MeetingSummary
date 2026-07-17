@@ -632,3 +632,31 @@ def test_speaker_split_refuses_single_voice(tmp_path, monkeypatch):
     assert app._speaker_split_check(store, "Solo")["split"] is False
     assert app._apply_speaker_split(store, "Solo", "Ghost")["ok"] is False
     assert [r["name"] for r in store.list_speakers()] == ["Solo"]   # untouched
+
+
+def test_persistent_names_does_not_enroll_unrecognized(tmp_path):
+    # New model: an unrecognized cluster gets NO global voiceprint (stays 對方N via
+    # assign_speakers). Only a human assignment enrolls.
+    import numpy as np
+    import app
+    from store import Store
+    s = Store(tmp_path / "m.db")
+    names = app._persistent_names(s, {0: np.array([1, 0, 0, 0], dtype=np.float32)}, "對方")
+    assert names == {}                                  # not labelled here -> local 對方N
+    assert list(s.list_speakers()) == []                # nothing written to global 語者庫
+
+
+def test_enroll_meeting_speaker_on_assignment(tmp_path, monkeypatch):
+    import numpy as np
+    import app
+    import diarize
+    from store import Store
+    s = Store(tmp_path / "m.db")
+    mid = s.create_meeting("m", 1.0, "zh-TW")
+    s.add_transcript(mid, "accurate", "system", 0, 3000, "Alice", "hi there")
+    v = np.array([0.1, 0.9, 0.2, 0.0], dtype=np.float32)
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b: v))
+    monkeypatch.setattr(app, "_assemble_track", lambda st, m, t, sr=16000: b"\x01\x02" * (16000 * 3))
+    assert app._enroll_meeting_speaker(s, mid, "system", "Alice") is True
+    assert any(r["name"] == "Alice" for r in s.list_speakers())
+    assert app._enroll_meeting_speaker(s, mid, "system", "Alice") is False   # idempotent

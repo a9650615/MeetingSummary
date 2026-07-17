@@ -400,6 +400,22 @@ class Store:
             "WHERE speaker=? AND end_ms > start_ms + ? "
             "ORDER BY (end_ms - start_ms) DESC LIMIT ?", (name, min_ms, limit)).fetchall()
 
+    def meeting_speaker_spans(self, meeting_id, name, track=None, min_ms=1000, limit=10):
+        """Longest utterances of a speaker WITHIN one meeting (optionally one track),
+        as (meeting_id, track, start_ms, end_ms). Used to enroll a global voiceprint
+        the moment a human names a meeting-local cluster — the centroid is computed
+        from that person's audio in this meeting only (labels like 對方3 are per-
+        meeting, so they must be scoped or they'd pull other meetings' 對方3)."""
+        q = ("SELECT meeting_id, track, start_ms, end_ms FROM transcripts "
+             "WHERE meeting_id=? AND speaker=? AND end_ms > start_ms + ?")
+        args = [meeting_id, name, min_ms]
+        if track:
+            q += " AND track=?"
+            args.append(track)
+        q += " ORDER BY (end_ms - start_ms) DESC LIMIT ?"
+        args.append(limit)
+        return self.db.execute(q, args).fetchall()
+
     def speaker_utterances(self, name, limit=500):
         """Every utterance by a speaker ACROSS meetings (newest first)."""
         return self.db.execute(
