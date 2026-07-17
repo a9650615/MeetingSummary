@@ -27,8 +27,9 @@ def group_lines(transcripts, prefer="local"):
 
 
 def export_md(meeting, transcripts, summaries):
-    out = [f"# {meeting['title']}", ""]
+    out = [f"# {dict(meeting).get('title','')}", ""]
     for s in summaries:
+        s = dict(s)  # sqlite3.Row has no .get(); normalize
         out += [f"## 摘要（{s.get('kind','')}）", s.get("text") or "", ""]
     out += ["## 逐字稿", ""]
     for line in group_lines(transcripts):
@@ -88,8 +89,8 @@ def render_detail(meeting, transcripts, summaries, tracks, tags):
     audio = "".join(
         f"<div><b>{_e(t)}</b><audio controls preload='none' "
         f"src='/meetings/{m['id']}/audio/{_e(t)}.m4a'></audio></div>" for t in tracks)
-    sums = "".join(f"<h2>摘要（{_e(s.get('kind',''))}）</h2><p>{_e(s.get('text'))}</p>"
-                   for s in summaries)
+    sums = "".join(f"<h2>摘要（{_e(dict(s).get('kind',''))}）</h2>"
+                   f"<p>{_e(dict(s).get('text'))}</p>" for s in summaries)
 
     def _lines_html(prefer):
         return "".join(f"<div class='line'><span class='spk'>{_e(l['speaker'])}</span>"
