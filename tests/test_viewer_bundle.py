@@ -135,3 +135,16 @@ def test_bundle_carries_voiceprints_and_ingest_merges_nondestructively(tmp_path)
     got = {s["name"]: bytes(s["centroid"]) for s in dst.list_speakers()}
     assert "Mia" in got and got["Mia"] == cB             # new name added
     assert got["Scott"] == cOwn                          # existing VM voiceprint untouched
+
+
+def test_bundle_speakers_excludes_unnamed_and_cluster(tmp_path):
+    import numpy as np
+    src = Store(tmp_path / "src.db")
+    mid = src.create_meeting("m", 8.0, "zh-TW")
+    src.add_transcript(mid, "accurate", "mic", 0, 1, "Scott", "hi")
+    c = np.ones(192, dtype=np.float32).tobytes()
+    src.add_speaker("Scott", c)      # 有標記 -> synced
+    src.add_speaker("說話者1", c)     # cluster placeholder -> excluded
+    src.add_speaker("", c)           # empty -> excluded
+    names = {s["name"] for s in bundle.meeting_to_bundle(src, mid, [])["speakers"]}
+    assert names == {"Scott"}

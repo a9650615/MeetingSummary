@@ -3,8 +3,13 @@ imported by both the Mac push plugin and the VM server. No Apple/ASR deps."""
 import base64
 import json
 import os
+import re
 import shutil
 import zipfile
+
+# an unnamed session cluster label (說話者1, 說話者2…) — NOT a real person, so its
+# voiceprint must never be synced to the central 聲紋庫 nor treated as a name.
+_CLUSTER_LABEL = re.compile(r"^說話者\d+$")
 
 
 def _rows(rows):
@@ -14,13 +19,15 @@ def _rows(rows):
 def _bundle_speakers(store):
     """The global voiceprint library (聲紋庫) as portable JSON — name + base64
     centroid (raw np.float32 bytes, 192-d) + count. Pure numeric data, so it
-    ports to the VM's store.db verbatim; matching there is plain numpy cosine."""
+    ports to the VM's store.db verbatim; matching there is plain numpy cosine.
+    Only 有標記 (真名) voiceprints are synced — a session cluster placeholder
+    (說話者N) or an empty name is not a person, so it never goes to the VM."""
     out = []
     for s in store.list_speakers():
-        c = s["centroid"]
-        if not c:
+        c, name = s["centroid"], (s["name"] or "").strip()
+        if not c or not name or _CLUSTER_LABEL.match(name):
             continue
-        out.append({"name": s["name"], "count": s["count"],
+        out.append({"name": name, "count": s["count"],
                     "centroid_b64": base64.b64encode(bytes(c)).decode("ascii")})
     return out
 
