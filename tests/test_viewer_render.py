@@ -65,3 +65,16 @@ def test_render_detail_no_toggle_without_firered():
         [{"profile": "accurate", "track": "mic", "start_ms": 0, "end_ms": 1,
           "speaker": "我", "text": "只有本地"}], [], ["mic"], [])
     assert "只有本地" in html and "tx-toggle" not in html
+
+
+def test_render_detail_has_timeline_sync():
+    from viewer import render
+    html = render.render_detail(
+        {"id": 7, "title": "週會"},
+        [{"profile": "accurate", "track": "mic", "start_ms": 5000, "end_ms": 6000,
+          "speaker": "我", "text": "開始"}],
+        [], ["mic"], [])
+    assert "data-start='5000'" in html and "data-track='mic'" in html
+    assert "id='au-mic'" in html                      # audio addressable per track
+    assert "timeupdate" in html and "classList.add('active')" in html   # highlight
+    assert "0:05" in html                             # human timestamp label

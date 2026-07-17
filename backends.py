@@ -760,10 +760,20 @@ def firered_batch_backend(model="firered", language=None):
         st = rec.create_stream()
         st.accept_waveform(16000, samples)
         rec.decode_stream(st)
-        text = st.result.text.strip()
+        text = _clean_firered(st.result.text)
         return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
 
     return _run
+
+
+def _clean_firered(text):
+    """Strip FireRed v2 CTC special tokens. The CTC vocab includes <sil> (silence)
+    and friends, which sherpa emits verbatim into result.text — a silent span comes
+    back as '<sil><sil><sil>…' and leaks into the transcript. Drop any <...> token
+    and collapse the whitespace it leaves between words. (v1 AED never emitted these.)"""
+    import re  # noqa: PLC0415
+    text = re.sub(r"<[^>]*>", "", text or "")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def qwen3_cpp_batch_backend(model="qwen3-asr-0.6b-q4-k-m", language=None):

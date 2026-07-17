@@ -71,3 +71,12 @@ def test_denoise_file_graceful_without_speech(monkeypatch, tmp_path):
     assert backends.denoise_file(src, raw_pcm=True) == src
 
 
+
+
+def test_clean_firered_strips_sil_and_special_tokens():
+    from backends import _clean_firered
+    assert _clean_firered("我<sil><sil><sil>好") == "我好"
+    assert _clean_firered("<sil><sil>") == ""          # silence-only -> empty (line dropped)
+    assert _clean_firered("要打 BP<sil>的時候") == "要打 BP的時候"
+    assert _clean_firered("hello <sil> world") == "hello world"
+    assert _clean_firered(None) == ""
