@@ -99,24 +99,48 @@ def _copy_tracks(data_dir, mid, track_files):
         shutil.copyfile(path, os.path.join(dst_dir, f"{track}.m4a"))
 
 
+def _local_sig(transcripts):
+    """Identity of the local (non-FireRed) transcript for change detection:
+    (track, start_ms, end_ms, text) per row, sorted. Speaker is excluded — a
+    pure rename is handled in place, not treated as a transcript replacement."""
+    return sorted((t["track"], t["start_ms"], t["end_ms"], t["text"])
+                  for t in transcripts
+                  if t["profile"] not in ("firered", "firered_staging"))
+
+
+def _replace_transcript(store, mid, bundle_dict):
+    """The Mac transcript text changed (re-transcribe / edits) — swap it in and
+    drop the now-stale FireRed correction so it re-runs against the new text."""
+    store.db.execute(
+        "DELETE FROM transcripts WHERE meeting_id=? "
+        "AND profile NOT IN ('firered','firered_staging')", (mid,))
+    store.db.commit()
+    store.clear_transcripts(mid, profile="firered")
+    store.clear_transcripts(mid, profile="firered_staging")
+    for t in bundle_dict.get("transcripts", []):
+        store.add_transcript(mid, t["profile"], t["track"], t["start_ms"],
+                             t["end_ms"], t["speaker"], t["text"])
+
+
 def ingest_bundle(store, data_dir, bundle_dict, track_files):
-    """Insert or top-up a bundle, keyed by created_at. Returns (mid, is_new).
+    """Insert or top-up a bundle, keyed by created_at. Returns
+    (mid, is_new, retranscribe) — retranscribe True means the FireRed pass must
+    (re-)run (a new meeting, or a top-up whose transcript text changed).
 
-    NEW meeting (unseen created_at) -> full insert (segments + transcripts +
-    summaries + tracks).
+    NEW meeting -> full insert.
 
-    EXISTING meeting -> top-up: refresh the non-transcript info the user may add
-    after the first push (title, notes, status, summaries, tracks) but PRESERVE
-    the transcripts, including any FireRed correction rows / progress. Summaries
-    are replaced only when the bundle actually carries some (an early push before
-    the summary exists must not wipe a later one). The transcript is owned by the
-    first push + the VM's FireRed pass; a top-up never touches it."""
+    EXISTING meeting -> top-up: refresh title/notes/status/summaries/tracks +
+    voiceprint library. Transcript handling:
+      - text UNCHANGED -> preserve it (and any FireRed rows/progress); a pure
+        speaker rename is applied in place.
+      - text CHANGED (re-transcribe/edit on the Mac) -> replace the local
+        transcript and drop the stale FireRed so it re-runs on the new text."""
     m = bundle_dict["meeting"]
     created_at = m["created_at"]
     existing = next((e for e in store.list_meetings()
                      if e["created_at"] == created_at), None)
 
-    if existing is not None:  # top-up: metadata/summary/tracks only
+    if existing is not None:  # top-up
         mid = existing["id"]
         store.update_title(mid, m.get("title") or existing["title"])
         if m.get("notes"):
@@ -129,26 +153,30 @@ def ingest_bundle(store, data_dir, bundle_dict, track_files):
             for s in bundle_dict["summaries"]:
                 store.add_summary(mid, s["kind"], s["lang"], s["text"],
                                   s["model"], s["created_at"])
-        # sync speaker labels (人員命名 the user did on the Mac after the first
-        # push). Speakers live on transcript rows, but a top-up must NOT rewrite
-        # transcript text (preserving FireRed). So match rows by (track, start_ms,
-        # end_ms) and update ONLY the speaker — this propagates a rename to both
-        # the local rows AND the FireRed rows (which inherited the same span).
-        spk = {(t["track"], t["start_ms"], t["end_ms"]): t["speaker"]
-               for t in bundle_dict.get("transcripts", [])}
-        if spk:
-            changed = False
-            for r in store.list_transcripts(mid):
-                key = (r["track"], r["start_ms"], r["end_ms"])
-                if key in spk and spk[key] != r["speaker"]:
-                    store.db.execute("UPDATE transcripts SET speaker=? WHERE id=?",
-                                     (spk[key], r["id"]))
-                    changed = True
-            if changed:
-                store.db.commit()
+
+        retranscribe = bool(bundle_dict.get("transcripts")) and \
+            _local_sig(bundle_dict["transcripts"]) != \
+            _local_sig(_rows(store.list_transcripts(mid)))
+        if retranscribe:
+            _replace_transcript(store, mid, bundle_dict)
+        else:
+            # text same -> only sync speaker renames in place (never touch text),
+            # keyed by (track, start_ms, end_ms); propagates to local + FireRed rows.
+            spk = {(t["track"], t["start_ms"], t["end_ms"]): t["speaker"]
+                   for t in bundle_dict.get("transcripts", [])}
+            if spk:
+                changed = False
+                for r in store.list_transcripts(mid):
+                    key = (r["track"], r["start_ms"], r["end_ms"])
+                    if key in spk and spk[key] != r["speaker"]:
+                        store.db.execute("UPDATE transcripts SET speaker=? WHERE id=?",
+                                         (spk[key], r["id"]))
+                        changed = True
+                if changed:
+                    store.db.commit()
         _sync_speakers(store, bundle_dict)
         _copy_tracks(data_dir, mid, track_files)
-        return mid, False
+        return mid, False, retranscribe
 
     mid = store.create_meeting(m["title"], created_at, m["lang"])
     if m.get("notes"):
@@ -166,4 +194,4 @@ def ingest_bundle(store, data_dir, bundle_dict, track_files):
                           s["model"], s["created_at"])
     _sync_speakers(store, bundle_dict)
     _copy_tracks(data_dir, mid, track_files)
-    return mid, True
+    return mid, True, True

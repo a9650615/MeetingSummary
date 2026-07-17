@@ -64,14 +64,14 @@ def build_server(db_path=None, data_dir=None):
                 f.write(raw)
             try:
                 bd, tracks = bundle.read_bundle_zip(zp, os.path.join(td, "x"))
-                mid, is_new = bundle.ingest_bundle(store, data, bd, tracks)
+                mid, is_new, retranscribe = bundle.ingest_bundle(store, data, bd, tracks)
             except (zipfile.BadZipFile, KeyError, ValueError) as e:
                 raise HTTPException(400, f"bad bundle: {e}")
-        # Only a NEW meeting needs FireRed; a top-up (metadata/summary only) must
-        # not re-run the ~20-30min/hr correction over an unchanged transcript.
-        if is_new and app.state.on_ingest:
+        # Run FireRed for a new meeting OR a top-up whose transcript text changed;
+        # a metadata/summary/speaker-only top-up must NOT re-run the slow pass.
+        if (is_new or retranscribe) and app.state.on_ingest:
             app.state.on_ingest(mid)
-        return {"mid": mid, "is_new": is_new}
+        return {"mid": mid, "is_new": is_new, "retranscribe": retranscribe}
 
     return app
 
