@@ -331,9 +331,14 @@ class Store:
         cur = self.db.execute("UPDATE transcripts SET speaker=? WHERE speaker=?",
                               (new, old))
         self.db.execute("UPDATE speakers SET name=? WHERE name=?", (new, old))
-        # keep nonmatch pairs pointing at the new name (else stale rows linger)
-        self.db.execute("UPDATE speaker_nonmatches SET a=? WHERE a=?", (new, old))
-        self.db.execute("UPDATE speaker_nonmatches SET b=? WHERE b=?", (new, old))
+        # keep nonmatch pairs pointing at the new name (else stale rows linger).
+        # OR IGNORE: if the renamed pair already exists (e.g. merging old->new when
+        # (new,X) is already recorded) the UPDATE would hit the UNIQUE(a,b) and abort
+        # the whole reconcile — skip it instead, then drop the now-redundant old rows
+        # and any self-pair (a==b) the rename produced.
+        self.db.execute("UPDATE OR IGNORE speaker_nonmatches SET a=? WHERE a=?", (new, old))
+        self.db.execute("UPDATE OR IGNORE speaker_nonmatches SET b=? WHERE b=?", (new, old))
+        self.db.execute("DELETE FROM speaker_nonmatches WHERE a=? OR b=? OR a=b", (old, old))
         self.db.commit()
         return cur.rowcount
 
