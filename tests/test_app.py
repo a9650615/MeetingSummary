@@ -244,11 +244,12 @@ def test_speaker_suggestions_route(tmp_path):
     c, store = make_client(tmp_path)
     mid = store.create_meeting(title="m", created_at=0.0, lang="zh-TW")
     store.add_speaker("A", struct.pack("2f", 1.0, 0.0))
-    store.add_speaker("B", struct.pack("2f", 0.95, 0.31))  # near-duplicate voice
+    store.add_speaker("對方5", struct.pack("2f", 0.95, 0.31))  # unnamed cluster ~ A
     store.add_transcript(mid, "accurate", "mic", 0, 2000, "A", "hi")  # playable samples
-    store.add_transcript(mid, "accurate", "mic", 0, 2000, "B", "yo")
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "對方5", "yo")
     pairs = c.get("/speakers/suggestions").json()["pairs"]
-    assert pairs and pairs[0]["a"] == "A" and pairs[0]["b"] == "B" and pairs[0]["sim"] > 0.8
+    names = {pairs[0]["a"], pairs[0]["b"]}
+    assert pairs and names == {"A", "對方5"} and pairs[0]["sim"] > 0.8
 
 
 def test_persist_speakers_toggle_route(tmp_path):
@@ -468,15 +469,17 @@ def test_suggestions_skip_speakers_without_audio_sample(tmp_path):
     client, store = make_client(tmp_path)
     mid = store.create_meeting(title="m", created_at=0.0, lang="zh-TW")
     v = np.array([1, 0, 0], dtype=np.float32).tobytes()  # identical -> cos sim 1.0
-    for nm in ("Alice", "Bob", "Ghost"):
+    # only 未命名群<->真名 is a valid suggestion now (two named people are never
+    # compared), so pair a name with a placeholder cluster.
+    for nm in ("Alice", "對方5", "對方9"):
         store.add_speaker(nm, v)
     store.add_transcript(mid, "accurate", "mic", 0, 2000, "Alice", "hi")
-    store.add_transcript(mid, "accurate", "mic", 0, 2000, "Bob", "yo")
-    store.add_transcript(mid, "accurate", "mic", 0, 300, "Ghost", "x")  # <800ms = no sample
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "對方5", "yo")
+    store.add_transcript(mid, "accurate", "mic", 0, 300, "對方9", "x")  # <800ms = no sample
     pairs = client.get("/speakers/suggestions").json()["pairs"]
     names = {n for p in pairs for n in (p["a"], p["b"])}
-    assert "Ghost" not in names
-    assert {"Alice", "Bob"} <= names
+    assert "對方9" not in names
+    assert {"Alice", "對方5"} <= names
 
 
 def test_nonmatch_dismisses_suggestion(tmp_path):
@@ -485,11 +488,11 @@ def test_nonmatch_dismisses_suggestion(tmp_path):
     c, store = make_client(tmp_path)
     mid = store.create_meeting("m", 0.0, "zh-TW")
     store.add_speaker("Alice", struct.pack("2f", 1.0, 0.0))
-    store.add_speaker("Bob", struct.pack("2f", 0.95, 0.31))
+    store.add_speaker("對方5", struct.pack("2f", 0.95, 0.31))   # unnamed cluster ~ Alice
     store.add_transcript(mid, "accurate", "mic", 0, 2000, "Alice", "hi")
-    store.add_transcript(mid, "accurate", "mic", 0, 2000, "Bob", "yo")
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "對方5", "yo")
     assert c.get("/speakers/suggestions").json()["pairs"]  # suggested first
-    c.post("/speakers/nonmatch", json={"keep": "Bob", "drop": "Alice"})  # any order
+    c.post("/speakers/nonmatch", json={"keep": "對方5", "drop": "Alice"})  # any order
     assert c.get("/speakers/suggestions").json()["pairs"] == []  # gone
 
 

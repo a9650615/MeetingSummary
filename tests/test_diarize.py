@@ -399,8 +399,9 @@ def test_reconcile_speakers_merges_same_name_folds_close_placeholder_and_purges_
     assert merge_map.get(1) == {2, 4}          # Jimmy's own row + the close placeholder
     assert 3 not in {i for ids in merge_map.values() for i in ids}   # Ann untouched
     assert 3 not in merge_map                                        # Ann never a merge target either
-    assert plan["purge"] == [5]                # only the never-reinforced, unmatched placeholder
-    assert 6 not in plan["purge"]               # reinforced placeholder survives untouched
+    # global holds only human-named people now: 4 was salvaged into Jimmy (pass 2);
+    # every OTHER leftover placeholder is purged, reinforced or not.
+    assert set(plan["purge"]) == {5, 6}
 
 
 def test_reconcile_merges_two_placeholders_of_same_unknown_person():
@@ -422,8 +423,9 @@ def test_reconcile_merges_two_placeholders_of_same_unknown_person():
     plan = diarize.reconcile_speakers(speakers, merge_threshold=0.75)
     merge_map = {keep: set(drop) for keep, drop in plan["merge"]}
     assert merge_map.get(1) == {2}       # 對方34 folded into higher-count 對方12
-    assert plan["purge"] == []           # nothing was a lone one-shot
-    assert 3 not in {i for ids in merge_map.values() for i in ids}
+    # then every leftover placeholder purged (global = named-only): the merge-keep
+    # 對方12 and the lone 我7 both go.
+    assert set(plan["purge"]) == {1, 3}
 
 
 def test_live_speaker_labeler_continuity_keeps_last_speaker_on_noisy_utterance():

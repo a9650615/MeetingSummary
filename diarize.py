@@ -520,8 +520,13 @@ def reconcile_speakers(speakers, *, merge_threshold=0.75, cohesion=0.45):
                     merges[keep].append(did)
                     consumed.add(did)
 
+    # Purge EVERY remaining placeholder. The global 語者庫 holds only human-named
+    # people now — an unrecognized voice is never enrolled (see app._persistent_names),
+    # it stays a per-meeting 對方N. Pass 2 already folded placeholders close to a named
+    # person into that name (salvaging the voiceprint); whatever's left is an unnamed
+    # cluster that shouldn't live in the global库 at all. (Was: only count<=1 noise.)
     purge = [r["id"] for r in rows
-             if r["id"] not in consumed and _is_placeholder(r["name"]) and (r["count"] or 1) <= 1]
+             if r["id"] not in consumed and _is_placeholder(r["name"])]
 
     return {"merge": [(keep, drops) for keep, drops in merges.items()], "purge": purge}
 
