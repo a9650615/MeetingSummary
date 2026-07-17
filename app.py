@@ -1889,15 +1889,17 @@ def _apply_speaker_split(store, name, new_name):
 
 
 def _enroll_meeting_speaker(store, mid, track, name):
-    """The 'assignment enrolls' half of the model: unrecognized voices stay
-    meeting-local (對方N), and a HUMAN naming one is what writes a global voiceprint —
-    computed from that person's audio in THIS meeting. Skips if `name` is already a
-    known global speaker (no dup rows) or there's too little audio. Best-effort;
-    returns True if a voiceprint was added."""
+    """Assignment enrolls AND learns-from-correction: compute `name`'s voiceprint from
+    their audio in THIS meeting, then either enroll it (name new to the 語者庫) or
+    REINFORCE the existing voiceprint (count-weighted nudge) so a manual 命名/抽離
+    teaches the system — future meetings recognize this voice as `name`, avoiding the
+    mistake you just fixed. Nudge (not a new row) keeps the库 un-fragmented. Best-effort;
+    returns True if it enrolled or reinforced."""
     import numpy as np  # noqa: PLC0415
     import diarize as diar  # noqa: PLC0415
-    if any(s["name"] == name for s in store.list_speakers()):
-        return False  # already in the 語者庫 -> future meetings already recognize it
+
+    def _unit(x):
+        return x / (np.linalg.norm(x) + 1e-9)
     ext = diar.embedding_extractor()
     cache, embs = {}, []
     for s in store.meeting_speaker_spans(mid, name, track=track):
@@ -1912,11 +1914,19 @@ def _enroll_meeting_speaker(store, mid, track, name):
         clip = pcm[a:b]
         if len(clip) < 16000:   # < 0.5s
             continue
-        embs.append(np.asarray(ext(clip), dtype=np.float32))
+        embs.append(_unit(np.asarray(ext(clip), dtype=np.float32)))
     if not embs:
         return False
-    v = np.mean([e / (np.linalg.norm(e) + 1e-9) for e in embs], axis=0)
-    store.add_speaker(name, (v / (np.linalg.norm(v) + 1e-9)).astype(np.float32).tobytes())
+    add = np.mean(embs, axis=0) * len(embs)   # this meeting's contribution, weighted by #clips
+    existing = [r for r in store.list_speakers() if r["name"] == name and r["centroid"]]
+    if existing:  # LEARN: count-weighted nudge the strongest row toward the corrected audio
+        r = max(existing, key=lambda x: x["count"] or 1)
+        cnt = r["count"] or 1
+        cen = np.frombuffer(r["centroid"], dtype=np.float32).astype(np.float64) * cnt + add
+        store.update_speaker_centroid(r["id"], _unit(cen).astype(np.float32).tobytes(),
+                                      cnt + len(embs))
+    else:         # first time this name is seen -> enroll
+        store.add_speaker(name, _unit(add).astype(np.float32).tobytes())
     return True
 
 

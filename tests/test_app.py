@@ -662,7 +662,9 @@ def test_enroll_meeting_speaker_on_assignment(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "_assemble_track", lambda st, m, t, sr=16000: b"\x01\x02" * (16000 * 3))
     assert app._enroll_meeting_speaker(s, mid, "system", "Alice") is True
     assert any(r["name"] == "Alice" for r in s.list_speakers())
-    assert app._enroll_meeting_speaker(s, mid, "system", "Alice") is False   # idempotent
+    # naming again REINFORCES (learns) the existing voiceprint — no dup row, no skip
+    assert app._enroll_meeting_speaker(s, mid, "system", "Alice") is True
+    assert sum(1 for r in s.list_speakers() if r["name"] == "Alice") == 1
 
 
 def test_set_line_speaker_reassigns_one_line(tmp_path, monkeypatch):
