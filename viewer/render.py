@@ -153,7 +153,10 @@ def render_detail(meeting, transcripts, summaries, tracks, tags):
     else:
         tx = f"<h2>逐字稿</h2><div id='tx-local'>{_lines_html('local')}</div>"
 
+    tags_html = ("".join(f"<span class='badge'>#{_e(t)}</span>" for t in (tags or []))
+                 and f"<p>{''.join(f'<span class=badge>#{_e(t)}</span> ' for t in tags)}</p>")
     body = (f"<p><a href='/'>← 全部</a></p><h1>{_e(m.get('title') or '未命名')}{progress}</h1>"
+            f"{tags_html or ''}"
             f"<p><a href='/meetings/{m['id']}/export'>下載逐字稿 (.md)</a></p>"
             f"{audio}{sums}{tx}{_TIMELINE_JS}")
     return _page(m.get("title") or "會議", body)

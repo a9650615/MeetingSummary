@@ -186,3 +186,22 @@ def test_topup_same_transcript_no_retranscribe(tmp_path):
     _, new2, retr2 = bundle.ingest_bundle(dst, str(tmp_path / "d"), b, {})
     assert new2 is False and retr2 is False                       # unchanged -> no re-run
     assert [r["text"] for r in dst.list_transcripts(mid) if r["profile"] == "firered"] == ["校正"]
+
+
+def test_bundle_carries_tags_and_ingest_syncs(tmp_path):
+    src = Store(tmp_path / "src.db")
+    mid = src.create_meeting("m", 21.0, "zh-TW")
+    src.add_transcript(mid, "accurate", "mic", 0, 1, "我", "x")
+    src.add_tag(mid, "客戶"); src.add_tag(mid, "1on1")
+    b = bundle.meeting_to_bundle(src, mid, [])
+    assert set(b["tags"]) == {"客戶", "1on1"}
+
+    dst = Store(tmp_path / "dst.db")
+    dmid, _, _ = bundle.ingest_bundle(dst, str(tmp_path / "d"), b, {})
+    assert set(dst.tags_for(dmid)) == {"客戶", "1on1"}          # new -> tags added
+
+    # re-push after dropping 1on1, adding 產品 on the Mac
+    src.remove_tag(mid, "1on1"); src.add_tag(mid, "產品")
+    b2 = bundle.meeting_to_bundle(src, mid, [])
+    bundle.ingest_bundle(dst, str(tmp_path / "d"), b2, {})
+    assert set(dst.tags_for(dmid)) == {"客戶", "產品"}          # top-up syncs add+remove

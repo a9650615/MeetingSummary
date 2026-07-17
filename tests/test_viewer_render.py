@@ -78,3 +78,11 @@ def test_render_detail_has_timeline_sync():
     assert "id='au-mic'" in html                      # audio addressable per track
     assert "timeupdate" in html and "classList.add('active')" in html   # highlight
     assert "0:05" in html                             # human timestamp label
+
+
+def test_render_detail_shows_tags():
+    html = render.render_detail(
+        {"id": 9, "title": "會", "created_at": 1.0},
+        [{"profile": "accurate", "track": "mic", "start_ms": 0, "end_ms": 1,
+          "speaker": "我", "text": "hi"}], [], ["mic"], ["客戶", "1on1"])
+    assert "#客戶" in html and "#1on1" in html

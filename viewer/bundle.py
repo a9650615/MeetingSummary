@@ -62,6 +62,7 @@ def meeting_to_bundle(store, mid, track_names):
                        "model": s["model"], "created_at": s["created_at"]}
                       for s in store.list_summaries(mid)],
         "tracks": list(track_names),
+        "tags": store.tags_for(mid),   # meeting 標籤 (#客戶 #1on1…), synced on ingest
         # the whole voiceprint library rides along so the VM stays in sync (central
         # 聲紋庫). Small (192 floats/speaker); merged non-destructively on ingest.
         "speakers": _bundle_speakers(store),
@@ -90,6 +91,17 @@ def read_bundle_zip(zip_path, dest_dir):
         if os.path.exists(p):
             tracks[t] = p
     return bundle_dict, tracks
+
+
+def _sync_tags(store, mid, bundle_dict):
+    """Make the meeting's tags on the VM match the bundle's (add missing, drop
+    removed). Tags are the meeting's own labels, so they mirror the Mac exactly."""
+    want = set(bundle_dict.get("tags") or [])
+    have = set(store.tags_for(mid))
+    for t in have - want:
+        store.remove_tag(mid, t)
+    for t in want - have:
+        store.add_tag(mid, t)
 
 
 def _copy_tracks(data_dir, mid, track_files):
@@ -175,6 +187,7 @@ def ingest_bundle(store, data_dir, bundle_dict, track_files):
                 if changed:
                     store.db.commit()
         _sync_speakers(store, bundle_dict)
+        _sync_tags(store, mid, bundle_dict)
         _copy_tracks(data_dir, mid, track_files)
         return mid, False, retranscribe
 
@@ -193,5 +206,6 @@ def ingest_bundle(store, data_dir, bundle_dict, track_files):
         store.add_summary(mid, s["kind"], s["lang"], s["text"],
                           s["model"], s["created_at"])
     _sync_speakers(store, bundle_dict)
+    _sync_tags(store, mid, bundle_dict)
     _copy_tracks(data_dir, mid, track_files)
     return mid, True, True
