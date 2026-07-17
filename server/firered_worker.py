@@ -13,6 +13,8 @@ import subprocess
 import threading
 import traceback
 
+import zhtw  # simplified->traditional (台灣) normalization; opencc, no-op if absent
+
 
 def decode_span_pcm(m4a_path, start_ms, end_ms, ffmpeg="ffmpeg"):
     dur = max(0.0, (end_ms - start_ms) / 1000.0)
@@ -132,7 +134,9 @@ def correct_meeting(store, data_dir, mid, recognize, *, decode=None,
                     t = (recognize(pcm) or "").strip()
                     if t:
                         parts.append(t)
-            text = "".join(parts)
+            # FireRed emits inconsistent 簡/繁 zh — normalize to Traditional (台灣)
+            # with the same OpenCC pass the Mac ASR path uses (no-op if unavailable).
+            text = zhtw.to_tw("".join(parts))
         # stage even an empty result so the row counts as done and won't be retried
         store.add_transcript(mid, "firered_staging", r["track"], r["start_ms"],
                              r["end_ms"], r["speaker"], text)

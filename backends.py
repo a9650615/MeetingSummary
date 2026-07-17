@@ -688,18 +688,21 @@ def make_batch_backend(model, language=None):
 import os as _os
 
 _MODELS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "models")
-# FireRedASR-AED-L (int8) from the sherpa-onnx model zoo (public, no auth). SOTA zh
-# CER but CPU-only — re-recognition (offline batch) only, never live.
+# FireRedASR-v2 CTC int8 from the sherpa-onnx model zoo (public, no auth). CPU-only
+# offline re-recognition. CTC (single model.onnx, RTF ~0.17 @1 thread) — ~10x faster
+# than the v1 AED encoder/decoder (RTF ~2), so a 1-core box (the remote server)
+# keeps up. ~500MB on disk.
 _FIRERED_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-                "asr-models/sherpa-onnx-fire-red-asr-large-zh_en-2025-02-16.tar.bz2")
-_FIRERED_DIR = _os.path.join(_MODELS, "sherpa-onnx-fire-red-asr-large-zh_en-2025-02-16")
+                "asr-models/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.tar.bz2")
+_FIRERED_DIR = _os.path.join(_MODELS, "sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25")
 _FIRERED = {}  # lazy recognizer cache
 
 
 def _ensure_firered(progress=None):
-    """(encoder, decoder, tokens) paths — download+extract the ~1GB model on first
-    use so a fresh machine needs no manual setup. Globs the extracted dir so a
-    renamed onnx (int8 vs fp32) still resolves."""
+    """(model, tokens) paths — download+extract the ~500MB CTC model on first use so
+    a fresh machine needs no manual setup. CTC is a SINGLE model.onnx (not the AED
+    encoder/decoder pair). Globs so int8/fp32 naming still resolves. The tarball is
+    named after the model dir so a switch of model version never reuses a stale cache."""
     import glob
     import tarfile
     import urllib.request
@@ -708,16 +711,15 @@ def _ensure_firered(progress=None):
         # prefer the int8 quant (smaller/faster) when both are present
         return next((p for p in paths if "int8" in p), paths[0]) if paths else None
 
-    enc = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "encoder*.onnx")))
-    dec = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "decoder*.onnx")))
     tok = _os.path.join(_FIRERED_DIR, "tokens.txt")
-    if enc and dec and _os.path.exists(tok):
-        return enc, dec, tok
+    mdl = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "model*.onnx")))
+    if mdl and _os.path.exists(tok):
+        return mdl, tok
     _os.makedirs(_MODELS, exist_ok=True)
-    tar = _os.path.join(_MODELS, "firered.tar.bz2")
+    tar = _FIRERED_DIR + ".tar.bz2"  # unique per model version -> no stale-cache reuse
     if not _os.path.exists(tar):
         if progress:
-            progress("下載 FireRedASR 模型（約 1GB，首次較久）…")
+            progress("下載 FireRedASR-v2 CTC 模型（約 500MB，首次較久）…")
         tmp = tar + ".part"
         urllib.request.urlretrieve(_FIRERED_URL, tmp)
         _os.replace(tmp, tar)
@@ -725,19 +727,18 @@ def _ensure_firered(progress=None):
         progress("解壓 FireRedASR…")
     with tarfile.open(tar) as tf:
         tf.extractall(_MODELS)
-    enc = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "encoder*.onnx")))
-    dec = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "decoder*.onnx")))
-    if not (enc and dec and _os.path.exists(tok)):
-        raise RuntimeError("FireRedASR model files missing after extract")
-    return enc, dec, tok
+    mdl = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "model*.onnx")))
+    if not (mdl and _os.path.exists(tok)):
+        raise RuntimeError("FireRedASR CTC model files missing after extract")
+    return mdl, tok
 
 
 def _firered_recognizer(progress=None):
     if "rec" not in _FIRERED:
         import sherpa_onnx  # noqa: PLC0415
-        enc, dec, tok = _ensure_firered(progress)
-        _FIRERED["rec"] = sherpa_onnx.OfflineRecognizer.from_fire_red_asr(
-            encoder=enc, decoder=dec, tokens=tok,
+        mdl, tok = _ensure_firered(progress)
+        _FIRERED["rec"] = sherpa_onnx.OfflineRecognizer.from_fire_red_asr_ctc(
+            model=mdl, tokens=tok,
             # never oversubscribe: 1-core boxes get 1 thread, not 2 fighting for it
             num_threads=max(1, (_os.cpu_count() or 4) - 2))
     return _FIRERED["rec"]

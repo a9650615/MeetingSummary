@@ -19,7 +19,7 @@ echo "==> rsync (store.py + backends.py + viewer/ + server/) -> $VM_IP:$REMOTE_D
 rsync -az --delete -e "ssh -F $SSH_CFG" \
   --exclude '__pycache__' --exclude '*.pyc' \
   --exclude data --exclude models \
-  "$REPO_ROOT/store.py" "$REPO_ROOT/backends.py" "$REPO_ROOT/viewer" "$REPO_ROOT/server" \
+  "$REPO_ROOT/store.py" "$REPO_ROOT/backends.py" "$REPO_ROOT/zhtw.py" "$REPO_ROOT/viewer" "$REPO_ROOT/server" \
   "$VM_IP:$REMOTE_DIR/"
 
 echo "==> ensure data/model dirs owned by container uid 1001"

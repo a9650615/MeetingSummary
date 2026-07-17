@@ -11,6 +11,7 @@ COPY store.py ./store.py
 # fix; only os is imported at load time. Without this the worker's `import backends`
 # raises ModuleNotFoundError and every correction pass fails.
 COPY backends.py ./backends.py
+COPY zhtw.py ./zhtw.py
 COPY viewer ./viewer
 COPY server ./server
 RUN useradd -u 1001 -m appuser && mkdir -p /app/data /app/models \

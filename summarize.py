@@ -94,7 +94,10 @@ def correct_transcript(text, *, roster, lang, backend, max_chars=24000):
             out = backend(build_correction_prompt(t, roster=roster, lang=lang)).strip()
         except Exception:
             return t
-        return _post(out, lang) or t
+        # dedup=False: this is per-line transcript correction, not summary output.
+        # Two speakers genuinely repeating a short line ("我: 好" / "對方: 好") are
+        # real content — collapsing them would violate the prompt's no-delete rule.
+        return _post(out, lang, dedup=False) or t
 
     if len(text) <= max_chars:
         return _one(text)
@@ -117,10 +120,13 @@ def _dedup_lines(out):
     return "\n".join(out_lines)
 
 
-def _post(out, lang):
+def _post(out, lang, dedup=True):
     """LLM often emits 簡體 even for a zh-TW meeting -> normalize to 繁體(台灣).
-    Also collapse degenerate repeated lines (a loop the penalty didn't catch)."""
-    out = _dedup_lines(out)
+    dedup (summary output only) collapses degenerate repeated lines (a loop the
+    penalty didn't catch); the transcript-correction path passes dedup=False so
+    real repeated utterances aren't deleted."""
+    if dedup:
+        out = _dedup_lines(out)
     if (lang or "").lower().startswith("zh"):
         import zhtw  # noqa: PLC0415
         return zhtw.to_tw(out)
