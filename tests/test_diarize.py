@@ -481,3 +481,17 @@ def test_two_way_split_needs_min_side():
     embs = [a, a, a, b]                     # b is a lone outlier -> not a 2nd person
     labels, _ = diarize.two_way_split(embs, min_side=2)
     assert labels is None
+
+
+def test_similar_pairs_skips_two_named_people():
+    import struct
+    from diarize import similar_speaker_pairs
+    Row = lambda i, n, x, y: {"id": i, "name": n, "centroid": struct.pack("2f", x, y)}
+    # two DIFFERENT human-named people, even highly similar, must NOT be suggested —
+    # the user already asserted they differ by naming them differently.
+    rows = [Row(1, "Jimmy", 1.0, 0.0), Row(2, "Frank", 0.99, 0.1),
+            Row(3, "對方5", 0.98, 0.14)]
+    pairs = similar_speaker_pairs(rows, threshold=0.3)
+    names = {frozenset((p["a"], p["b"])) for p in pairs}
+    assert frozenset(("Jimmy", "Frank")) not in names       # two named -> skipped
+    assert frozenset(("Jimmy", "對方5")) in names            # named<->unnamed -> kept

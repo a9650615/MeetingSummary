@@ -874,6 +874,10 @@ def similar_speaker_pairs(rows, threshold=0.5, dismissed=()):
                 continue  # same name = same person; dedupe name pairs
             if _is_placeholder(a) and _is_placeholder(b):
                 continue  # two un-named speakers -> can't judge, not a useful suggestion
+            if not _is_placeholder(a) and not _is_placeholder(b):
+                continue  # two DIFFERENT human-named people -> the user already asserted
+                #           they differ by naming them; never suggest merging Jimmy<->Frank.
+                #           (A true typo-dup like Scoot/Scott: fix with the manual merge.)
             if frozenset((a, b)) in dismissed:
                 continue  # user said 'not the same person'
             sim = float(np.dot(vecs[i][2], vecs[j][2]))
