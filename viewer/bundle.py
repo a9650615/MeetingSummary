@@ -1,5 +1,6 @@
 """Meeting <-> portable bundle (zip). The single source of the bundle schema,
 imported by both the Mac push plugin and the VM server. No Apple/ASR deps."""
+import base64
 import json
 import os
 import shutil
@@ -8,6 +9,32 @@ import zipfile
 
 def _rows(rows):
     return [dict(r) for r in rows]
+
+
+def _bundle_speakers(store):
+    """The global voiceprint library (聲紋庫) as portable JSON — name + base64
+    centroid (raw np.float32 bytes, 192-d) + count. Pure numeric data, so it
+    ports to the VM's store.db verbatim; matching there is plain numpy cosine."""
+    out = []
+    for s in store.list_speakers():
+        c = s["centroid"]
+        if not c:
+            continue
+        out.append({"name": s["name"], "count": s["count"],
+                    "centroid_b64": base64.b64encode(bytes(c)).decode("ascii")})
+    return out
+
+
+def _sync_speakers(store, bundle_dict):
+    """Merge the bundle's voiceprint library into the store, NON-DESTRUCTIVELY:
+    add only names the store doesn't already have. Never overwrites a voiceprint
+    the VM already holds (a name a human curated locally on the VM stays put)."""
+    have = {s["name"] for s in store.list_speakers()}
+    for sp in bundle_dict.get("speakers", []):
+        name, b64 = sp.get("name"), sp.get("centroid_b64")
+        if name and b64 and name not in have:
+            store.add_speaker(name, base64.b64decode(b64))
+            have.add(name)
 
 
 def meeting_to_bundle(store, mid, track_names):
@@ -28,6 +55,9 @@ def meeting_to_bundle(store, mid, track_names):
                        "model": s["model"], "created_at": s["created_at"]}
                       for s in store.list_summaries(mid)],
         "tracks": list(track_names),
+        # the whole voiceprint library rides along so the VM stays in sync (central
+        # 聲紋庫). Small (192 floats/speaker); merged non-destructively on ingest.
+        "speakers": _bundle_speakers(store),
     }
 
 
@@ -109,6 +139,7 @@ def ingest_bundle(store, data_dir, bundle_dict, track_files):
                     changed = True
             if changed:
                 store.db.commit()
+        _sync_speakers(store, bundle_dict)
         _copy_tracks(data_dir, mid, track_files)
         return mid, False
 
@@ -126,5 +157,6 @@ def ingest_bundle(store, data_dir, bundle_dict, track_files):
     for s in bundle_dict.get("summaries", []):
         store.add_summary(mid, s["kind"], s["lang"], s["text"],
                           s["model"], s["created_at"])
+    _sync_speakers(store, bundle_dict)
     _copy_tracks(data_dir, mid, track_files)
     return mid, True

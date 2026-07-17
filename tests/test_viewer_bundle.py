@@ -109,3 +109,29 @@ def test_topup_syncs_speaker_names_without_touching_text(tmp_path):
     assert rows["firered"]["speaker"] == "Scott"         # rename propagated to FireRed
     assert rows["accurate"]["text"] == "哈囉"             # text untouched
     assert rows["firered"]["text"] == "哈囉（校正）"       # FireRed text preserved
+
+
+def test_bundle_carries_voiceprints_and_ingest_merges_nondestructively(tmp_path):
+    import numpy as np
+    src = Store(tmp_path / "src.db")
+    mid = src.create_meeting("m", 7.0, "zh-TW")
+    src.add_transcript(mid, "accurate", "mic", 0, 1, "Scott", "hi")
+    cA = np.ones(192, dtype=np.float32).tobytes()
+    cB = (np.ones(192, dtype=np.float32) * 2).tobytes()
+    src.add_speaker("Scott", cA)
+    src.add_speaker("Mia", cB)
+
+    b = bundle.meeting_to_bundle(src, mid, [])
+    names = {s["name"] for s in b["speakers"]}
+    assert names == {"Scott", "Mia"}
+    assert b["speakers"][0]["centroid_b64"]              # base64 present
+
+    dst = Store(tmp_path / "dst.db")
+    # VM already has a curated "Scott" voiceprint that must NOT be clobbered
+    cOwn = (np.ones(192, dtype=np.float32) * 9).tobytes()
+    dst.add_speaker("Scott", cOwn)
+    bundle.ingest_bundle(dst, str(tmp_path / "d"), b, {})
+
+    got = {s["name"]: bytes(s["centroid"]) for s in dst.list_speakers()}
+    assert "Mia" in got and got["Mia"] == cB             # new name added
+    assert got["Scott"] == cOwn                          # existing VM voiceprint untouched
