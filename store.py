@@ -385,6 +385,16 @@ class Store:
             "WHERE speaker=? AND end_ms > start_ms + ? "
             "ORDER BY (end_ms - start_ms) DESC LIMIT 1", (name, min_ms)).fetchone()
 
+    def speaker_long_spans(self, name, min_ms=1000, limit=10):
+        """The longest N utterances (with real duration) for a speaker, as
+        (meeting_id, track, start_ms, end_ms). Longest first — long clips give
+        cleaner speaker embeddings than short noisy ones (used to sample-verify
+        whether a name is actually two people, at bounded audio cost)."""
+        return self.db.execute(
+            "SELECT meeting_id, track, start_ms, end_ms FROM transcripts "
+            "WHERE speaker=? AND end_ms > start_ms + ? "
+            "ORDER BY (end_ms - start_ms) DESC LIMIT ?", (name, min_ms, limit)).fetchall()
+
     def speaker_utterances(self, name, limit=500):
         """Every utterance by a speaker ACROSS meetings (newest first)."""
         return self.db.execute(

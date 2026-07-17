@@ -526,6 +526,84 @@ def reconcile_speakers(speakers, *, merge_threshold=0.75, cohesion=0.45):
     return {"merge": [(keep, drops) for keep, drops in merges.items()], "purge": purge}
 
 
+def split_candidates(speakers, *, cohesion=0.45, min_group=2):
+    """FREE pre-filter (stored centroids only, no audio): named people whose
+    voiceprint rows fall into >=2 separate single-linkage clusters, each with
+    >=min_group rows — a strong hint the same name was given to two DIFFERENT
+    people (two separately reinforced voiceprints that never link at cohesion).
+    High precision, low recall: a name carrying one averaged centroid can't be
+    flagged here (audio sampling via two_way_split is what confirms/finds those).
+    Returns [{"name", "groups": n, "sizes": [big, ...]}]. Read-only."""
+    import numpy as np  # noqa: PLC0415
+    from collections import defaultdict  # noqa: PLC0415
+    byname = defaultdict(list)
+    for r in speakers:
+        if r["centroid"] and not _is_placeholder(r["name"]):
+            v = np.frombuffer(r["centroid"], dtype=np.float32)
+            byname[r["name"]].append(v / (np.linalg.norm(v) + 1e-9))
+    out = []
+    for name, vs in byname.items():
+        n = len(vs)
+        if n < 2 * min_group:
+            continue
+        parent = list(range(n))
+
+        def find(x, parent=parent):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        for i in range(n):
+            for j in range(i + 1, n):
+                if float(vs[i] @ vs[j]) >= cohesion:
+                    parent[find(i)] = find(j)
+        sizes = defaultdict(int)
+        for i in range(n):
+            sizes[find(i)] += 1
+        big = sorted([c for c in sizes.values() if c >= min_group], reverse=True)
+        if len(big) >= 2:
+            out.append({"name": name, "groups": len(big), "sizes": big})
+    return out
+
+
+def two_way_split(embs, *, min_side=2, iters=5):
+    """Split L2-normalized utterance embeddings into TWO voice groups. Used to
+    decide whether one named person's voiceprint is actually two people — run on
+    FRESH per-utterance embeddings (sampled from audio), NOT the stored fragmented
+    centroids: a stored centroid is an average that hides bimodality, and same-person
+    fragments already sit at cosine 0.26-0.47 (measured), overlapping the
+    different-person range, so a split judged off stored centroids would tear one
+    person in two. Fresh long-clip embeddings separate far better.
+
+    Cosine 2-means: seed with the most-distant pair, a few Lloyd passes (k=2
+    converges fast). Returns (labels, sep): labels in {0,1} per input, sep = cosine
+    between the two group centroids (LOW = clearly different voices). Returns
+    (None, sep) when there aren't >=min_side embeddings per side to trust the split
+    (a lone outlier is noise/purge territory, not a second person). Pure vector math."""
+    import numpy as np  # noqa: PLC0415
+    X = np.asarray([e / (np.linalg.norm(e) + 1e-9) for e in embs], dtype=np.float64)
+    n = len(X)
+    if n < 2 * min_side:
+        return None, 1.0
+    sims = X @ X.T
+    i, j = np.unravel_index(int(np.argmin(sims)), sims.shape)  # most-distant pair = seeds
+    ci, cj = X[i].copy(), X[j].copy()
+    labels = np.zeros(n, dtype=int)
+    for _ in range(iters):
+        labels = (X @ cj > X @ ci).astype(int)
+        if labels.min() == labels.max():   # degenerate: all one side
+            break
+        a, b = X[labels == 0], X[labels == 1]
+        ca, cb = a.mean(0), b.mean(0)
+        ci = ca / (np.linalg.norm(ca) + 1e-9)
+        cj = cb / (np.linalg.norm(cb) + 1e-9)
+    sep = float(ci @ cj)
+    n0 = int((labels == 0).sum())
+    if n0 < min_side or n - n0 < min_side:
+        return None, sep
+    return labels.tolist(), sep
+
+
 def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
                          match_threshold=0.62, min_secs=1.2, sample_rate=16000,
                          on_promote=None, continuity_threshold=0.5):

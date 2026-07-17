@@ -249,6 +249,11 @@ def _speakers_page():
             "<span class=hint id=reconcilemsg></span></div>"
             "<p class=hint style='margin:.4em 0 0'>自動合併明顯同一人、清除一次性雜訊。"
             "剩下無法確定的會列在下方「可能是同一人」讓你判斷。</p></div>"
+            "<div class=card id=splitcard style='display:none'>"
+            "<h2 style='margin-top:0;font-size:15px'>可能是不同的人（一個名字兩個聲音）</h2>"
+            "<p class=hint style='margin:0 0 8px'>同一個名字底下疑似混到兩個人。按「檢查」會抽幾句最長的語音重新比對，"
+            "兩群各給一段試聽，你聽完確認再拆。（拆分只影響之後的自動辨識；過去逐字稿請用會議內「重新辨識」修正）</p>"
+            "<div id=splits></div></div>"
             "<div class=card id=sugcard style='display:none'>"
             "<h2 style='margin-top:0;font-size:15px'>可能是同一人</h2>"
             "<p class=hint style='margin:0 0 8px'>系統無法確定、需你判斷的配對（明顯的已由「一鍵重新比對」處理）。</p>"
@@ -298,7 +303,7 @@ async function load(){
     await fetch('/speakers/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:sel.dataset.keep,drop})});load();});
   t.querySelectorAll('[data-act=view]').forEach(b=>b.onclick=()=>view(b.dataset.name));
   t.querySelectorAll('[data-act=play]').forEach(b=>b.onclick=()=>play(b.dataset.name));
-  loadSugs();
+  loadSugs();loadSplits();
 }
 async function loadSugs(){
   const j=await(await fetch('/speakers/suggestions')).json();
@@ -317,6 +322,42 @@ async function loadSugs(){
     await fetch('/speakers/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:b.dataset.keep,drop:b.dataset.drop})});load();});
   document.querySelectorAll('#sugs [data-no-a]').forEach(b=>b.onclick=async()=>{
     await fetch('/speakers/nonmatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:b.dataset.noA,drop:b.dataset.noB})});loadSugs();});
+}
+function playClip(rep){try{if(_au)_au.pause();}catch(e){}
+  _au=new Audio(`/speakers/clip.wav?mid=${rep.meeting_id}&track=${encodeURIComponent(rep.track)}&a=${rep.start_ms}&b=${rep.end_ms}`);
+  _au.play().catch(()=>alert('沒有可試聽的音訊片段'));}
+async function loadSplits(){
+  const j=await(await fetch('/speakers/split-candidates')).json();
+  const cs=j.candidates||[];
+  document.getElementById('splitcard').style.display=cs.length?'block':'none';
+  document.getElementById('splits').innerHTML=cs.map(c=>
+    `<div class=setrow style="gap:6px;margin:4px 0" data-name="${esc(c.name)}"><span>
+     <b>${esc(c.name)}</b> <span class="muted small">${c.groups} 群聲紋 (${c.sizes.join('/')})</span></span>
+     <span class=splitres style="display:flex;gap:6px;align-items:center">
+     <button class=btn data-check="${esc(c.name)}">🔍 檢查是否為兩人</button></span></div>`).join('');
+  document.querySelectorAll('#splits [data-check]').forEach(b=>b.onclick=()=>checkSplit(b.dataset.check,b));
+}
+async function checkSplit(name,btn){
+  const box=btn.closest('.splitres');box.innerHTML='<span class=hint>抽樣比對中…（重算幾句語音）</span>';
+  const r=await(await fetch('/speakers/split-check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})})).json();
+  if(!r.enough){box.innerHTML='<span class=hint>可試聽的語音太少，無法判斷</span>';return;}
+  if(!r.split){box.innerHTML=`<span class=hint>聽起來是同一個人（相似度 ${r.sep}）</span>`;return;}
+  const g=r.groups;
+  box.innerHTML=`<span class="muted small">兩群差異大 (相似度 ${r.sep})</span>
+    <button class=btn data-c=0 title="試聽第一群">🔊 群1(${g[0].size})</button>
+    <button class=btn data-c=1 title="試聽第二群">🔊 群2(${g[1].size})</button>
+    <button class=btn data-do="${esc(name)}">拆開為兩人…</button>`;
+  box.querySelector('[data-c="0"]').onclick=()=>playClip(g[0].rep);
+  box.querySelector('[data-c="1"]').onclick=()=>playClip(g[1].rep);
+  box.querySelector('[data-do]').onclick=async()=>{
+    const nn=prompt(`把「${name}」拆成兩個人。較多發言的那群保留「${name}」，另一群要叫什麼名字？`);
+    if(nn==null||!nn.trim())return;
+    box.innerHTML='<span class=hint>拆分中…</span>';
+    const res=await(await fetch('/speakers/split',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:name,drop:nn.trim()})})).json();
+    if(!res.ok){box.innerHTML=`<span class=hint>${esc(res.error||'拆分失敗')}</span>`;return;}
+    alert(`已拆分：保留「${res.kept}」，新增「${res.new}」`+(res.backup?`\\n已備份，如需還原：${res.backup}`:''));
+    load();
+  };
 }
 async function view(name){
   const j=await(await fetch(`/speakers/${encodeURIComponent(name)}/utterances`)).json();
@@ -339,7 +380,7 @@ document.getElementById('reconcile').onclick=async()=>{
   const m=document.getElementById('reconcilemsg');m.textContent='比對中…';
   const r=await(await fetch('/speakers/reconcile',{method:'POST'})).json();
   m.textContent=`已合併 ${r.merged} 筆、清除 ${r.purged} 筆雜訊`+(r.backup?`（已備份，如需還原：${r.backup}）`:'');
-  load();
+  load();loadSplits();
 };
 loadThr();load();
 """
@@ -1740,6 +1781,108 @@ def _apply_speaker_reconcile(store, plan):
     for pid in plan["purge"]:
         store.delete_speaker(pid)
     return {"merged": merged, "purged": len(plan["purge"])}
+
+
+# --- global voiceprint SPLIT: is one named person actually two? ---
+# Stored centroids can't decide this (same-person fragments sit at cosine 0.26-0.47,
+# overlapping the different-person range), so we sample a bit of AUDIO and re-embed
+# it fresh. Cost is kept small on purpose: only a name's longest clips, capped in
+# count and in how many meeting tracks we decode.
+_SPLIT_K = 8              # utterances embedded per name (longest first = cleaner)
+_SPLIT_MAX_MEETINGS = 3  # cap decoded tracks per check so audio cost stays bounded
+_SPLIT_MIN_MS = 1000
+
+
+def _sample_speaker_embeddings(store, name, ext, sample_rate=16000):
+    """Embed up to _SPLIT_K of a name's longest utterances (bounded to
+    _SPLIT_MAX_MEETINGS distinct meetings). Returns [(span, emb_np)] where span =
+    {meeting_id, track, start_ms, end_ms}. Long clips only + capped count keep the
+    re-embedding cheap; assembled tracks are cached across the sample."""
+    import numpy as np  # noqa: PLC0415
+    spans = store.speaker_long_spans(name, min_ms=_SPLIT_MIN_MS, limit=_SPLIT_K * 4)
+    cache, meetings, out = {}, [], []
+    for s in spans:
+        if s["meeting_id"] not in meetings:
+            if len(meetings) >= _SPLIT_MAX_MEETINGS:
+                continue
+            meetings.append(s["meeting_id"])
+        key = (s["meeting_id"], s["track"])
+        if key not in cache:
+            cache[key] = _assemble_track(store, s["meeting_id"], s["track"], sample_rate)
+        pcm = cache[key]
+        if not pcm:
+            continue
+        a = int(s["start_ms"] / 1000 * sample_rate) * 2
+        b = int(s["end_ms"] / 1000 * sample_rate) * 2
+        clip = pcm[a:b]
+        if len(clip) < sample_rate:   # < 0.5s -> too short to embed cleanly
+            continue
+        out.append(({"meeting_id": s["meeting_id"], "track": s["track"],
+                     "start_ms": s["start_ms"], "end_ms": s["end_ms"]},
+                    np.asarray(ext(clip), dtype=np.float32)))
+        if len(out) >= _SPLIT_K:
+            break
+    return out
+
+
+def _speaker_split_check(store, name, *, sep_threshold=0.5):
+    """Sample a name's audio and decide whether it's two voices. Returns sep, the
+    verdict, and a representative clip span per group so the user can 試聽 and be
+    the final judge (short-utterance embeddings are noisy — the ear beats the
+    threshold). Read-only."""
+    import diarize as diar  # noqa: PLC0415
+    ext = diar.embedding_extractor()
+    samples = _sample_speaker_embeddings(store, name, ext)
+    if len(samples) < 4:
+        return {"name": name, "enough": False}
+    labels, sep = diar.two_way_split([e for _, e in samples], min_side=2)
+    if labels is None:
+        return {"name": name, "enough": True, "split": False, "sep": round(sep, 3)}
+    groups = {0: [], 1: []}
+    for (span, _), lab in zip(samples, labels):
+        groups[lab].append(span)
+
+    def rep(g):
+        return max(g, key=lambda x: x["end_ms"] - x["start_ms"])
+    return {"name": name, "enough": True, "split": sep <= sep_threshold,
+            "sep": round(sep, 3),
+            "groups": [{"size": len(groups[0]), "rep": rep(groups[0])},
+                       {"size": len(groups[1]), "rep": rep(groups[1])}]}
+
+
+def _apply_speaker_split(store, name, new_name):
+    """Split a name's voiceprint in two: re-sample, cluster, and REPLACE its
+    (polluted) stored centroids with two clean ones so future recognition tells
+    the people apart. Snapshots the DB first. Transcripts are NOT relabelled — run
+    detail 重新辨識 for that. The larger group keeps `name`; the other gets
+    `new_name`. Returns a summary dict."""
+    import numpy as np  # noqa: PLC0415
+    import diarize as diar  # noqa: PLC0415
+    new_name = (new_name or "").strip()
+    if not new_name or new_name == name:
+        return {"ok": False, "error": "請輸入另一個名字"}
+    ext = diar.embedding_extractor()
+    samples = _sample_speaker_embeddings(store, name, ext)
+    if len(samples) < 4:
+        return {"ok": False, "error": "樣本不足，無法拆分"}
+    embs = [e for _, e in samples]
+    labels, sep = diar.two_way_split(embs, min_side=2)
+    if labels is None:
+        return {"ok": False, "error": "聽起來是同一個人，未拆分"}
+    backup = _backup_db(store)
+
+    def centroid(idx):
+        v = np.mean([embs[i] for i in range(len(embs)) if labels[i] == idx], axis=0)
+        return (v / (np.linalg.norm(v) + 1e-9)).astype(np.float32).tobytes()
+    n0 = sum(1 for lab in labels if lab == 0)
+    big, small = (0, 1) if n0 >= len(labels) - n0 else (1, 0)
+    for r in store.list_speakers():   # drop the polluted rows for this name
+        if r["name"] == name:
+            store.delete_speaker(r["id"])
+    store.add_speaker(name, centroid(big))
+    store.add_speaker(new_name, centroid(small))
+    return {"ok": True, "sep": round(sep, 3), "kept": name, "new": new_name,
+            "backup": backup}
 
 
 def _is_default_title(t):
@@ -3570,6 +3713,43 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # "不是同一人" — remember the pair so it stops being suggested.
         store.add_speaker_nonmatch(body.keep.strip(), body.drop.strip())
         return {"ok": True}
+
+    @app.get("/speakers/split-candidates")
+    def speaker_split_candidates():
+        # FREE pre-filter: names whose stored voiceprints split into >=2 groups
+        # (same name likely given to two different people). No audio. The audio
+        # check (/speakers/split-check) confirms before anything changes.
+        import diarize as diar  # noqa: PLC0415
+        return {"candidates": diar.split_candidates(store.list_speakers())}
+
+    @app.post("/speakers/split-check")
+    async def speaker_split_check(body: NameIn):
+        # Bounded audio sample -> is this name actually two voices? Read-only.
+        # Threadpool: embedding + track decode are CPU-bound, keep the loop free.
+        return await run_in_threadpool(_speaker_split_check, store, body.name)
+
+    @app.post("/speakers/split")
+    async def speaker_split(body: SpeakerMergeIn):
+        # Apply: replace name's centroids with two clean ones (keep -> body.keep,
+        # new person -> body.drop). Snapshots the DB first (reversible).
+        return await run_in_threadpool(_apply_speaker_split, store, body.keep.strip(),
+                                       body.drop)
+
+    @app.get("/speakers/clip.wav")
+    def speaker_clip(mid: int, track: str, a: int, b: int):
+        # A slice of a meeting track as wav, for 試聽 a split group's representative.
+        import recorder  # noqa: PLC0415
+        pcm = _assemble_track(store, mid, track)
+        if pcm is None:
+            raise HTTPException(404, "no audio")
+        sr = 16000
+        i = int(a / 1000 * sr) * 2
+        j = int(min(b, a + 8000) / 1000 * sr) * 2   # cap 8s
+        clip = pcm[i:max(i + 2, j)]
+        if not clip:
+            raise HTTPException(404, "empty clip")
+        return Response(recorder.pcm_to_wav(clip, sample_rate=sr, channels=1),
+                        media_type="audio/wav")
 
     @app.get("/storage")
     def storage():

@@ -586,3 +586,49 @@ def test_rename_speaker_into_existing_person_backs_up_first(tmp_path):
     r2 = c.post(f"/meetings/{mid}/speaker",
                 json={"old": "李四", "new": "陌生人", "track": "mic"}).json()
     assert r2["merged"] is False and r2["backup"] is None
+
+
+def test_speaker_split_check_and_apply(tmp_path, monkeypatch):
+    # Global voiceprint split: one name is actually two voices. Fake the audio
+    # sampling so no sherpa/audio is needed — feed two clean voice groups.
+    import numpy as np
+    import app
+    import diarize
+    store = Store(tmp_path / "m.db")
+    rng = np.random.default_rng(0)
+    va = rng.normal(size=16); va /= np.linalg.norm(va)
+    vb = rng.normal(size=16); vb /= np.linalg.norm(vb)
+    store.add_speaker("Hank", va.astype(np.float32).tobytes())   # polluted single row
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b: va))
+
+    def fake_sample(st, name, ext, sample_rate=16000):
+        sp = lambda: {"meeting_id": 1, "track": "mic", "start_ms": 0, "end_ms": 3000}
+        return [(sp(), (va + 0.03 * rng.normal(size=16)).astype(np.float32)) for _ in range(4)] + \
+               [(sp(), (vb + 0.03 * rng.normal(size=16)).astype(np.float32)) for _ in range(4)]
+    monkeypatch.setattr(app, "_sample_speaker_embeddings", fake_sample)
+
+    chk = app._speaker_split_check(store, "Hank")
+    assert chk["enough"] and chk["split"] is True and chk["sep"] < 0.5
+    assert len(chk["groups"]) == 2
+
+    res = app._apply_speaker_split(store, "Hank", "Amy")
+    assert res["ok"] and res["kept"] == "Hank" and res["new"] == "Amy"
+    names = sorted(r["name"] for r in store.list_speakers())
+    assert names == ["Amy", "Hank"]            # one clean centroid each
+
+
+def test_speaker_split_refuses_single_voice(tmp_path, monkeypatch):
+    import numpy as np
+    import app
+    import diarize
+    store = Store(tmp_path / "m.db")
+    rng = np.random.default_rng(1)
+    v = rng.normal(size=16); v /= np.linalg.norm(v)
+    store.add_speaker("Solo", v.astype(np.float32).tobytes())
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b: v))
+    monkeypatch.setattr(app, "_sample_speaker_embeddings", lambda st, n, e, sample_rate=16000:
+                        [({"meeting_id": 1, "track": "mic", "start_ms": 0, "end_ms": 3000},
+                          (v + 0.03 * rng.normal(size=16)).astype(np.float32)) for _ in range(8)])
+    assert app._speaker_split_check(store, "Solo")["split"] is False
+    assert app._apply_speaker_split(store, "Solo", "Ghost")["ok"] is False
+    assert [r["name"] for r in store.list_speakers()] == ["Solo"]   # untouched

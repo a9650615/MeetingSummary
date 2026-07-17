@@ -448,3 +448,36 @@ def test_live_speaker_labeler_continuity_keeps_last_speaker_on_noisy_utterance()
                                       continuity_threshold=0.5)
     assert fn(b"x" * 4000) == "Alice"      # clean -> recognized
     assert fn(b"x" * 4000) == "Alice"      # noisy 0.55 -> continuity keeps Alice, no flicker
+
+
+def _unit(rng, dim=16):
+    v = rng.normal(size=dim); return v / np.linalg.norm(v)
+
+
+def test_two_way_split_separates_two_voices():
+    rng = np.random.default_rng(7)
+    a, b = _unit(rng), _unit(rng)          # two distinct voices
+    embs = [a + 0.05 * _unit(rng) for _ in range(4)] + [b + 0.05 * _unit(rng) for _ in range(4)]
+    labels, sep = diarize.two_way_split(embs, min_side=2)
+    assert labels is not None
+    # the two halves land in different groups
+    assert len(set(labels[:4])) == 1 and len(set(labels[4:])) == 1
+    assert labels[0] != labels[4]
+    assert sep < 0.5                       # groups clearly apart
+
+
+def test_two_way_split_keeps_one_voice_together():
+    rng = np.random.default_rng(3)
+    a = _unit(rng)
+    embs = [a + 0.03 * _unit(rng) for _ in range(8)]   # all the same person
+    labels, sep = diarize.two_way_split(embs, min_side=2)
+    # one cohesive voice -> the two "halves" are still highly similar
+    assert sep > 0.85
+
+
+def test_two_way_split_needs_min_side():
+    rng = np.random.default_rng(5)
+    a, b = _unit(rng), _unit(rng)
+    embs = [a, a, a, b]                     # b is a lone outlier -> not a 2nd person
+    labels, _ = diarize.two_way_split(embs, min_side=2)
+    assert labels is None
