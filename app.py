@@ -2056,14 +2056,19 @@ def _run_transcribe_job(store, mid, backend, jobs):
     land, so even a server restart keeps partial work."""
     jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": ""}
     try:
+        n_tx, total = 0, 0
         for ev in iter_transcribe(store, mid, backend):
             if ev["type"] == "start":
-                jobs[mid]["total"] = ev["total"]
+                jobs[mid]["total"] = total = ev["total"]
             elif ev["type"] == "progress":
                 jobs[mid].update(done=ev["done"], total=ev["total"], text=ev["text"])
             elif ev["type"] == "done":
-                jobs[mid] = {"state": "done", "done": ev["transcripts"],
-                             "total": jobs[mid].get("total", 0)}
+                n_tx = ev["transcripts"]
+        # Speaker-aware line breaking: diarize after transcription so a different
+        # person speaking starts a new line (batch _sentence_split alone only cuts
+        # on punctuation — unlike live's per-turn lines). Same pass the upload uses.
+        _diarize_meeting(store, mid, jobs)
+        jobs[mid] = {"state": "done", "done": n_tx, "total": total}
     except Exception as e:
         jobs[mid] = {"state": "error", "msg": str(e)}
 
@@ -2190,7 +2195,7 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
         _save_upload_pcm(audio_path, mid, store)
         # Phase 2: voiceprint diarization — split speakers + recognize known voices
         # across meetings, so the transcript (and thus the summary) carries names.
-        _diarize_upload(store, mid, jobs)
+        _diarize_meeting(store, mid, jobs, tracks=["mic"])  # upload is a single mic track
 
         meeting = store.get_meeting(mid)
         if meeting is None:  # deleted mid-job (race with DELETE /meetings/{mid})
@@ -2213,52 +2218,57 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
         jobs[mid] = {"state": "error", "msg": str(e)}
 
 
-def _diarize_upload(store, mid, jobs):
-    """Diarize an uploaded (single mic-track) meeting in place: split speakers,
-    recognize cross-meeting voiceprints, write names onto the transcript. Updates
-    jobs[mid]['text'] for visible progress but never sets state=done (the upload
-    pipeline owns the terminal state). Best-effort: a diarize failure leaves the
-    plain transcript and the pipeline continues to summary."""
+def _diarize_meeting(store, mid, jobs, tracks=None):
+    """Diarize a meeting in place so the transcript breaks at speaker turns (like
+    live) instead of only at punctuation: for each track, split speakers, recognize
+    cross-meeting voiceprints, and write names + per-speaker line splits onto the
+    transcript. Runs after batch transcription (upload + re-transcribe) so a
+    different person speaking always starts a new line. Updates jobs[mid]['text']
+    for visible progress but never sets state=done (the caller owns terminal state).
+    Best-effort: a diarize failure leaves the plain transcript intact."""
     import diarize as diar  # noqa: PLC0415
-    track = "mic"
-    pcm = _assemble_track(store, mid, track)
-    if pcm is None:
-        return
-    os.makedirs(f"data/{mid}", exist_ok=True)
-    tmp = f"data/{mid}/_diar_{track}.pcm"
-    with open(tmp, "wb") as f:
-        f.write(pcm)
-    try:
-        enroll = store.get_setting("persist_speakers", "1") == "1"
-        jobs[mid].update(done=0, total=0, text="聲紋分群中…")
+    if tracks is None:
+        tracks = _meeting_tracks(store, mid)
+    enroll = store.get_setting("persist_speakers", "1") == "1"
+    for ti, track in enumerate(tracks):
+        pcm = _assemble_track(store, mid, track)
+        if pcm is None:
+            continue
+        os.makedirs(f"data/{mid}", exist_ok=True)
+        tmp = f"data/{mid}/_diar_{track}.pcm"
+        with open(tmp, "wb") as f:
+            f.write(pcm)
+        label = _TRACK_LABEL.get(track, track)
+        pre = f"[{ti + 1}/{len(tracks)}] " if len(tracks) > 1 else ""
+        try:
+            jobs[mid].update(done=0, total=0, text=f"{pre}{label} 聲紋分群中…")
 
-        def on_prog(done, total):
-            jobs[mid].update(done=done, total=total, text="聲紋分群中…")
+            def on_prog(done, total, _p=pre, _l=label):
+                jobs[mid].update(done=done, total=total, text=f"{_p}{_l} 聲紋分群中…")
 
-        segments, embs = diar.diarize_with_progress(
-            tmp, num_speakers=-1, enroll=enroll, on_progress=on_prog,
-            on_phase=lambda ph: jobs[mid].update(text="建立聲紋…"))
-        names = _persistent_names(store, embs, _TRACK_LABEL.get(track, track)) if embs else None
-        rows = [dict(r) for r in store.list_transcripts(mid) if r["track"] == track]
-        assigned = diar.assign_speakers(rows, segments,
-                                        prefix=_TRACK_LABEL.get(track, track),
-                                        names=names, split=True)
-        splits = {}
-        for r in assigned:
-            if r.get("split"):
-                splits.setdefault(r["src_id"], []).append(r)
-            else:
-                store.update_speaker(r["id"], r["speaker"])
-        for src_id, pieces in splits.items():  # 1 multi-speaker line -> N lines
-            store.delete_transcript(src_id)
-            for p in pieces:
-                store.add_transcript(mid, p["profile"], p["track"], p["start_ms"],
-                                     p["end_ms"], p["speaker"], p["text"])
-    except Exception as e:
-        print(f"upload diarize failed (mid={mid}): {e}", file=sys.stderr)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+            segments, embs = diar.diarize_with_progress(
+                tmp, num_speakers=-1, enroll=enroll, on_progress=on_prog,
+                on_phase=lambda ph, _p=pre, _l=label: jobs[mid].update(text=f"{_p}{_l} 建立聲紋…"))
+            names = _persistent_names(store, embs, label) if embs else None
+            rows = [dict(r) for r in store.list_transcripts(mid) if r["track"] == track]
+            assigned = diar.assign_speakers(rows, segments, prefix=label,
+                                            names=names, split=True)
+            splits = {}
+            for r in assigned:
+                if r.get("split"):
+                    splits.setdefault(r["src_id"], []).append(r)
+                else:
+                    store.update_speaker(r["id"], r["speaker"])
+            for src_id, pieces in splits.items():  # 1 multi-speaker line -> N lines
+                store.delete_transcript(src_id)
+                for p in pieces:
+                    store.add_transcript(mid, p["profile"], p["track"], p["start_ms"],
+                                         p["end_ms"], p["speaker"], p["text"])
+        except Exception as e:
+            print(f"diarize failed (mid={mid}, track={track}): {e}", file=sys.stderr)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
 
 def _save_upload_pcm(src_path, mid, store):

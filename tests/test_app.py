@@ -695,7 +695,7 @@ def test_upload_runs_diarize_before_summary(tmp_path, monkeypatch):
                  "end_ms": 1000, "text": "討論預算"}]
     monkeypatch.setattr(asr, "transcribe", fake_tx)
     monkeypatch.setattr(app, "_save_upload_pcm", lambda *a, **k: None)
-    monkeypatch.setattr(app, "_diarize_upload",
+    monkeypatch.setattr(app, "_diarize_meeting",
                         lambda *a, **k: seen.__setitem__("diarized", True))
     mid = store.create_meeting("實測", 1.0, "zh-TW")
     jobs = {}
@@ -705,3 +705,21 @@ def test_upload_runs_diarize_before_summary(tmp_path, monkeypatch):
     assert seen.get("diarized") is True            # voiceprint step ran
     assert seen.get("backend") == "ACCURATE_BE"    # used given (accurate) backend
     assert jobs[mid]["state"] == "done"
+
+
+def test_retranscribe_runs_diarize_for_speaker_breaks(tmp_path, monkeypatch):
+    # Re-transcribe must also diarize (speaker-aware line breaks), like upload —
+    # otherwise batch lines only split on punctuation, not on speaker change.
+    import app
+    store = Store(tmp_path / "m.db")
+    mid = store.create_meeting("實測", 1.0, "zh-TW")
+    monkeypatch.setattr(app, "iter_transcribe",
+                        lambda *a, **k: iter([{"type": "start", "total": 1},
+                                              {"type": "done", "transcripts": 3}]))
+    called = {}
+    monkeypatch.setattr(app, "_diarize_meeting",
+                        lambda s, m, j, **k: called.setdefault("mid", m))
+    jobs = {}
+    app._run_transcribe_job(store, mid, backend=None, jobs=jobs)
+    assert called.get("mid") == mid            # diarize ran after transcription
+    assert jobs[mid]["state"] == "done" and jobs[mid]["done"] == 3
