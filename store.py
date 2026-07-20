@@ -190,6 +190,21 @@ class Store:
             return None
         return f"{_disp_speaker(r['speaker'], r['track'])}：{r['text']}"
 
+    def last_live_row(self, meeting_id, track):
+        """The most recent live line for a track (full row) — for merging a
+        continuing same-speaker utterance into it instead of adding a new row."""
+        return self.db.execute(
+            "SELECT * FROM transcripts WHERE meeting_id=? AND track=? "
+            "AND profile='live' ORDER BY id DESC LIMIT 1",
+            (meeting_id, track)).fetchone()
+
+    def extend_transcript(self, transcript_id, text, end_ms):
+        """Grow a line in place (merge a continuing same-speaker utterance):
+        replace text + push end_ms out. start_ms/speaker/track unchanged."""
+        self.db.execute("UPDATE transcripts SET text=?, end_ms=? WHERE id=?",
+                        (text, end_ms, transcript_id))
+        self.db.commit()
+
     def recent_transcripts(self, meeting_id, limit=3):
         """Last `limit` finalized lines, oldest first — for the native panel's
         multi-line live captions. Same id-order rationale as latest_transcript."""

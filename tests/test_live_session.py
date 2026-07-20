@@ -453,3 +453,53 @@ def test_enable_diarization_promotion_renames_stored_rows_and_calls_on_rename(tm
     sessions["sys"].speaker_fn(b"x")
     assert calls == [("說話者1", "Scott", "system")]     # track-scoped
     assert store.list_transcripts(mid)[0]["speaker"] == "Scott"
+
+
+# --- live line merging (over-fragmentation fix) -----------------------------
+def _finals(store, mid, evs):
+    emit = live_session.make_store_emit(mid, 0, store)
+
+    async def run():
+        for ev, label in evs:
+            await emit({"kind": "final", **ev}, label)
+    asyncio.run(run())
+    return store.list_transcripts(mid)
+
+
+def test_merge_same_speaker_short_gap(tmp_path):
+    store = Store(tmp_path / "m.db"); mid = store.create_meeting("m", 1.0, "zh-TW")
+    rows = _finals(store, mid, [
+        ({"text": "你好", "start_ms": 0, "end_ms": 1000}, ("system", "說話者1")),
+        ({"text": "今天", "start_ms": 1500, "end_ms": 2500}, ("system", "說話者1")),  # +0.5s
+    ])
+    assert len(rows) == 1                       # merged into one line
+    assert rows[0]["text"] == "你好今天" and rows[0]["end_ms"] == 2500
+
+
+def test_speaker_change_starts_new_line(tmp_path):
+    store = Store(tmp_path / "m.db"); mid = store.create_meeting("m", 1.0, "zh-TW")
+    rows = _finals(store, mid, [
+        ({"text": "你好", "start_ms": 0, "end_ms": 1000}, ("system", "說話者1")),
+        ({"text": "我是", "start_ms": 1200, "end_ms": 2000}, ("system", "說話者2")),
+    ])
+    assert len(rows) == 2                        # different session speaker -> split
+    assert [r["speaker"] for r in rows] == ["說話者1", "說話者2"]
+
+
+def test_long_gap_starts_new_line(tmp_path):
+    store = Store(tmp_path / "m.db"); mid = store.create_meeting("m", 1.0, "zh-TW")
+    rows = _finals(store, mid, [
+        ({"text": "你好", "start_ms": 0, "end_ms": 1000}, ("system", "說話者1")),
+        ({"text": "再來", "start_ms": 6000, "end_ms": 7000}, ("system", "說話者1")),  # +5s > 3s
+    ])
+    assert len(rows) == 2                        # gap too big -> new line
+
+
+def test_merge_caps_line_length(tmp_path):
+    store = Store(tmp_path / "m.db"); mid = store.create_meeting("m", 1.0, "zh-TW")
+    long = "字" * 55
+    rows = _finals(store, mid, [
+        ({"text": long, "start_ms": 0, "end_ms": 1000}, ("mic", "說話者1")),
+        ({"text": "十個字十個字", "start_ms": 1100, "end_ms": 2000}, ("mic", "說話者1")),  # 55+6>60
+    ])
+    assert len(rows) == 2                        # would exceed 60 chars -> new line

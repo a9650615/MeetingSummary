@@ -29,6 +29,14 @@ FEED_TIMEOUT_S = 40  # safety net so a wedged backend can't freeze consume forev
 
 _PLACEHOLDER = re.compile(r"^(我|對方|說話者|混合)\d+$")
 
+# Live line merging (see make_store_emit): merge a continuing same-speaker
+# utterance into the previous line instead of a new row per VAD pause. A speaker
+# change or a gap > _MERGE_GAP_MS starts a new line; the caps stop a monologue
+# from becoming one unbounded row.
+_MERGE_GAP_MS = 3000     # same speaker within 3s -> continuation, merge
+_MERGE_MAX_MS = 30000    # one line spans at most ~30s
+_MERGE_MAX_CHARS = 60    # ...and at most ~60 chars
+
 
 def resolve_speaker(diar_label, side_label):
     """The speaker to DISPLAY for a live final. A recognized name (from the
@@ -244,10 +252,26 @@ def make_store_emit(mid, conn_offset_ms, store, push=None):
             return
         ev["ts"] = time.time()
         spk = store_speaker(ev.get("speaker"), speaker)
-        store.add_transcript(mid, "live", track,
-                              ev["start_ms"] + conn_offset_ms,
-                              ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
-                              spk, ev["text"])
+        start = ev["start_ms"] + conn_offset_ms
+        end = ev.get("end_ms", ev["start_ms"]) + conn_offset_ms
+        # Merge a continuing utterance into the previous line instead of adding a
+        # new row per VAD pause — live cut a line on every silence >=500ms, so one
+        # person pausing mid-sentence over-fragmented. Merge when it's the SAME
+        # track + SAME session speaker within a short gap, capped so a monologue
+        # doesn't grow one unbounded line. A speaker change (different label) or a
+        # long gap starts a fresh line — "split by the session's people".
+        prev = store.last_live_row(mid, track)
+        merged = False
+        if prev is not None and prev["speaker"] == spk:
+            gap = start - prev["end_ms"]
+            joined = (prev["text"] or "") + (ev["text"] or "")
+            if (0 <= gap <= _MERGE_GAP_MS
+                    and (end - prev["start_ms"]) <= _MERGE_MAX_MS
+                    and len(joined) <= _MERGE_MAX_CHARS):
+                store.extend_transcript(prev["id"], joined, end)
+                merged = True
+        if not merged:
+            store.add_transcript(mid, "live", track, start, end, spk, ev["text"])
         if push:
             await push({"type": "final", "track": track,
                         "speaker": spk, "text": ev["text"]})
