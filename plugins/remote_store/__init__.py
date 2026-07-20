@@ -35,6 +35,6 @@ def register(app, store):
         if store.get_meeting(mid) is None:
             raise HTTPException(404, "meeting not found")
         res = _push.build_and_push(store, mid, VM_URL)
-        if not res["ok"]:
-            raise HTTPException(502, f"push failed ({res['status']})")
+        # Return the result either way (200) so the UI can show res.reason on
+        # failure; a raised 5xx would strip the human-readable reason.
         return res

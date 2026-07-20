@@ -50,6 +50,14 @@ def build_and_push(store, mid, vm_url, *, assemble=None, to_m4a=None,
                 track_files[t] = m4a_path
                 present.append(t)
 
+        # No audio assembled — the meeting has no usable track (never recorded,
+        # or its pcm/m4a is missing on disk). Pushing a track-less bundle would
+        # look "successful" but upload no audio, so refuse with a clear reason
+        # instead of a silent no-op that reads as an upload failure.
+        if not track_files:
+            return {"ok": False, "status": 0, "mid": None,
+                    "reason": "此會議沒有可上傳的音檔"}
+
         b = bundle.meeting_to_bundle(store, mid, present)
         zip_path = os.path.join(td, "bundle.zip")
         bundle.write_bundle_zip(zip_path, b, track_files)

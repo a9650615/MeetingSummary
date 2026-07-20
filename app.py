@@ -2252,8 +2252,8 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
     remote_btn = ""
     if remote_enabled:
         remote_btn = (f"<button class=btn id=rpush onclick=\"fetch('/remote/push/{mid}',{{method:'POST'}})"
-                      f".then(r=>r.json()).then(j=>alert(j.ok?'已上傳到 server':'上傳失敗'))"
-                      f".catch(()=>alert('上傳失敗'))\">上傳到 server</button>")
+                      f".then(r=>r.json()).then(j=>alert(j.ok?'已上傳到 server':('上傳失敗：'+(j.reason||j.detail||('HTTP '+(j.status||'?'))))))"
+                      f".catch(()=>alert('上傳失敗（連線錯誤）'))\">上傳到 server</button>")
     body = (
         f"<h1><span id=mtitle>{html.escape(meeting['title'])}</span> "
         f"<button class=btn id=edittitle title='改標題' style='padding:.25em .5em;font-size:13px'>✏️</button> "

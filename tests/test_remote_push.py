@@ -39,3 +39,21 @@ def test_build_and_push_posts_zip(tmp_path):
     with zipfile.ZipFile(io.BytesIO(captured["zip"])) as z:
         names = z.namelist()
     assert "meeting.json" in names and "tracks/mixed.m4a" in names
+
+
+def test_push_refuses_when_no_audio(tmp_path):
+    # a meeting with no usable track must NOT post — it should fail with a reason,
+    # not a silent "success" that uploads no audio (regression: meeting 156).
+    store = Store(tmp_path / "s.db")
+    mid = store.create_meeting("空會議", 1721111111.0, "zh-TW")
+
+    posted = {"called": False}
+    def fake_post(url, files=None, timeout=None):
+        posted["called"] = True
+        raise AssertionError("must not POST when there is no audio")
+
+    res = push.build_and_push(store, mid, "http://vm:5556",
+                              assemble=lambda *a: None,     # no track has audio
+                              to_m4a=lambda *a: None,
+                              http_post=fake_post, tracks=["mixed", "mic", "system"])
+    assert res["ok"] is False and res["reason"] and not posted["called"]
