@@ -2170,6 +2170,9 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
     coarse progress into jobs[mid] (same shape the detail page already polls, so
     refresh resumes). Transcribes the original file directly (mlx-whisper loads
     m4a/wav/mp3) so it does NOT depend on the best-effort ffmpeg PCM decode."""
+    # Three visible phases (the page polls jobs[mid] throughout — never set
+    # state=done until the very end, or it reloads mid-pipeline):
+    #   1. 辨識 (accurate backend, NOT ANE) 2. 聲紋分群 3. 摘要
     jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": "辨識中…"}
     try:
         tx_path = audio_path  # denoise the ASR input only; playback uses the original
@@ -2181,11 +2184,21 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
         for s in segs:
             store.add_transcript(mid, s["profile"], s["track"], s["start_ms"],
                                  s["end_ms"], s["track"], s["text"])
-        jobs[mid].update(done=len(segs), total=len(segs), text="產生摘要中…")
+        jobs[mid].update(done=len(segs), total=len(segs), text="辨識完成，準備聲紋分群…")
+
+        # Save playback pcm + segment NOW (not at the end) so diarization has audio.
+        _save_upload_pcm(audio_path, mid, store)
+        # Phase 2: voiceprint diarization — split speakers + recognize known voices
+        # across meetings, so the transcript (and thus the summary) carries names.
+        _diarize_upload(store, mid, jobs)
+
         meeting = store.get_meeting(mid)
         if meeting is None:  # deleted mid-job (race with DELETE /meetings/{mid})
             jobs[mid] = {"state": "error", "msg": "meeting was deleted"}
             return
+        # Phase 3: summary — _summary_input already folds in speaker labels + the
+        # voiceprint roster, so recognized speakers flow into the meeting record.
+        jobs[mid].update(text="產生摘要中…")
         text = _summary_input(store, mid, meeting, summary_backend)
         out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend,
                         notes=(meeting["notes"] or ""))
@@ -2194,11 +2207,58 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
             nt = _auto_title(out, summary_backend)
             if nt:
                 store.update_title(mid, nt)
-        _save_upload_pcm(audio_path, mid, store)  # best-effort, for playback only
         store.finalize_meeting(mid)
         jobs[mid] = {"state": "done", "done": len(segs), "total": len(segs)}
     except Exception as e:
         jobs[mid] = {"state": "error", "msg": str(e)}
+
+
+def _diarize_upload(store, mid, jobs):
+    """Diarize an uploaded (single mic-track) meeting in place: split speakers,
+    recognize cross-meeting voiceprints, write names onto the transcript. Updates
+    jobs[mid]['text'] for visible progress but never sets state=done (the upload
+    pipeline owns the terminal state). Best-effort: a diarize failure leaves the
+    plain transcript and the pipeline continues to summary."""
+    import diarize as diar  # noqa: PLC0415
+    track = "mic"
+    pcm = _assemble_track(store, mid, track)
+    if pcm is None:
+        return
+    os.makedirs(f"data/{mid}", exist_ok=True)
+    tmp = f"data/{mid}/_diar_{track}.pcm"
+    with open(tmp, "wb") as f:
+        f.write(pcm)
+    try:
+        enroll = store.get_setting("persist_speakers", "1") == "1"
+        jobs[mid].update(done=0, total=0, text="聲紋分群中…")
+
+        def on_prog(done, total):
+            jobs[mid].update(done=done, total=total, text="聲紋分群中…")
+
+        segments, embs = diar.diarize_with_progress(
+            tmp, num_speakers=-1, enroll=enroll, on_progress=on_prog,
+            on_phase=lambda ph: jobs[mid].update(text="建立聲紋…"))
+        names = _persistent_names(store, embs, _TRACK_LABEL.get(track, track)) if embs else None
+        rows = [dict(r) for r in store.list_transcripts(mid) if r["track"] == track]
+        assigned = diar.assign_speakers(rows, segments,
+                                        prefix=_TRACK_LABEL.get(track, track),
+                                        names=names, split=True)
+        splits = {}
+        for r in assigned:
+            if r.get("split"):
+                splits.setdefault(r["src_id"], []).append(r)
+            else:
+                store.update_speaker(r["id"], r["speaker"])
+        for src_id, pieces in splits.items():  # 1 multi-speaker line -> N lines
+            store.delete_transcript(src_id)
+            for p in pieces:
+                store.add_transcript(mid, p["profile"], p["track"], p["start_ms"],
+                                     p["end_ms"], p["speaker"], p["text"])
+    except Exception as e:
+        print(f"upload diarize failed (mid={mid}): {e}", file=sys.stderr)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def _save_upload_pcm(src_path, mid, store):
@@ -3630,9 +3690,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
         import threading
         transcribe_jobs[mid] = {"state": "running", "done": 0, "total": 0,
                                 "text": "辨識中…"}
+        # Uploads use the ACCURATE default backend, never the ANE/NPU one — the
+        # user found ANE accuracy too low for uploaded files. (ANE stays available
+        # for live + manual re-transcribe; only the auto-upload path is pinned.)
         threading.Thread(
             target=_run_upload_job,
-            args=(store, mid, path, _default_asr(), summary_backend, summary_model,
+            args=(store, mid, path, asr_backend, summary_backend, summary_model,
                   kind, title, transcribe_jobs),
             daemon=True).start()
         return RedirectResponse(f"/m/{mid}", status_code=303)

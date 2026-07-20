@@ -681,3 +681,27 @@ def test_set_line_speaker_reassigns_one_line(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json()["changed"] == 1
     by_id = {row["id"]: row["speaker"] for row in store.list_transcripts(mid)}
     assert by_id[t1] == "Imp" and by_id[t2] == "Angle"      # only the one line moved
+
+
+def test_upload_runs_diarize_before_summary(tmp_path, monkeypatch):
+    # Upload pipeline must call the voiceprint step (so summary gets speakers),
+    # and must transcribe with the backend it was GIVEN (accurate), not ANE.
+    import app, asr
+    store = Store(tmp_path / "m.db")
+    seen = {}
+    def fake_tx(path, **k):
+        seen["backend"] = k.get("backend")
+        return [{"profile": "accurate", "track": "mic", "start_ms": 0,
+                 "end_ms": 1000, "text": "討論預算"}]
+    monkeypatch.setattr(asr, "transcribe", fake_tx)
+    monkeypatch.setattr(app, "_save_upload_pcm", lambda *a, **k: None)
+    monkeypatch.setattr(app, "_diarize_upload",
+                        lambda *a, **k: seen.__setitem__("diarized", True))
+    mid = store.create_meeting("實測", 1.0, "zh-TW")
+    jobs = {}
+    app._run_upload_job(store, mid, "x.m4a", asr_backend="ACCURATE_BE",
+                        summary_backend=lambda p: "摘要", summary_model="m",
+                        kind="minutes", title="實測", jobs=jobs)
+    assert seen.get("diarized") is True            # voiceprint step ran
+    assert seen.get("backend") == "ACCURATE_BE"    # used given (accurate) backend
+    assert jobs[mid]["state"] == "done"
