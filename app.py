@@ -29,6 +29,22 @@ from summarize import summarize
 from webassets import (  # static CSS/JS/PWA assets (presentation, no logic)
     _STYLE, _THEME_JS, _png_solid, _MANIFEST, _SW_JS, _DETECT_JS, _PROG_JS, _REC_JS)
 
+
+def _ensure_tool_path():
+    """A .app launched from Finder/launchd inherits a bare PATH (/usr/bin:/bin),
+    so bare-name `ffmpeg` subprocess calls raise FileNotFoundError even though it
+    is installed — the "音檔上傳沒成功 / [Errno 2] ffmpeg" bug. Prepend the common
+    user/homebrew bin dirs so every `ffmpeg`/`speech` shell-out resolves,
+    regardless of how the app was started."""
+    extra = [os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/local/bin"]
+    cur = os.environ.get("PATH", "").split(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join(
+        [p for p in extra if p not in cur] + cur)
+
+
+_ensure_tool_path()
+
+
 def _md_html(text):
     """Minimal, safe Markdown -> HTML (offline, no dep) for changelog + summaries.
     HTML-escapes first, then headings / **bold** / `code` / - and 1. lists / paras."""
