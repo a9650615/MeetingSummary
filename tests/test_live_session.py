@@ -25,7 +25,7 @@ class StubSession:
         self._events = events if events is not None else []
         self._flush_events = flush_events if flush_events is not None else []
 
-    def feed(self, chunk, want_interim):
+    def feed(self, chunk, want_interim, want_diarize=True):
         self.feed_calls.append((chunk, want_interim))
         return self._events
 
@@ -170,7 +170,7 @@ def test_consume_survives_wedged_feed(monkeypatch):
         def __init__(self):
             self.released = threading.Event()
 
-        def feed(self, chunk, want_interim):
+        def feed(self, chunk, want_interim, want_diarize=True):
             self.released.wait(5)  # blocks past the patched timeout; bounded so the
             return []              # leaked pool thread can't outlive the test
 

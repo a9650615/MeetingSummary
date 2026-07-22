@@ -367,7 +367,12 @@ class TwoPassSession:
                   f"asr {asr_s:.1f}s + diar {diar_s:.1f}s = {compute_s:.1f}s "
                   f"(RTF {compute_s / audio_s:.1f}x)", file=sys.stderr)
 
-    def _finalize(self):
+    def _finalize(self, want_diarize=True):
+        # want_diarize=False (set by consume when the track is BEHIND realtime)
+        # skips the per-utterance voiceprint embedding for this line to catch up
+        # on ASR text — the embedding is the heavy per-line cost and contends with
+        # ASR on the Neural Engine. The line just falls back to its side label
+        # (對方/我); the post-meeting /diarize pass relabels accurately anyway.
         # Drop blips (cough/breath) BEFORE the ASR call — saves compute (perf).
         # But STILL advance the committed-byte clock by their length: the audio
         # file keeps those bytes, so skipping them would make every later
@@ -394,7 +399,7 @@ class TwoPassSession:
         # over the single-label speaker_fn. The splitter labels every piece itself
         # (it owns the embedding), so use its pieces whenever it returns any — a
         # single piece is just the normal one-speaker case; >1 means a real split.
-        if text and self.splitter:
+        if text and want_diarize and self.splitter:
             _t_diar = self._clock()
             try:
                 parts = self.splitter(audio, text)
@@ -419,7 +424,7 @@ class TwoPassSession:
                     evs.append(e)
                 return evs
         spk = None
-        if text and self.speaker_fn:
+        if text and want_diarize and self.speaker_fn:
             _t_diar = self._clock()
             try:
                 spk = self.speaker_fn(audio)  # online voiceprint speaker label
@@ -437,7 +442,7 @@ class TwoPassSession:
             ev["speaker"] = spk
         return [ev]
 
-    def feed(self, pcm, want_interim=True):
+    def feed(self, pcm, want_interim=True, want_diarize=True):
         self._utt.extend(pcm)
         events = []
         while self._scan + self.frame_bytes <= len(self._utt):
@@ -451,9 +456,9 @@ class TwoPassSession:
             else:
                 self._silence_run += 1
                 if self._has_speech and self._silence_run >= self.silence_frames:
-                    events.extend(self._finalize())
+                    events.extend(self._finalize(want_diarize))
         if self._has_speech and len(self._utt) >= self.max_bytes:
-            events.extend(self._finalize())
+            events.extend(self._finalize(want_diarize))
         # interim only once there's real sustained speech (no work on blips/silence)
         if (want_interim and self.interim_backend and self._enough_speech()
                 and len(self._utt) - self._last_interim_len >= self._interim_dyn):

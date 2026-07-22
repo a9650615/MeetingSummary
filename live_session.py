@@ -327,7 +327,13 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
                 print(f"live ASR backlog {len(chunk)//32000}s -> trim (audio saved)",
                       file=sys.stderr)
                 chunk = chunk[-TRACK_BACKLOG_MAXB:]
+            # When BEHIND realtime (backlog building) drop BOTH the interim preview
+            # AND the per-utterance diarization embedding for this window, so the
+            # live loop spends its ANE/compute budget catching up on final ASR text.
+            # Speaker labels for skipped lines fall back to the side label; the
+            # post-meeting /diarize pass relabels accurately. Same gate as interim.
             want_interim = len(chunk) <= interim_lag_bytes
+            want_diarize = want_interim
             try:
                 # Safety net: a wedged backend must NOT hang consume forever (the
                 # "live captions stop mid-recording and never recover" bug). flush
@@ -338,7 +344,7 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
                 # timeout we skip this window and continue (audio is on disk for
                 # re-transcribe). Normal feed is <1s, so this never fires in practice.
                 events = await asyncio.wait_for(
-                    run_in_threadpool(sessions[tag].feed, chunk, want_interim),
+                    run_in_threadpool(sessions[tag].feed, chunk, want_interim, want_diarize),
                     timeout=FEED_TIMEOUT_S)
                 for ev in events:
                     await emit(ev, tracks[tag])

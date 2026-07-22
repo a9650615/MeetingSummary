@@ -103,6 +103,28 @@ def test_finalize_silent_when_realtime(capsys):
     assert "live SLOW" not in capsys.readouterr().err
 
 
+def test_finalize_skips_diarization_when_behind():
+    # want_diarize=False (consume sets this under backlog) must NOT call speaker_fn
+    # -> line falls back to side label; post-meeting /diarize relabels later.
+    calls = []
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "句"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=100,
+                       speaker_fn=lambda a: calls.append(1) or "Ray")
+    finals = [e for e in s.feed(tone(300) + silence(150), want_diarize=False)
+              if e["kind"] == "final"]
+    assert finals and "speaker" not in finals[0]   # unlabeled
+    assert calls == []                              # embedding skipped
+
+
+def test_finalize_diarizes_by_default():
+    calls = []
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "句"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=100,
+                       speaker_fn=lambda a: calls.append(1) or "Ray")
+    finals = [e for e in s.feed(tone(300) + silence(150)) if e["kind"] == "final"]
+    assert finals and finals[0].get("speaker") == "Ray" and calls == [1]
+
+
 def test_twopass_drops_silence_hallucination_by_char_rate():
     # A fluent sentence far too long for the brief speech present = a silence
     # hallucination (whisper confabulating over near-silence, the 對方-track report).
