@@ -74,6 +74,35 @@ def test_twopass_finalizes_on_silence():
     assert finals[0]["end_ms"] > finals[0]["start_ms"]
 
 
+def _step_clock(step):
+    # monotonic-ish fake clock advancing `step` seconds each call
+    t = [0.0]
+    def c():
+        t[0] += step
+        return t[0]
+    return c
+
+
+def test_finalize_warns_when_behind_realtime(capsys):
+    # Stall diagnosis: when final ASR (+diar) takes longer than the utterance's
+    # own realtime, _finalize logs a 'live SLOW' line splitting asr vs diar.
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "句"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=100,
+                       clock=_step_clock(5.0))  # 5s "compute" per clock delta
+    s.feed(tone(300) + silence(150))            # ~0.3s audio << 5s asr
+    err = capsys.readouterr().err
+    assert "live SLOW" in err and "asr 5.0s" in err
+
+
+def test_finalize_silent_when_realtime(capsys):
+    # Fast path (compute < realtime) logs nothing — no spam on the common case.
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "句"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=100,
+                       clock=_step_clock(0.0))  # 0s compute
+    s.feed(tone(300) + silence(150))
+    assert "live SLOW" not in capsys.readouterr().err
+
+
 def test_twopass_drops_silence_hallucination_by_char_rate():
     # A fluent sentence far too long for the brief speech present = a silence
     # hallucination (whisper confabulating over near-silence, the 對方-track report).

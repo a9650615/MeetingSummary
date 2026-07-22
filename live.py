@@ -8,6 +8,7 @@ Chunking is pluggable:
 
 Each chunk is transcribed independently (no cross-chunk context) — live is a
 preview; the accurate re-pass is the trusted transcript (spec M1)."""
+import sys
 import time
 
 import numpy as np
@@ -351,6 +352,21 @@ class TwoPassSession:
     def _enough_speech(self):
         return self._speech_frames >= self.min_speech_frames
 
+    def _warn_if_slow(self, audio, asr_s, diar_s):
+        # Live stall diagnosis ("跑一跑卡住一陣子"): a finalize does final-ASR then
+        # the per-utterance diarization embedding SERIALLY, both on the Neural
+        # Engine — if they take longer than the utterance's own realtime the live
+        # loop falls behind and backlog grows until the 45s trim. Log the split
+        # (asr vs diar) ONLY when we're behind realtime, so a real session's log
+        # says whether the stall is ASR, the embedding, or ANE contention between
+        # them. Silent on the normal fast path (RTF<1) — no log spam.
+        audio_s = len(audio) / (self.sr * 2)
+        compute_s = asr_s + diar_s
+        if audio_s > 0 and compute_s > audio_s:
+            print(f"live SLOW [{self.track}] {audio_s:.1f}s audio -> "
+                  f"asr {asr_s:.1f}s + diar {diar_s:.1f}s = {compute_s:.1f}s "
+                  f"(RTF {compute_s / audio_s:.1f}x)", file=sys.stderr)
+
     def _finalize(self):
         # Drop blips (cough/breath) BEFORE the ASR call — saves compute (perf).
         # But STILL advance the committed-byte clock by their length: the audio
@@ -363,7 +379,10 @@ class TwoPassSession:
             self._reset_utt()
             return []
         audio = bytes(self._utt)
+        _t_asr = self._clock()
         text = self._text(self.final_backend, audio)
+        asr_s = self._clock() - _t_asr
+        diar_s = 0.0
         # Silence-hallucination gate: drop text too long for the speech present.
         speech_s = self._speech_frames * self.frame_bytes / (self.sr * 2)
         if text and len(text) > 12 and len(text) > speech_s * _MAX_CHARS_PER_SPEECH_S:
@@ -376,11 +395,14 @@ class TwoPassSession:
         # (it owns the embedding), so use its pieces whenever it returns any — a
         # single piece is just the normal one-speaker case; >1 means a real split.
         if text and self.splitter:
+            _t_diar = self._clock()
             try:
                 parts = self.splitter(audio, text)
             except Exception:
                 parts = None
+            diar_s = self._clock() - _t_diar
             if parts:
+                self._warn_if_slow(audio, asr_s, diar_s)
                 self._reset_utt()
                 multi = len(parts) > 1
                 evs = []
@@ -398,10 +420,14 @@ class TwoPassSession:
                 return evs
         spk = None
         if text and self.speaker_fn:
+            _t_diar = self._clock()
             try:
                 spk = self.speaker_fn(audio)  # online voiceprint speaker label
             except Exception:
                 spk = None
+            diar_s = self._clock() - _t_diar
+        if text:
+            self._warn_if_slow(audio, asr_s, diar_s)
         self._reset_utt()
         if not text:
             return []
