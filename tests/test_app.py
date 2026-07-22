@@ -259,6 +259,16 @@ def test_persist_speakers_toggle_route(tmp_path):
     assert store.get_setting("persist_speakers") == "0"
 
 
+def test_live_language_setting_persists_and_validates(tmp_path):
+    c, store = make_client(tmp_path)
+    assert c.get("/settings/live_language").json()["value"] == ""   # default 自動偵測
+    assert c.post("/settings/live_language", json={"value": "ja"}).json()["value"] == "ja"
+    assert store.get_setting("live_language") == "ja"
+    # unknown code is rejected -> falls back to "" (auto), never stored raw
+    assert c.post("/settings/live_language", json={"value": "klingon"}).json()["value"] == ""
+    assert store.get_setting("live_language") == ""
+
+
 def test_auto_pipeline_uses_ane_when_toggled(tmp_path, monkeypatch):
     # ANE toggle on -> the default/auto ASR (no explicit model) routes to the ANE
     # backend, not just manual dropdown picks.

@@ -515,11 +515,18 @@ def _models_page():
            "<option value=system>系統音(對方)</option>"
            "<option value=both>兩者混合</option>"
            "<option value=dual>雙軌(我/對方分離)</option>"
+           "</select></label>"
+           "<label style='margin-left:12px'>辨識語系 <select id=live_language_opt>"
+           "<option value=''>自動偵測</option>"
+           "<option value=zh>中文</option>"
+           "<option value=en>English</option>"
+           "<option value=ja>日本語</option>"
+           "<option value=ko>한국어</option>"
+           "<option value=yue>粵語</option>"
            "</select></label></div>"
            "<p class=hint style='margin:.6em 0 0'>/live 錄音頁會記住這裡的預設；也可在錄音頁直接改，會自動存回。"
            "系統音(對方)/兩者/雙軌會用瀏覽器 getDisplayMedia 分享分頁或畫面的音訊 — 免安裝任何原生元件。"
-           "另外，浮動控制面板（下方安裝 <code>floatpanel</code>）錄音時是完全獨立的原生擷取，"
-           "不受這裡的設定影響。</p></div>")
+           "<br>辨識語系：固定講單一語言時選定可避免自動偵測選錯（尤其浮動面板／系統音）；混合語言或不確定就留「自動偵測」。此設定同時套用網頁錄音與浮動面板。</p></div>")
         + ("<div class=card style='margin-top:12px'>"
            "<label class=chk><input type=checkbox id=correct_opt> "
            "✏️ 摘要前保守校正逐字稿</label>"
@@ -630,6 +637,9 @@ def _models_page():
     (function(){const s=document.getElementById('live_source_opt');if(!s)return;
       fetch('/settings/live_source').then(r=>r.json()).then(j=>{if(j.value)s.value=j.value;});
       s.onchange=()=>fetch('/settings/live_source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
+    (function(){const s=document.getElementById('live_language_opt');if(!s)return;
+      fetch('/settings/live_language').then(r=>r.json()).then(j=>{s.value=j.value||'';});
+      s.onchange=()=>fetch('/settings/live_language',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
     (function(){const s=document.getElementById('livemodel');if(!s)return;
       fetch('/models').then(r=>r.json()).then(j=>{const v=j.live_requested||j.live;if(v)s.value=v;});
       s.onchange=async()=>{const m=document.getElementById('livemodelmsg');m.textContent=' 套用中…';
@@ -2802,7 +2812,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             tracks = {recorder.TRACK_MIC: ("mic", "我"),
                       recorder.TRACK_SYSTEM: ("system", "對方")}
         audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb") for tag, lbl in tracks.items()}
-        live_manager.set_language(None)
+        live_manager.set_language(store.get_setting("live_language", "") or None)
         sessions = live_session.build_track_sessions(
             tracks, live_manager=live_manager, live_interim_backend=live_interim_backend,
             silence_ms=live_silence_ms, min_speech_ms=live_min_speech_ms,
@@ -3328,7 +3338,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
         q = ws.query_params
         sil = max(200, min(3000, int(q.get("silence_ms") or live_silence_ms)))
         maxu = max(5.0, min(40.0, float(q.get("max_utt_s") or live_max_utt_s)))
-        live_manager.set_language(q.get("lang") or None)  # ""/absent -> auto-detect
+        # explicit ?lang wins; else the saved 辨識語系 default; else auto-detect
+        live_manager.set_language(
+            q.get("lang") or store.get_setting("live_language", "") or None)
 
         sessions = live_session.build_track_sessions(
             tracks, live_manager=live_manager, live_interim_backend=live_interim_backend,
@@ -4027,7 +4039,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
                  "denoise": "0", "float_panel": "0", "summary_correct": "1",
                  "remote_store": "0",  # ☁️ 上傳到 server toggle (default OFF)
                  # /live recording default, so the page never needs re-picking:
-                 "live_source": "mic"}
+                 "live_source": "mic",
+                 # 辨識語系 default ("" = 自動偵測). Applies to live + native capture
+                 # so the floatpanel (which had no lang UI) stops mis-detecting.
+                 "live_language": ""}
 
     @app.get("/settings/{key}")
     def get_setting_route(key: str):
@@ -4044,6 +4059,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             v = "1" if v in ("1", "true", "on") else "0"
         elif key == "live_source":
             v = v if v in ("mic", "system", "both", "dual") else "mic"
+        elif key == "live_language":
+            v = v if v in ("", "zh", "en", "ja", "ko", "yue") else ""
         store.set_setting(key, v)
         return {"value": store.get_setting(key, _SETTINGS[key])}
 
