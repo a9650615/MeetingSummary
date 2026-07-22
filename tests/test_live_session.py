@@ -455,6 +455,49 @@ def test_enable_diarization_promotion_renames_stored_rows_and_calls_on_rename(tm
     assert store.list_transcripts(mid)[0]["speaker"] == "Scott"
 
 
+def test_enable_diarization_uses_lower_live_match_threshold(tmp_path, monkeypatch):
+    # Live must match at a LOWER bar than the global post-meeting speaker_threshold:
+    # short noisy single utterances (worst on the system/對方 track) score well
+    # under 0.62, so reusing the global left every remote speaker unrecognized.
+    import diarize
+    seen = {}
+
+    def fake_labeler(extractor, rows, *, session_threshold, match_threshold,
+                     on_promote=None, continuity_threshold=0.5):
+        seen["match_threshold"] = match_threshold
+        return lambda _a: None
+
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b, sr=16000: b))
+    monkeypatch.setattr(diarize, "live_speaker_labeler", fake_labeler)
+    monkeypatch.delenv("LIVE_DIAR_MATCH", raising=False)
+    monkeypatch.delenv("LIVE_DIAR_SPLIT", raising=False)
+    store = Store(tmp_path / "m.db")
+    store.set_setting("speaker_threshold", "0.62")   # global (post-meeting) bar
+    sessions, tracks = _diar_sessions_tracks()
+    live_session.enable_diarization(sessions, tracks, store)
+    assert seen["match_threshold"] == 0.55           # lower live default
+    assert seen["match_threshold"] < 0.62            # ...and below the global
+
+
+def test_live_match_never_stricter_than_global(tmp_path, monkeypatch):
+    # If a user tightened the global threshold BELOW the live default, live must
+    # not loosen past it (min-cap), else live would be less precise than the
+    # accurate post-meeting pass.
+    import diarize
+    seen = {}
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b, sr=16000: b))
+    monkeypatch.setattr(diarize, "live_speaker_labeler",
+                        lambda e, r, *, session_threshold, match_threshold, on_promote=None,
+                        continuity_threshold=0.5: seen.setdefault("m", match_threshold) or (lambda _a: None))
+    monkeypatch.delenv("LIVE_DIAR_MATCH", raising=False)
+    monkeypatch.delenv("LIVE_DIAR_SPLIT", raising=False)
+    store = Store(tmp_path / "m.db")
+    store.set_setting("speaker_threshold", "0.50")
+    sessions, tracks = _diar_sessions_tracks()
+    live_session.enable_diarization(sessions, tracks, store)
+    assert seen["m"] == 0.50
+
+
 # --- live line merging (over-fragmentation fix) -----------------------------
 def _finals(store, mid, evs):
     emit = live_session.make_store_emit(mid, 0, store)

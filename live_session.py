@@ -190,6 +190,16 @@ def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
             gthr = float(store.get_setting("speaker_threshold", "0.62"))
         except (ValueError, TypeError):
             gthr = 0.62
+        # LIVE match uses a LOWER bar than the global (post-meeting) threshold.
+        # gthr=0.62 is tuned for the accurate post-meeting re-cluster on AGGREGATE
+        # embeddings; live labels one short, noisy single utterance, which scores
+        # well under that — worst on the system/對方 track (compressed call audio):
+        # measured meeting-168 system clusters landed at 0.54–0.66 cosine to the
+        # right enrolled voice, so at 0.62 almost none promoted and every remote
+        # speaker stayed 對方/說話者N. A separate, lower live bar (never stricter
+        # than the global) lets clusters promote to real names; a wrong live guess
+        # is cheap — the post-meeting /diarize pass re-labels accurately.
+        live_match = min(float(os.environ.get("LIVE_DIAR_MATCH", "0.55")), gthr)
         rows = store.list_speakers()  # known voiceprints, read-only for live
         # One embedding per finalized utterance (省效能): label the whole
         # utterance ONCE via speaker_fn. The within-utterance windowed split
@@ -223,7 +233,7 @@ def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
         # the real name.
         for tag, (_trk, _spk) in tracks.items():
             labeler = diar.live_speaker_labeler(
-                extractor, rows, session_threshold=thr, match_threshold=gthr,
+                extractor, rows, session_threshold=thr, match_threshold=live_match,
                 continuity_threshold=cont,
                 on_promote=make_on_promote(_trk) if mid is not None else None)
             if split:
