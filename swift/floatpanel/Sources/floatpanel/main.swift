@@ -324,6 +324,11 @@ final class Model: ObservableObject {
     // cleared. start_ms of the gap = outageStart − startedAt.
     private var outageStart: Date?
     private var relayMid: Int?          // learned from the server's {"type":"meeting"} message
+    // Optimistic start/stop: flip `recording` locally the instant the button is
+    // tapped and trust it for a short settle window, so the UI is 跟手 instead of
+    // waiting for the next /live/state poll (+ the stop flush) to confirm. The poll
+    // resumes as the source of truth once the window passes.
+    private var intentAt: Date?
     // Self-heal: the backend process tree (bootstrap/supervise/app) can die as a
     // whole (whole process group killed) — nothing then brings it back, and this
     // panel would poll "伺服器未連線" forever since supervise.sh's own watchdog
@@ -373,7 +378,14 @@ final class Model: ObservableObject {
             }
             self.pollFailStreak = 0
             self.connected = true
-            let rec = (o["recording"] as? Bool) ?? false
+            var rec = (o["recording"] as? Bool) ?? false
+            // Settle window: right after a start/stop tap the server may not have
+            // registered/cleared the session yet (and stop still has to flush), so
+            // trust the local optimistic `recording` for 2.5s instead of letting a
+            // lagging poll flip the button back and forth (the 不跟手 flicker).
+            if let t = self.intentAt, Date().timeIntervalSince(t) < 2.5 {
+                rec = self.recording
+            }
             if rec && !self.recording { self.startedAt = Date() }
             if !rec { self.startedAt = nil; self.elapsed = "" }
             // A live session that ends (stop OR the relay dying) returns the top
@@ -475,6 +487,7 @@ final class Model: ObservableObject {
     }
 
     func start() {
+        self.recording = true; self.intentAt = Date()   // optimistic: button flips now, poll confirms
         // Always capture natively, in this app (single TCC identity) — no
         // browser fallback, no server-spawned helper. Permission prompts
         // (mic / screen-recording) fire inline in startNativeRelay(); any
@@ -665,7 +678,13 @@ final class Model: ObservableObject {
     private func scheduleReconnect(epoch: Int) {
         guard relayEpoch == epoch, !userStopped else { return }
         if outageStart == nil { outageStart = Date() }  // mark gap start for backfill
-        guard reconnectAttempt < 6 else {
+        // Keep retrying for a TIME budget, not a fixed attempt count: a full backend
+        // restart (./restart.sh) can leave the server down far longer than the old
+        // 6-attempt/~17.5s cap — its own health wait is up to ~80s (cold start +
+        // model load) — so the panel used to give up mid-restart and lose the
+        // recording. 180s comfortably covers a restart; the buffered gap (pendingCap
+        // = 6 min) backfills the audio once the server is back.
+        if let s = outageStart, Date().timeIntervalSince(s) > 180 {
             liveNotice = "重新連線失敗，請手動重新開始錄音"
             return
         }
@@ -722,6 +741,7 @@ final class Model: ObservableObject {
     }
 
     func stop() {
+        self.recording = false; self.intentAt = Date()  // optimistic: button flips now, poll confirms
         stopNativeRelay()                  // stop our in-process capture + close the socket
         req("/live/stop", method: "POST")  // also covers any browser /ws/live session
     }
