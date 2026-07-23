@@ -647,6 +647,44 @@ def test_speaker_split_refuses_single_voice(tmp_path, monkeypatch):
     assert [r["name"] for r in store.list_speakers()] == ["Solo"]   # untouched
 
 
+def test_unlearn_speaker_clip_decrements_and_moves_centroid(tmp_path, monkeypatch):
+    # 抽離 = MOVE: subtracting a mis-attributed clip drops the row's count and pulls
+    # its centroid away from that clip.
+    import numpy as np, struct, app, diarize
+    from store import Store
+    s = Store(tmp_path / "m.db")
+    va = np.zeros(16, np.float32); va[0] = 1.0          # Imp's centroid
+    vb = np.zeros(16, np.float32); vb[1] = 1.0          # the clip actually belongs to someone else
+    s.add_speaker("Imp", va.tobytes())
+    sid = s.list_speakers()[0]["id"]
+    s.update_speaker_centroid(sid, va.tobytes(), 4)     # count=4
+    monkeypatch.setattr(app, "_assemble_track", lambda st, m, t: b"\x00" * 64000)
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b: vb))
+    assert app._unlearn_speaker_clip(s, 1, "mic", "Imp", 0, 2000) is True
+    row = s.list_speakers()[0]
+    assert row["count"] == 3                            # 4 - 1
+    new = np.frombuffer(row["centroid"], np.float32)
+    assert float(new @ vb) < float(va @ vb) + 1e-6      # moved away from the removed clip
+    assert new[1] < 0                                    # subtracted vb -> negative on that axis
+
+
+def test_unlearn_speaker_clip_guards(tmp_path, monkeypatch):
+    import numpy as np, app, diarize
+    from store import Store
+    s = Store(tmp_path / "m.db")
+    va = np.zeros(16, np.float32); va[0] = 1.0
+    monkeypatch.setattr(app, "_assemble_track", lambda st, m, t: b"\x00" * 64000)
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b: va))
+    # placeholder name -> never un-learn
+    assert app._unlearn_speaker_clip(s, 1, "mic", "對方3", 0, 2000) is False
+    # unknown real name -> nothing to un-learn
+    assert app._unlearn_speaker_clip(s, 1, "mic", "Ghost", 0, 2000) is False
+    # count<=1 -> refuse to wipe the last remaining sample
+    s.add_speaker("Solo", va.tobytes())                 # count defaults to 1
+    assert app._unlearn_speaker_clip(s, 1, "mic", "Solo", 0, 2000) is False
+    assert s.list_speakers()[0]["count"] in (1, None)   # untouched
+
+
 def test_persistent_names_does_not_enroll_unrecognized(tmp_path):
     # New model: an unrecognized cluster gets NO global voiceprint (stays 對方N via
     # assign_speakers). Only a human assignment enrolls.

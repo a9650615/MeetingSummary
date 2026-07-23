@@ -1964,6 +1964,43 @@ def _enroll_meeting_speaker(store, mid, track, name):
     return True
 
 
+def _unlearn_speaker_clip(store, mid, track, name, start_ms, end_ms):
+    """Inverse of _enroll_meeting_speaker's reinforce, for ONE clip: subtract that
+    clip's contribution from `name`'s global voiceprint (count-weighted), so a 抽離
+    that MOVES a mis-attributed line off `name` also removes what that line taught
+    `name` — a true move, not just a copy onto the correct person. Only touches a
+    REAL named voiceprint that already exists; guarded so it never drives a row's
+    count below 1 or deletes it (conservative — leave a thin voiceprint rather than
+    wipe one). Best-effort; returns True if it subtracted."""
+    import numpy as np  # noqa: PLC0415
+    import diarize as diar  # noqa: PLC0415
+    if not name or diar._is_placeholder(name):
+        return False
+    existing = [r for r in store.list_speakers() if r["name"] == name and r["centroid"]]
+    if not existing:
+        return False
+    pcm = _assemble_track(store, mid, track)
+    if not pcm:
+        return False
+    a = int(start_ms / 1000 * 16000) * 2
+    b = int(end_ms / 1000 * 16000) * 2
+    clip = pcm[a:b]
+    if len(clip) < 16000:   # < 0.5s — too short to have meaningfully taught anything
+        return False
+    ext = diar.embedding_extractor()
+    e = np.asarray(ext(clip), dtype=np.float32)
+    e = e / (np.linalg.norm(e) + 1e-9)
+    r = max(existing, key=lambda x: x["count"] or 1)   # mirror reinforce: the strongest row
+    cnt = r["count"] or 1
+    if cnt <= 1:            # don't wipe the last remaining sample — leave it as-is
+        return False
+    cen = np.frombuffer(r["centroid"], dtype=np.float32).astype(np.float64) * cnt - e
+    new_cnt = cnt - 1
+    cen = cen / (np.linalg.norm(cen) + 1e-9)
+    store.update_speaker_centroid(r["id"], cen.astype(np.float32).tobytes(), new_cnt)
+    return True
+
+
 def _is_default_title(t):
     """A title the user hasn't meaningfully set -> safe to auto-replace on summary."""
     t = (t or "").strip()
@@ -3583,16 +3620,25 @@ def create_app(store, *, summary_backend, asr_backend=None,
         sp = body.speaker.strip()
         if not sp:
             raise HTTPException(400, "empty speaker")
+        # Capture the line's CURRENT speaker + span BEFORE the change so we can move
+        # (not just copy) its voiceprint contribution — see _unlearn_speaker_clip.
+        prev = store.transcript_row(mid, tid)
         n = store.set_transcript_speaker(mid, tid, sp)
-        # Assignment enrolls: if the line moved onto a real name not yet in the 語者庫,
-        # teach it from that person's audio in this meeting (best-effort).
+        # A reassignment MOVES the audio's voiceprint contribution (unified with the
+        # whole-speaker rename semantics): enroll/reinforce the CORRECT person AND
+        # subtract this line from the mis-attributed one, so the wrong person stops
+        # being taught by audio that was never theirs. Both best-effort; a failure
+        # never blocks the relabel.
         enrolled = False
         try:
             import diarize as diar  # noqa: PLC0415
             if not diar._is_placeholder(sp):
                 enrolled = _enroll_meeting_speaker(store, mid, body.track, sp)
+            if prev is not None and (old := prev["speaker"]) and old != sp:
+                _unlearn_speaker_clip(store, mid, prev["track"] or body.track, old,
+                                      prev["start_ms"], prev["end_ms"])
         except Exception as e:
-            print(f"enroll on line-assign failed: {e}", file=sys.stderr)
+            print(f"enroll/unlearn on line-assign failed: {e}", file=sys.stderr)
         return {"changed": n, "enrolled": enrolled}
 
     @app.delete("/meetings/{mid}")

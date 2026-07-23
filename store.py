@@ -271,6 +271,14 @@ class Store:
         self.db.commit()
         return cur.rowcount
 
+    def transcript_row(self, meeting_id, transcript_id):
+        """One transcript line (id, track, start_ms, end_ms, speaker, text) — used
+        before a 抽離 to learn the line's CURRENT speaker + span, so its voiceprint
+        contribution can be moved off that (mis-attributed) person. None if absent."""
+        return self.db.execute(
+            "SELECT id, track, start_ms, end_ms, speaker, text FROM transcripts "
+            "WHERE id=? AND meeting_id=?", (transcript_id, meeting_id)).fetchone()
+
     def meeting_speaker_names(self, meeting_id, track=None):
         """Distinct speaker labels currently used in a meeting's transcripts
         (track-scoped when given, since live cluster labels are per-track).
