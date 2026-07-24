@@ -374,11 +374,14 @@ async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store):
     wedged backend can't hang stop forever — the backend's own watchdog
     reaps the thread."""
     for tag, s in sessions.items():
+        t = time.perf_counter()
         try:
             evs = await asyncio.wait_for(run_in_threadpool(s.flush), timeout=15)
         except Exception as e:  # noqa: BLE001  (TimeoutError or backend error)
             print(f"live flush skipped ({tag}): {e}", file=sys.stderr)
             evs = []
+        print(f"[live stop] flush {tag} {(time.perf_counter()-t)*1000:.0f}ms",
+              file=sys.stderr)
         for ev in evs:
             if ev["kind"] == "final":  # audio-position offset, not wall-clock
                 spk = store_speaker(ev.get("speaker"), tracks[tag][1])

@@ -219,15 +219,31 @@ class SpeakerTracker:
         return self.last_id
 
 
+_EMB_EXT = {}  # (emb_path, provider) -> SpeakerEmbeddingExtractor, shared across sessions
+
+
 def embedding_extractor(model=None, provider="cpu"):
     """sherpa-onnx speaker embedding extractor: int16 PCM bytes -> vector. Lazy.
-    provider='coreml' offloads to the Neural Engine (power-efficient)."""
+    provider='coreml' offloads to the Neural Engine (power-efficient).
+
+    The extractor is cached per (model, provider) and reused across live
+    sessions: create_stream() makes a fresh stream per call, so the extractor
+    itself is stateless and safe to share — this skips the CoreML compile/load
+    (~hundreds of ms) that was blocking every /ws start handshake."""
     import numpy as np  # noqa: PLC0415
     import sherpa_onnx  # noqa: PLC0415
+    import sys, time  # noqa: PLC0415
 
     _, emb = _resolve_models(emb_model=model)
-    ext = sherpa_onnx.SpeakerEmbeddingExtractor(
-        sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb, provider=provider))
+    key = (emb, provider)
+    ext = _EMB_EXT.get(key)
+    if ext is None:
+        t = time.perf_counter()
+        ext = sherpa_onnx.SpeakerEmbeddingExtractor(
+            sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb, provider=provider))
+        _EMB_EXT[key] = ext
+        print(f"[live start] emb extractor load {(time.perf_counter()-t)*1000:.0f}ms "
+              f"(cold, {provider})", file=sys.stderr)
 
     def _run(pcm_bytes, sample_rate=16000):
         samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0

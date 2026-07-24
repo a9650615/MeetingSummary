@@ -111,14 +111,32 @@ def _is_hallucination(text):
     return False
 
 
+_SILERO_SESS = {}  # path -> ort.InferenceSession, shared across tracks/sessions
+
+
+def _silero_session(path):
+    """Load the silero ONNX session ONCE per path and reuse it. The RNN state
+    (h/c/buf) is per-SileroVad-instance (passed as run() inputs), so sharing the
+    stateless session across tracks/live-sessions is safe and skips the per-
+    session onnxruntime load that was blocking the /ws start handshake."""
+    sess = _SILERO_SESS.get(path)
+    if sess is None:
+        import onnxruntime as ort  # noqa: PLC0415
+        t = time.perf_counter()
+        sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        _SILERO_SESS[path] = sess
+        print(f"[live start] silero VAD load {(time.perf_counter()-t)*1000:.0f}ms (cold)",
+              file=sys.stderr)
+    return sess
+
+
 class SileroVad:
     """Optional neural VAD (snakers4 silero v4, via onnxruntime — no torch). A
     callable frame_bytes->bool for TwoPassSession.speech_fn. Buffers to 512-sample
     chunks (v4 16k window), carries the h/c RNN state, returns the latest decision."""
 
     def __init__(self, path="models/silero_vad_v4.onnx", sample_rate=16000, threshold=0.5):
-        import onnxruntime as ort  # noqa: PLC0415
-        self._s = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        self._s = _silero_session(path)
         self.sr = sample_rate
         self.th = threshold
         self._win = 512 if sample_rate == 16000 else 256
