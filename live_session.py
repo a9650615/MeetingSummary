@@ -408,3 +408,9 @@ async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store):
                                       ev["start_ms"] + conn_offset_ms,
                                       ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
                                       spk, ev["text"])
+    try:  # diagnostic: peak process RSS, to catch a live memory blowup (macOS: bytes)
+        import resource  # noqa: PLC0415
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
+        print(f"[live stop] peak RSS {rss:.0f}MB", file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        pass

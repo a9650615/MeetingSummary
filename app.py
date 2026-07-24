@@ -2858,8 +2858,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if diarize:
             def _bump_rev(_old, _new, _track=None, _mid=mid):
                 _live_rev[_mid] = _live_rev.get(_mid, 0) + 1
-            live_session.enable_diarization(sessions, tracks, store, mid=mid,
-                                            on_rename=_bump_rev)
+            # Background the diarization model load (~3.6s CoreML cold on first
+            # session) so it does NOT block the start handshake / the disk-writer
+            # below — recording begins immediately. speaker_fn attaches when ready;
+            # utterances finalized before then fall back to the side label (same as
+            # diar-off, relabeled by the post-meeting pass). Also keeps the sync
+            # load off the event loop.
+            async def _init_diar():
+                try:
+                    await run_in_threadpool(live_session.enable_diarization,
+                                            sessions, tracks, store, mid, _bump_rev)
+                except Exception as e:  # noqa: BLE001
+                    print(f"live diar init failed (continuing): {e}", file=sys.stderr)
+            asyncio.create_task(_init_diar())
 
         pump = live_session.WallClockPump(tracks, audio_files, t0)
         idle["live"] += 1
@@ -2945,14 +2956,17 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     interim_lag_bytes=int(2 * live_interim_s * 16000) * 2,
                     pop_notice=_pop_notice)
             finally:
-                pump.pad_to(time.time())
-                await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
-                for f in audio_files.values():
-                    f.close()
+                pump.pad_to(time.time())  # writes remaining silence to disk (before close)
+                # Clear the recording state FIRST so /live/state (the panel's dot)
+                # flips to idle immediately; persist the trailing utterance after —
+                # a slow final ASR no longer holds the UI in "recording".
                 idle["live"] = max(0, idle["live"] - 1)
                 live_active.pop(mid, None)
                 native_sessions.pop(mid, None)
                 _touch()
+                for f in audio_files.values():
+                    f.close()
+                await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
 
         native_sessions[mid]["task"] = asyncio.create_task(_run())
         try:
@@ -3412,8 +3426,16 @@ def create_app(store, *, summary_backend, asr_backend=None,
             # splitter labels each piece itself (owns the labeler), so a
             # single-speaker utterance returns one piece = the normal case, and a
             # multi-speaker one is split per turn. No separate speaker_fn needed.
-            live_session.enable_diarization(sessions, tracks, store, mid=mid,
-                                            on_rename=_push_rename)
+            # Backgrounded (~3.6s CoreML cold load) so it neither blocks the start
+            # nor stalls the event loop; attaches when ready, side-label fallback
+            # until then.
+            async def _init_diar():
+                try:
+                    await run_in_threadpool(live_session.enable_diarization,
+                                            sessions, tracks, store, mid, _push_rename)
+                except Exception as e:  # noqa: BLE001
+                    print(f"live diar init failed (continuing): {e}", file=sys.stderr)
+            asyncio.create_task(_init_diar())
 
         async def _emit(ev, label):
             track, speaker = label
@@ -3507,15 +3529,17 @@ def create_app(store, *, summary_backend, asr_backend=None,
         finally:
             rtask.cancel()
             pump.pad_to(time.time())  # equalize track lengths to the final wall-clock
-            await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
-            for f in audio_files.values():
-                f.close()
+            # Clear recording state FIRST (dot -> idle immediately); persist the
+            # trailing utterance after, so a slow final ASR doesn't hold the UI.
             idle["live"] = max(0, idle["live"] - 1)
             if live_active.get(mid, 0) <= 1:
                 live_active.pop(mid, None)
             else:
                 live_active[mid] -= 1
             _touch()  # idle countdown starts when recording stops
+            for f in audio_files.values():
+                f.close()
+            await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
             # Stop != finalize — explicit only.
 
     @app.post("/meetings")
