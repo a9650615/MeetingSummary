@@ -34,6 +34,32 @@ def preprocess(audio):
     return audio
 
 
+class HighPass:
+    """2nd-order Butterworth high-pass on int16 PCM bytes, stateful across chunks
+    (carries filter memory via zi) so consecutive live windows filter continuously
+    with no seam clicks. Strips low-freq rumble — fan/AC/冷氣/handling noise — that
+    muddies noisy-room ASR, with no model (unlike DeepFilterNet, which contends for
+    the ANE). fc=80Hz, 12 dB/oct: rumble ≤40Hz drops ~12dB while the speech band
+    (>~120Hz) is essentially untouched — and it only touches the ASR input, the
+    saved recording stays raw.
+
+    ponytail: fixed 80Hz order-2. Raise the cutoff if rumble still gets through;
+    disable entirely with LIVE_HPF=0."""
+
+    def __init__(self, sample_rate=16000, cutoff_hz=80.0):
+        from scipy.signal import butter, lfilter  # noqa: PLC0415
+        self._lfilter = lfilter
+        self._b, self._a = butter(2, cutoff_hz / (sample_rate / 2.0), btype="high")
+        self._zi = np.zeros(max(len(self._a), len(self._b)) - 1, dtype=np.float64)
+
+    def __call__(self, pcm_bytes):
+        if not pcm_bytes:
+            return pcm_bytes
+        x = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float64)
+        y, self._zi = self._lfilter(self._b, self._a, x, zi=self._zi)
+        return np.clip(np.rint(y), -32768, 32767).astype(np.int16).tobytes()
+
+
 def _compress_ratio(stripped):
     import zlib  # noqa: PLC0415
     b = stripped.encode()

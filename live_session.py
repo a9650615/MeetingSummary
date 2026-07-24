@@ -301,6 +301,13 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
     dropping whatever's buffered; should_stop() (e.g. a remote /live/stop) is
     checked AFTER draining this round's buffers, so the last bit of audio
     still gets transcribed."""
+    import os  # noqa: PLC0415
+    # Low-freq rumble removal on the ASR INPUT only (both backends): the saved
+    # PCM (pump.feed -> disk) stays raw, so playback and the post-meeting denoise
+    # re-transcribe are untouched. One-pole HPF per track, stateful across
+    # windows. Disable with LIVE_HPF=0. Best-effort: a missing scipy just skips it.
+    hpf_on = os.environ.get("LIVE_HPF", "1") != "0"
+    filters = {}  # tag -> HighPass instance (or False if it failed to build)
     while True:
         # Wake on new audio OR on a 0.5s tick. The tick matters: a native
         # source can start (helper alive, no error) yet stream ZERO frames --
@@ -327,6 +334,18 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
                 print(f"live ASR backlog {len(chunk)//32000}s -> trim (audio saved)",
                       file=sys.stderr)
                 chunk = chunk[-TRACK_BACKLOG_MAXB:]
+            if hpf_on:  # de-rumble only the audio ASR actually sees (post-trim)
+                f = filters.get(tag)
+                if f is None:
+                    try:
+                        from live import HighPass  # noqa: PLC0415
+                        f = HighPass()
+                    except Exception as e:  # noqa: BLE001  scipy missing etc.
+                        print(f"live HPF unavailable, raw ASR input: {e}", file=sys.stderr)
+                        f = False
+                    filters[tag] = f
+                if f:
+                    chunk = f(chunk)
             # When BEHIND realtime (backlog building) drop BOTH the interim preview
             # AND the per-utterance diarization embedding for this window, so the
             # live loop spends its ANE/compute budget catching up on final ASR text.

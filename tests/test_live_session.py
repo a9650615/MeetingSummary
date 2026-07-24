@@ -218,7 +218,8 @@ def test_consume_skips_asr_when_record_only():
     assert asyncio.run(run()) == []  # PCM saved via pump.feed, but ASR never called
 
 
-def test_consume_trims_backlog_to_max_bytes():
+def test_consume_trims_backlog_to_max_bytes(monkeypatch):
+    monkeypatch.setenv("LIVE_HPF", "0")  # isolate trim logic; HPF would alter bytes
     async def run():
         tracks = {"t": ("mic", "我")}
         pump = live_session.WallClockPump(tracks, {"t": io.BytesIO()}, t0=time.time())
