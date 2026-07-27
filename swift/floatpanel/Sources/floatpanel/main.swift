@@ -575,7 +575,9 @@ final class Model: ObservableObject {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
                         guard let self = self, self.relayEpoch == epoch else { return }
                         if (self.sysCap as? PanelSystemTapCapturer)?.sawSignal == false {
-                            self.liveNotice = "⚠️ 未擷取到系統音（可能未授權）：系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製 開啟 MeetingSummary 後重新開始"
+                            // No leading ⚠️ here — PanelView already prefixes one,
+                            // and two in a row read as a rendering glitch.
+                            self.liveNotice = "未擷取到系統音（可能未授權）：系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製 開啟 MeetingSummary 後重新開始"
                         }
                     }
                 } else {
