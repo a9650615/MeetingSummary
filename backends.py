@@ -319,6 +319,38 @@ def _chatllm_get(language):
     return _chatllm_daemon
 
 
+def kill_subprocesses():
+    """Reap every helper process this server spawned. Called from app.py's exit
+    handler — nothing used to do this, so the ANE helper (holding a loaded CoreML
+    model) and the qwen3cpp daemon reparented to launchd on every shutdown and
+    accumulated. release_all() is about freeing RAM while running and deliberately
+    leaves the ANE helper alive; this is the exit path, so it takes everything."""
+    import sys  # noqa: PLC0415
+    killed = []
+    p = _ANE_HELP.get("proc")
+    if p is not None and p.poll() is None:
+        try:
+            p.terminate()
+            p.wait(timeout=3)
+        except Exception:  # noqa: BLE001
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        killed.append("qwen3-ane")
+    _ANE_HELP["proc"] = None
+    if _qwen3_daemon is not None and getattr(_qwen3_daemon, "_proc", None) is not None:
+        try:
+            _qwen3_daemon._proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+        _qwen3_daemon._proc = None
+        killed.append("qwen3cpp")
+    if killed:
+        print(f"[exit] reaped helpers: {', '.join(killed)}", file=sys.stderr)
+    return killed
+
+
 def release_all():
     """Drop the heavy .cpp ASR runtimes (chatllm 1.7B in-process model, femelo
     sidecar subprocess) so idle RAM goes back. They lazy-reload on next use."""

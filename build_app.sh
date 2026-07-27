@@ -15,8 +15,11 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/app"
 
 # 1. Python source (small) — everything needed to run + first-run setup.
+# lifecycle.sh is REQUIRED at runtime (supervise.sh/stop.sh source it, /shutdown
+# shells into it). restart.sh ships too — it was missing, so an end user had no
+# way to reload code at all, which is the exact problem restart.sh documents.
 cp -R *.py requirements.txt requirements-app.txt supervise.sh meeting_watch.py \
-      micbusy.swift bootstrap.py stop.sh \
+      micbusy.swift bootstrap.py stop.sh restart.sh lifecycle.sh \
       "$APP/Contents/Resources/app/" 2>/dev/null || true
 [ -f models/silero_vad_v4.onnx ] && { mkdir -p "$APP/Contents/Resources/app/models"; \
   cp models/silero_vad_v4.onnx "$APP/Contents/Resources/app/models/"; }

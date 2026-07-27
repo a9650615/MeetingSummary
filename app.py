@@ -3297,12 +3297,16 @@ def create_app(store, *, summary_backend, asr_backend=None,
             import subprocess
             import time as _t
             _t.sleep(0.3)  # let the HTTP response flush first
-            # SIGKILL the supervisor FIRST so it can't restart the server mid-teardown.
-            for pat in ("supervise.sh", "meeting_watch.py", "bootstrap.py"):
-                subprocess.run(["pkill", "-9", "-f", pat], capture_output=True)
-            port = os.environ.get("MEETING_PORT", "8765")
-            subprocess.run(f"lsof -ti tcp:{port} | xargs kill -9", shell=True,
-                           capture_output=True)  # frees port (kills any server incl self)
+            # Delegate to ms_stop_all (lifecycle.sh) — the ONE kill list, shared
+            # with stop.sh and restart.sh. The hand-rolled copy here killed the
+            # supervisor, watcher and bootstrap but not the floatpanel, so the
+            # panel saw the backend die and relaunched the whole tree ~7.5s later:
+            # "quit" never actually quit. ms_stop_all kills the panel first and
+            # drops a quit sentinel the panel checks before any relaunch.
+            here = os.path.dirname(os.path.abspath(__file__))
+            subprocess.run(["/bin/bash", "-c",
+                            f'source "{here}/lifecycle.sh" && ms_stop_all'],
+                           capture_output=True)
             os._exit(0)
         import threading as _th
         _th.Thread(target=_kill, daemon=True).start()
@@ -3606,8 +3610,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
         conn_offset_ms = max(0, int((t0 - store.get_meeting(mid)["created_at"]) * 1000))
         live_active[mid] = live_active.get(mid, 0) + 1  # show in the global popout
         await ws.send_json({"type": "meeting", "id": mid})
-        if store.get_setting("float_panel", "0") == "1":  # auto-open native panel
-            _open_panel()
+        # NOTE: deliberately does NOT auto-open the native panel, despite the
+        # float_panel setting. Spawning it from python makes macOS attribute the
+        # panel's Screen & System Audio Recording request to the PYTHON process,
+        # not to the panel's own signed identity — the grant then never applies and
+        # the Core Audio tap silently records digital silence. That is exactly the
+        # invariant _open_panel's own comment states ("python never launches the
+        # panel itself"), and this line was violating it. Open the panel from the
+        # app icon / the 🪟 button, both of which go through launchd.
 
         # Per-track. Dual = separate tagged streams (0=mic/我, 1=system/對方);
         # otherwise one track. Frame in dual mode = [1 byte tag] + PCM.
@@ -4500,5 +4510,20 @@ if __name__ == "__main__":  # pragma: no cover
         live_max_lag_s=live_max_lag,
         summary_model=llm_model,
     )
+    # Exit hygiene. There was none: no atexit, no signal handler, nothing — so the
+    # ANE helper and the qwen3cpp daemon reparented to launchd on every shutdown,
+    # each still holding a loaded model. The supervisor now sends TERM before KILL
+    # specifically so this runs.
+    import atexit
+    import signal
+    atexit.register(backends.kill_subprocesses)
+
+    def _bye(signum, _frame):
+        backends.kill_subprocesses()
+        raise SystemExit(0)          # let atexit + uvicorn unwind normally
+
+    for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(_sig, _bye)
+
     port = int(os.environ.get("MEETING_PORT", "8765"))  # 8000 left free for dev
     uvicorn.run(app, host="127.0.0.1", port=port)  # loopback only (G2)

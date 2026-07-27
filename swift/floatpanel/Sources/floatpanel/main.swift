@@ -453,6 +453,16 @@ final class Model: ObservableObject {
     // dev raw binary has no outer launcher to find and silently skips, same
     // "degraded on dev" fallback build_app.sh already documents elsewhere.
     private func tryRelaunchBackend() {
+        // A human asked the app to quit (stop.sh / restart.sh / in-app 結束, all via
+        // lifecycle.sh's ms_stop_all, which drops this sentinel before killing
+        // anything). Without this check the panel outlived the backend, saw it
+        // gone, and relaunched the entire tree ~7.5s later — so "quit" never quit.
+        // Relaunching is only correct when the backend died on its own.
+        let quitFlag = "/tmp/meetingsummary-quit.\(port)"
+        if FileManager.default.fileExists(atPath: quitFlag) {
+            NSApp.terminate(nil)
+            return
+        }
         if let last = lastRelaunchAttempt, Date().timeIntervalSince(last) < 60 { return }
         lastRelaunchAttempt = Date()
         // Bundle.main is the NESTED panel bundle (.../Contents/Resources/panel/
