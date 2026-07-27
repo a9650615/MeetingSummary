@@ -88,26 +88,51 @@ def mlx_whisper_backend(model="mlx-community/whisper-large-v3-mlx", language=Non
     non-Mac dev don't need mlx-whisper installed. language=None -> auto-detect;
     or a whisper code ("zh"/"en"/"ja"...) to force it.
 
-    Containers (m4a/wav/mp3) are passed by path (ffmpeg decodes). Raw headerless
-    .pcm (our recorder/segment format, 16 kHz mono s16le) is loaded into an array
-    here — ffmpeg can't sniff a format from raw PCM."""
+    Accepts raw PCM BYTES (a live window), a headerless .pcm path (our
+    recorder/segment format, 16 kHz mono s16le — ffmpeg can't sniff a format from
+    raw PCM, so it's loaded into an array here), or a container path (m4a/wav/mp3,
+    handed to ffmpeg). One engine for live and batch alike: whichever way the audio
+    arrives, the decode settings and preprocessing are identical."""
     import mlx_whisper  # noqa: PLC0415
     lang = language or None
 
-    def _run(audio_path):
-        audio_path = str(audio_path)
-        if audio_path.endswith(".pcm"):
-            import numpy as np  # noqa: PLC0415
-            with open(audio_path, "rb") as f:
-                audio = np.frombuffer(f.read(), dtype=np.int16).astype(np.float32) / 32768.0
-            src = audio
+    def _run(audio):
+        src = None
+        if isinstance(audio, (bytes, bytearray)):
+            raw = bytes(audio)
+            if len(raw) < 2:
+                return []
+            if len(raw) % 2:      # a dropped/odd tail byte would crash frombuffer
+                raw = raw[:-1]
         else:
-            src = audio_path
+            audio = str(audio)
+            if audio.endswith(".pcm"):
+                with open(audio, "rb") as f:
+                    raw = f.read()
+            else:
+                src, raw = audio, None
+        if raw is not None:
+            import numpy as np  # noqa: PLC0415
+
+            import live  # noqa: PLC0415
+            src = live.preprocess(
+                np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0)
         # condition_on_previous_text=False stops a loop from cascading forward;
         # compression_ratio_threshold drops the high-repetition (degenerate) windows.
-        result = mlx_whisper.transcribe(
-            src, path_or_hf_repo=model, language=lang,
-            condition_on_previous_text=False, compression_ratio_threshold=2.4)
-        return result["segments"]
+        try:
+            result = mlx_whisper.transcribe(
+                src, path_or_hf_repo=model, language=lang,
+                condition_on_previous_text=False, compression_ratio_threshold=2.4)
+        except Exception as e:  # noqa: BLE001  one bad window must not kill a session
+            import sys  # noqa: PLC0415
+            print(f"whisper error (skipped): {e}", file=sys.stderr)
+            return []
+        # Whisper's standard hallucination guards: drop non-speech / repetitive /
+        # low-confidence segments. These lived only on the live path, which is part
+        # of why a re-transcribe came back with junk live had already filtered out.
+        return [s for s in result["segments"]
+                if s.get("no_speech_prob", 0) < 0.6
+                and s.get("compression_ratio", 0) < 2.4
+                and s.get("avg_logprob", 0) > -1.0]
 
     return _run
