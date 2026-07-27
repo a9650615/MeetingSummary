@@ -54,9 +54,14 @@ def test_iter_transcribe_pauses_between_windows(tmp_path, monkeypatch):
     mid = store.create_meeting("t", time.time(), "zh-TW")
     seg = tmp_path / "seg"
     seg.mkdir()
-    (seg / "mic.pcm").write_bytes(b"\x00" * (30 * 16000 * 2 * 2))  # 2 windows
+    # exactly 2 windows of real (non-silent) audio — iter_transcribe windows at 29s
+    # and skips windows that are pure silence, neither of which this test is about
+    import numpy as np
+    n = 2 * 29 * 16000
+    t = np.arange(n) / 16000
+    (seg / "mic.pcm").write_bytes((6000 * np.sin(2 * np.pi * 220 * t)).astype("<i2").tobytes())
     store.add_segment(mid, idx=0, dir_path=str(seg), started_at=time.time(),
-                      duration_s=60, origin="recorded")
+                      duration_s=58, origin="recorded")
     monkeypatch.setattr(app.asr, "transcribe",
                         lambda *a, **k: [{"start_ms": 0, "end_ms": 1, "text": "x",
                                           "profile": "accurate", "track": "mic"}])

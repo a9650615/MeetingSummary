@@ -2056,6 +2056,11 @@ def _auto_title(summary_text, backend):
 
 
 _PAUSED_TEXT = "⏸ 錄音中，暫停辨識…"
+# A batch window this quiet, with the VAD also finding nothing, is the silence
+# padding on disk rather than audio — skip it instead of asking the model to
+# transcribe it. LIVE_HPF=0 turns the high-pass off for both live and batch.
+_SILENT_RMS = 30
+_HPF_ON = os.environ.get("LIVE_HPF", "1") != "0"
 
 
 def wait_while_live(live_busy, jobs=None, mid=None, poll_s=1.0):
@@ -2080,12 +2085,21 @@ def wait_while_live(live_busy, jobs=None, mid=None, poll_s=1.0):
     return True
 
 
-def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000,
+def iter_transcribe(store, mid, backend, window_s=29, sample_rate=16000,
                     live_busy=None):
     """Generator: re-transcribe a meeting window-by-window, yielding progress
     events ({type:start,total} / {type:progress,done,total,text} / {type:done,n})
     and storing each result as it lands. Windowing gives granular progress even
-    for a single long file; each window's text streams to the client live."""
+    for a single long file; each window's text streams to the client live.
+
+    window_s is 29, not 30, to match the CoreML encoder's fixed 30s shape: a 30s
+    window made the ANE backend re-slice into 29s + a 1s orphan clip that was then
+    decoded as its own utterance — a hallucination source once per window.
+
+    Each window gets the SAME treatment live gives its audio: high-pass filtered,
+    skipped outright when the VAD finds no real speech, and text dropped when it is
+    too long for the speech present. Without those, the batch path transcribed the
+    wall-clock silence padding on disk and invented sentences for it."""
     base = store.get_meeting(mid)["created_at"]
     win_bytes = int(window_s * sample_rate) * 2
     units = []  # (track, pcm_path, base_off_ms, byte_start, byte_len)
@@ -2123,6 +2137,23 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000,
             _clean[path] = backends.denoise_file(path, raw_pcm=True)
         return _clean[path]
 
+    import live  # noqa: PLC0415  (module-top would pull MLX into every import of app)
+    # One high-pass per source file, carried across that file's windows, so the
+    # filter state is continuous exactly like live's per-track instance.
+    _hpf = {}
+
+    def _batch_hpf(path, raw):
+        if not _HPF_ON:
+            return raw
+        f = _hpf.get(path)
+        if f is None:
+            try:
+                f = live.HighPass()
+            except Exception:  # noqa: BLE001  scipy missing -> unfiltered, as before
+                f = False
+            _hpf[path] = f
+        return f(raw) if f else raw
+
     try:
       for i, (track, p, seg_off, bs, bl) in enumerate(units):
         # Yield the ANE to a live recording between windows: every earlier window
@@ -2137,13 +2168,28 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000,
         tmp = f"{os.path.dirname(p)}/_win.pcm"
         with open(_src(p), "rb") as f:
             f.seek(bs)
-            with open(tmp, "wb") as w:
-                w.write(f.read(bl))
+            raw = f.read(bl)
+        raw = _batch_hpf(p, raw)       # same de-rumble live applies to its ASR input
+        speech_s = live.speech_seconds(raw)
+        if speech_s <= 0 and live._rms(raw) < _SILENT_RMS:
+            # Digital silence — the wall-clock padding WallClockPump writes to disk,
+            # which on an idle 對方 track is most of the file. Live never sends this
+            # to the model; the batch path did, and got invented sentences back.
+            # Deliberately conservative (VAD says nothing AND the window is近乎無聲):
+            # dropping a whole 29s window on a VAD misfire would lose real speech,
+            # which is worse than a hallucination. Everything else is caught
+            # per-utterance by is_overlong_for_speech below.
+            yield {"type": "progress", "done": i + 1, "total": len(units), "text": ""}
+            continue
+        with open(tmp, "wb") as w:
+            w.write(raw)
         texts = []
         speaker = _TRACK_LABEL.get(track, track)  # mic->我, system->對方
         try:
             for t in asr.transcribe(tmp, profile="accurate", track=track,
                                     backend=backend, clip_ms=win_dur_ms):
+                if live.is_overlong_for_speech(t["text"], speech_s):
+                    continue  # more words than the speech present can hold
                 store.add_transcript(mid, "accurate", track,
                                      t["start_ms"] + win_off_ms,
                                      t["end_ms"] + win_off_ms, speaker, t["text"])
