@@ -493,8 +493,17 @@ def ane_speech_backend(engine="qwen3-coreml-full", model="0.6B", language=None):
             # Force CoreML onto the Neural Engine (encoder defaults to .all = GPU,
             # which is why 'ANE' still spun the GPU). ane = .cpuAndNeuralEngine.
             env = {**os.environ, "SPEECH_COREML_COMPUTE_UNITS": "ane"}
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
-                                env=env).stdout
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
+                               env=env)
+            out = p.stdout
+            # A non-zero exit used to be swallowed: stdout is empty, every window
+            # silently yields no text, and the meeting just comes back missing
+            # chunks with no clue why (e.g. the CLI rejecting --language).
+            if p.returncode != 0:
+                import sys as _sys  # noqa: PLC0415
+                print(f"ane batch ASR failed (rc={p.returncode}): "
+                      f"{(p.stderr or '').strip()[:300]}", file=_sys.stderr)
+                raise RuntimeError(f"speech transcribe-batch failed (rc={p.returncode})")
             segs = []
             for line in out.splitlines():
                 line = line.strip()
