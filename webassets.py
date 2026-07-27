@@ -1,7 +1,13 @@
 """Static web assets for MeetingSummary — CSS, theme/manifest/service-worker,
-the shell JS blobs (meeting-detect HUD, progress popout, quick-record FAB), and
-the PWA icon generator. Pure presentation, no app logic — keeps app.py focused
-on routes + the live pipeline. None interpolate app state (all plain strings)."""
+the shell JS blobs (meeting-detect HUD, progress popout), and the PWA icon
+generator. Pure presentation, no app logic — keeps app.py focused on routes +
+the live pipeline. None interpolate app state (all plain strings).
+
+The quick-record FAB used to live here too: a floating button on every page with
+its own getUserMedia/getDisplayMedia capture and its own websocket — a third
+recording entry point beside /live and the native panel, duplicating the whole
+capture path. Removed; recording starts from the panel or /live. The global
+"recording in progress" indicator is unaffected — that is _DETECT_JS's #_recind."""
 
 # Shared design system — calm zh-TW productivity aesthetic. Served pages (not a
 # claude.ai Artifact), so a full self-styled doc is fine.
@@ -308,76 +314,3 @@ _PROG_JS = (
     "schedule(jobs.length?1500:4000);}).catch(()=>schedule(4000));}"
     "function schedule(ms){clearTimeout(timer);timer=setTimeout(tick,ms);}"
     "window._jobsTick=tick;tick();})();")
-
-
-# Global quick-record: a floating button on every page (except /live). Click opens
-# a small options panel (source / live model / record-only); then it captures in
-# place (mic, system, or dual — same 16k box-averaged PCM + tag-byte protocol as
-# /live) over its own ws. Self-contained. No bare // comments (ships in the shell,
-# scanned by the single-line-script guard).
-_REC_JS = (
-    "(function(){if(location.pathname==='/live')return;"
-    "let gws=null,gctx=null,nodes=[],streams=[],t0=0,timer=null,open=false,_busy=false;"
-    "const fab=document.createElement('div');fab.id='_recfab';"
-    "fab.style.cssText='position:fixed;right:18px;bottom:18px;z-index:300;display:flex;"
-    "flex-direction:column;align-items:flex-end;gap:8px';document.body.appendChild(fab);"
-    "function fmt(s){s=Math.floor(s);return (s/60|0)+':'+('0'+s%60).slice(-2);}"
-    "const RB='border-radius:24px;padding:.6em 1.1em;box-shadow:0 10px 26px -10px rgba(0,0,0,.55)';"
-    "const RED='background:#c0392b;border-color:#c0392b;color:#fff;font-weight:700;';"
-    "function panel(){return `<div style=\"background:var(--surface);border:1px solid var(--line);"
-    "border-radius:18px;box-shadow:var(--shadow-lg);padding:14px;width:236px;display:flex;"
-    "flex-direction:column;gap:11px\"><div style=\"font-weight:760;font-size:14px\">快速錄音</div>"
-    "<label class=fld>來源<select id=_rsrc><option value=mic>麥克風(我)</option>"
-    "<option value=system>系統音(對方)</option><option value=dual>兩者</option></select></label>"
-    "<label class=fld>即時模型<select id=_rmodel>"
-    "<option value=\"qwen3-asr-0.6b-q4-k-m\">Qwen3-ASR 0.6B(快)</option>"
-    "<option value=\"mlx-community/whisper-small-mlx-q4\">whisper small(省)</option>"
-    "<option value=\"mlx-community/whisper-large-v3-turbo-q4\">whisper turbo(準)</option></select></label>"
-    "<label class=chk><input type=checkbox id=_rro> 🪫 純錄音(不即時辨識)</label>"
-    "<button class=\"btn primary\" id=_rgo style=\"width:100%\">● 開始錄音</button></div>`;}"
-    "function renderIdle(elsewhere){fab.innerHTML=(open?panel():'')+"
-    "(elsewhere?`<a class=btn href=/live style=\"${RED}${RB}\">● 錄音中（前往）</a>`"
-    ":`<button class=btn id=_rtoggle style=\"${RB}\">● 快速錄音</button>`);"
-    "const tg=document.getElementById('_rtoggle');if(tg)tg.onclick=()=>{open=!open;renderIdle(false);};"
-    "const go=document.getElementById('_rgo');if(go)go.onclick=begin;}"
-    "function renderRec(){open=false;fab.innerHTML=`<button class=btn id=_rstop style=\"${RED}${RB}\">"
-    "■ 停止 <span id=_rt>0:00</span></button>`;document.getElementById('_rstop').onclick=stop;}"
-    "async function begin(){if(_busy||gws)return;_busy=true;"  # guard double-start race
-    "const src=document.getElementById('_rsrc').value;"
-    "const model=document.getElementById('_rmodel').value,ro=document.getElementById('_rro').checked;"
-    "try{if(src==='mic')streams=[await navigator.mediaDevices.getUserMedia({audio:true})];"
-    "else if(src==='system'){const s=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});"
-    "s.getVideoTracks().forEach(t=>t.stop());"
-    "if(!s.getAudioTracks().length){alert('未取得系統音(分享時要勾「分享音訊」)');_busy=false;return;}streams=[s];}"
-    "else{const mic=await navigator.mediaDevices.getUserMedia({audio:true});"
-    "const sys=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});"
-    "sys.getVideoTracks().forEach(t=>t.stop());streams=[mic,sys];}}"
-    "catch(e){alert('無法取得音訊：'+e.message);_busy=false;return;}"
-    "try{await fetch('/models',{method:'POST',headers:{'Content-Type':'application/json'},"
-    "body:JSON.stringify({live:model})});}catch(e){}"
-    "try{gctx=new AudioContext({sampleRate:16000});}catch(e){gctx=new AudioContext();}"
-    "const ratio=gctx.sampleRate/16000,dual=(src==='dual');"
-    "gws=new WebSocket(`ws://${location.host}/ws/live?src=${src}${ro?'&record_only=1':''}`);"
-    "gws.binaryType='arraybuffer';"
-    "gws.onopen=()=>{const g=gctx.createGain();g.gain.value=0;g.connect(gctx.destination);"
-    "streams.forEach((st,i)=>{const node=gctx.createScriptProcessor(4096,1,1);"
-    "gctx.createMediaStreamSource(st).connect(node);node.connect(g);const tag=dual?i:null;"
-    "node.onaudioprocess=ev=>{if(!gws||gws.readyState!==1)return;"
-    "const inp=ev.inputBuffer.getChannelData(0),outLen=Math.floor(inp.length/ratio),pcm=new Int16Array(outLen);"
-    "for(let k=0;k<outLen;k++){const a=Math.floor(k*ratio),b=Math.floor((k+1)*ratio);let sm=0,n=0;"
-    "for(let j=a;j<b&&j<inp.length;j++){sm+=inp[j];n++;}"
-    "const v=Math.max(-1,Math.min(1,n?sm/n:0));pcm[k]=v*32767;}"
-    "if(tag===null)gws.send(pcm.buffer);"
-    "else{const bb=new Uint8Array(1+pcm.byteLength);bb[0]=tag;bb.set(new Uint8Array(pcm.buffer),1);gws.send(bb.buffer);}};"
-    "nodes.push(node);});t0=Date.now();renderRec();clearInterval(timer);"
-    "clearInterval(timer);timer=setInterval(()=>{const el=document.getElementById('_rt');if(el)el.textContent=fmt((Date.now()-t0)/1000);},1000);};"
-    "gws.onclose=()=>cleanup();gws.onerror=()=>cleanup();}"
-    "function stop(){if(gws){try{gws.close();}catch(e){}}cleanup();}"
-    "function cleanup(){_busy=false;clearInterval(timer);timer=null;"
-    "nodes.forEach(n=>{n.onaudioprocess=null;try{n.disconnect();}catch(e){}});nodes=[];"
-    "streams.forEach(s=>s.getTracks().forEach(t=>t.stop()));streams=[];"
-    "if(gctx){try{gctx.close();}catch(e){}gctx=null;}gws=null;refresh();}"
-    "async function refresh(){if(gws){renderRec();return;}"
-    "try{const d=await(await fetch('/detect')).json();renderIdle(!!d.recording);}catch(e){renderIdle(false);}}"
-    "refresh();setInterval(()=>{if(!gws&&!open)refresh();},10000);})();")
-

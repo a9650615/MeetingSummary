@@ -27,7 +27,7 @@ import live_session  # shared pipeline plumbing: /ws/live (browser) + /ws/native
 from summarize import summarize
 
 from webassets import (  # static CSS/JS/PWA assets (presentation, no logic)
-    _STYLE, _THEME_JS, _png_solid, _MANIFEST, _SW_JS, _DETECT_JS, _PROG_JS, _REC_JS)
+    _STYLE, _THEME_JS, _png_solid, _MANIFEST, _SW_JS, _DETECT_JS, _PROG_JS)
 
 
 def _ensure_tool_path():
@@ -124,7 +124,6 @@ def _shell(title, body, script="", back=False):
         + (f"<script>{script}</script>" if script else "")
         + f"<script>{_DETECT_JS}</script>"
         + f"<script>{_PROG_JS}</script>"
-        + f"<script>{_REC_JS}</script>"
         + "</body></html>"
     )
 
@@ -496,10 +495,9 @@ def _models_page():
             "先到下方「加速 runtime」一鍵安裝 <code>speech</code>，裝好後這裡會出現開關。</p></div>")
            if _apple_silicon() else "")
         + ("<div class=card style='margin-top:12px'>"
-           "<label class=chk><input type=checkbox id=floatpanel_opt> "
-           "🪟 錄音時自動開啟原生懸浮控制面板</label>"
-           "<p class=hint style='margin:.6em 0 0'>開始錄音(含手動／快速錄音)時，自動開啟可置頂於其他 App 之上的"
-           "原生小窗(狀態＋計時＋停止)。需先到下方「加速 runtime」安裝 <code>floatpanel</code>。</p></div>"
+           "<p class=hint style='margin:0'>🪟 懸浮面板請從 App 圖示或「主控台」開啟。"
+           "由伺服器代開會讓 macOS 把螢幕／系統音訊錄製權限記在 Python 上而不是面板身上，"
+           "結果就是錄到一片靜音，所以這個自動開啟選項已移除。</p></div>"
            if _apple_silicon() else "")
         + ("<div class=card style='margin-top:12px'>"
            "<label class=chk><input type=checkbox id=remote_opt> "
@@ -632,9 +630,6 @@ def _models_page():
     (function(){const c=document.getElementById('correct_opt');if(!c)return;
       fetch('/settings/summary_correct').then(r=>r.json()).then(j=>c.checked=j.value!=='0');  // default on
       c.onchange=()=>fetch('/settings/summary_correct',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:c.checked?'1':'0'})});})();
-    (function(){const f=document.getElementById('floatpanel_opt');if(!f)return;
-      fetch('/settings/float_panel').then(r=>r.json()).then(j=>f.checked=j.value==='1');
-      f.onchange=()=>fetch('/settings/float_panel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:f.checked?'1':'0'})});})();
     (function(){const r=document.getElementById('remote_opt');if(!r)return;
       fetch('/settings/remote_store').then(x=>x.json()).then(j=>r.checked=j.value==='1');
       r.onchange=()=>fetch('/settings/remote_store',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:r.checked?'1':'0'})});})();
@@ -4367,7 +4362,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         return {"deleted": name}
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
-                 "denoise": "0", "float_panel": "0", "summary_correct": "1",
+                 "denoise": "0", "summary_correct": "1",
                  "remote_store": "0",  # ☁️ 上傳到 server toggle (default OFF)
                  # /live recording default, so the page never needs re-picking:
                  "live_source": "mic",
