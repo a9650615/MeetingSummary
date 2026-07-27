@@ -2402,7 +2402,16 @@ def _diarize_meeting(store, mid, jobs, tracks=None):
     Best-effort: a diarize failure leaves the plain transcript intact."""
     import diarize as diar  # noqa: PLC0415
     if tracks is None:
-        tracks = _meeting_tracks(store, mid)
+        # Use the tracks the TRANSCRIPT actually carries. _meeting_tracks collapses
+        # mic+system into a synthetic "mixed" that no row is ever tagged with, so
+        # the `r["track"] == track` filter below matched nothing and the whole pass
+        # silently relabelled zero rows after burning minutes of CPU — the reason
+        # re-transcribe came back with only 我/對方. Per-track is also the better
+        # input: "mixed" sums both sides onto one channel, which is the worst case
+        # for embeddings. Live diarizes each track independently for the same reason.
+        tracks = sorted({r["track"] for r in store.list_transcripts(mid)})
+        if not tracks:
+            tracks = _meeting_tracks(store, mid)
     enroll = store.get_setting("persist_speakers", "1") == "1"
     for ti, track in enumerate(tracks):
         pcm = _assemble_track(store, mid, track)
