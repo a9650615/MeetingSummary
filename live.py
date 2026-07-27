@@ -117,6 +117,36 @@ _HALLUCINATION_STRONG = [
 _MAX_CHARS_PER_SPEECH_S = 25
 
 
+def speech_seconds(pcm, sample_rate=16000, frame_ms=30, rms_threshold=80):
+    """Seconds of actual SPEECH in a PCM buffer, using the same silero VAD live
+    endpoints with (energy RMS if the model is unavailable).
+
+    Exists so the BATCH path can reuse live's two anti-hallucination guards. Live
+    never transcribes silence — the VAD gates it and _enough_speech drops sub-350ms
+    blips — but the batch path fed every fixed window to the model, including the
+    wall-clock silence padding WallClockPump writes to disk. Handing Qwen3-ASR
+    minutes of digital silence is how a quiet 對方 track grows invented sentences."""
+    fb = int(sample_rate * frame_ms / 1000) * 2
+    if fb <= 0 or len(pcm) < fb:
+        return 0.0
+    try:
+        vad = SileroVad()          # onnx session is module-cached; cheap per call
+    except Exception:              # noqa: BLE001
+        vad = None
+    n = 0
+    for i in range(0, len(pcm) - fb + 1, fb):
+        frame = bytes(pcm[i:i + fb])
+        if vad(frame) if vad else (_rms(frame) >= rms_threshold):
+            n += 1
+    return n * frame_ms / 1000.0
+
+
+def is_overlong_for_speech(text, speech_s):
+    """live's silence-hallucination gate (see _finalize): text too long for the
+    speech actually present is confabulation, not transcription."""
+    return bool(text) and len(text) > 12 and len(text) > speech_s * _MAX_CHARS_PER_SPEECH_S
+
+
 def _norm(text):
     return text.strip().lower().strip(" .,!?。，、！？、")
 
