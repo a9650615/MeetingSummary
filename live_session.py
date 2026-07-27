@@ -74,22 +74,57 @@ def display_speaker(stored, track):
     return stored
 
 
+class NullSink:
+    """Stand-in for an audio file when the session must NOT keep a recording
+    (純字幕 / transcribe-only): accepts the same write/close the pump uses and
+    throws the PCM away. Everything else — the wall-clock padding, `written`,
+    the ASR buffers — is untouched, so timestamps stay identical to a recorded
+    session; only the bytes on disk go away."""
+
+    def write(self, _b):
+        pass
+
+    def close(self):
+        pass
+
+
 class WallClockPump:
     """Keeps every track's saved PCM + ASR buffer on one shared wall clock:
     on each feed(), pads EVERY track with silence up to now-t0 first, so all
     tracks stay the same length and on one clock regardless of when each
     source starts or how bursty it is (mic vs. system audio vs. a subprocess
-    that hasn't written in a while)."""
+    that hasn't written in a while).
 
-    def __init__(self, tracks, audio_files, t0):
+    paused: optional predicate. While it returns True the pump drops incoming
+    audio and freezes the clock, and the paused span is ELIDED on resume (t0
+    slides forward) rather than backfilled — a meeting paused for 15 minutes
+    stays a 30-minute recording, and, just as importantly, resume doesn't dump
+    one 15-minute block of silence into the ASR buffer."""
+
+    def __init__(self, tracks, audio_files, t0, paused=None):
         self.tracks = tracks
         self.audio_files = audio_files
         self.t0 = t0
+        self.paused = paused
+        self.paused_at = None
         self.buffers = {tag: bytearray() for tag in tracks}
         self.written = {tag: 0 for tag in tracks}
         self.got = asyncio.Event()
 
+    def _paused_now(self):
+        """Poll the predicate and handle the edges. Idempotent — safe to call
+        more than once per frame (feed calls it, then pad_to calls it again)."""
+        p = bool(self.paused and self.paused())
+        if p and self.paused_at is None:
+            self.paused_at = time.time()
+        elif not p and self.paused_at is not None:
+            self.t0 += time.time() - self.paused_at  # elide the paused span
+            self.paused_at = None
+        return p
+
     def pad_to(self, now):
+        if self._paused_now():
+            return  # clock frozen: no silence accrues while paused
         target = int((now - self.t0) * 16000) * 2
         for tag in self.tracks:
             gap = target - self.written[tag]
@@ -103,6 +138,8 @@ class WallClockPump:
     def feed(self, tag, pcm):
         if tag not in self.buffers or not pcm:
             return
+        if self._paused_now():
+            return  # drop: nothing saved, nothing transcribed, clock frozen
         self.pad_to(time.time())
         self.audio_files[tag].write(pcm)
         self.buffers[tag].extend(pcm)

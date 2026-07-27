@@ -523,6 +523,11 @@ def _models_page():
            "<option value=ja>日本語</option>"
            "<option value=ko>한국어</option>"
            "<option value=yue>粵語</option>"
+           "</select></label>"
+           "<label style='margin-left:12px'>錄音模式 <select id=live_mode_opt>"
+           "<option value=both>錄音＋即時辨識</option>"
+           "<option value=record>純錄音（省電，不即時辨識）</option>"
+           "<option value=transcribe>純字幕（不留錄音檔）</option>"
            "</select></label></div>"
            "<p class=hint style='margin:.6em 0 0'>/live 錄音頁會記住這裡的預設；也可在錄音頁直接改，會自動存回。"
            "系統音(對方)/兩者/雙軌會用瀏覽器 getDisplayMedia 分享分頁或畫面的音訊 — 免安裝任何原生元件。"
@@ -640,6 +645,9 @@ def _models_page():
     (function(){const s=document.getElementById('live_language_opt');if(!s)return;
       fetch('/settings/live_language').then(r=>r.json()).then(j=>{s.value=j.value||'';});
       s.onchange=()=>fetch('/settings/live_language',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
+    (function(){const s=document.getElementById('live_mode_opt');if(!s)return;
+      fetch('/settings/live_mode').then(r=>r.json()).then(j=>{s.value=j.value||'both';});
+      s.onchange=()=>fetch('/settings/live_mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
     (function(){const s=document.getElementById('livemodel');if(!s)return;
       fetch('/models').then(r=>r.json()).then(j=>{const v=j.live_requested||j.live;if(v)s.value=v;});
       s.onchange=async()=>{const m=document.getElementById('livemodelmsg');m.textContent=' 套用中…';
@@ -680,6 +688,7 @@ _LIVE_BODY = """
 <div class=card>
   <div class=live-actionrow>
     <button class="btn primary livebig" id=start>● 開始錄音</button>
+    <button class="btn livebig" id=pause style="display:none">⏸ 暫停</button>
     <button class="btn danger livebig" id=stop disabled style="display:none">■ 停止錄音</button>
     <span class=live-status id=recstatus style="display:none">
       <span class=live-dot></span>
@@ -780,6 +789,7 @@ let ws, ctx, gain, streams=[], nodes=[], mid, session=null;
 const T=document.getElementById('transcript'), S=document.getElementById('status');
 const C=document.getElementById('caption'), L=document.getElementById('live');
 const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
+(function(){const pb=document.getElementById('pause'); if(pb) pb.onclick=()=>togglePause();})();
 const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
 const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
 function colored(speaker){ return COLORS[speaker]||'#444'; }
@@ -822,7 +832,25 @@ function applyRename(from, to, track){
 // Recording state feedback: swap start/stop, run an mm:ss timer + pulsing dot.
 let recTimer=null, recStart=0;
 function fmtElapsed(s){s=Math.floor(s);return String(s/60|0).padStart(2,'0')+':'+String(s%60).padStart(2,'0');}
+// ⏸ 暫停/繼續: server-side (POST /live/pause) so it works for an attached
+// floatpanel session too, where this page has no websocket of its own. The pump
+// drops audio while paused and elides the gap, so nothing is saved and the timer
+// is the only thing that keeps counting.
+let paused=false;
+function pauseUiSync(){
+  const b=document.getElementById('pause'); if(!b) return;
+  b.textContent = paused ? '▶ 繼續' : '⏸ 暫停';
+  const rd=document.getElementById('recdot'); if(rd) rd.style.opacity = paused ? '.35' : '';
+}
+function togglePause(){
+  const next=!paused;
+  fetch('/live/pause?on='+next,{method:'POST'})
+    .then(r=>r.json()).then(()=>{ paused=next; pauseUiSync(); })
+    .catch(()=>{});
+}
 function recUiStart(){
+  paused=false; pauseUiSync();
+  const pb=document.getElementById('pause'); if(pb) pb.style.display='';
   startBtn.style.display='none'; stopBtn.style.display='';
   const rs=document.getElementById('recstatus'); if(rs) rs.style.display='inline-flex';
   const ml=document.getElementById('miclevel'); if(ml) ml.style.display='';
@@ -832,6 +860,8 @@ function recUiStart(){
 }
 function recUiStop(){
   clearInterval(recTimer); recTimer=null;
+  paused=false;
+  const pb=document.getElementById('pause'); if(pb) pb.style.display='none';
   startBtn.style.display=''; stopBtn.style.display='none';
   const rs=document.getElementById('recstatus'); if(rs) rs.style.display='none';
   const ml=document.getElementById('miclevel'); if(ml) ml.style.display='none';
@@ -866,6 +896,8 @@ function pollAttached(){
   fetch('/live/state').then(r=>r.json()).then(st=>{
     if(!attached) return;             // exited (e.g. 停止 clicked) while this was in flight
     if(!st.recording || st.mid!==mid){ exitAttached(); return; }
+    // the session may have been paused elsewhere (floatpanel / another tab)
+    if(!!st.paused !== paused){ paused=!!st.paused; pauseUiSync(); }
     if(st.caption) C.textContent = st.caption;
     attachTimer=setTimeout(pollAttached, 2000);
   }).catch(()=>{ if(attached) attachTimer=setTimeout(pollAttached, 2000); });
@@ -2705,6 +2737,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         return idle["live"] > 0
     live_active = {}  # mid -> open live connections; surfaced in /jobs (global popout)
     live_stop = set()  # mids the float control panel asked to stop (server-side)
+    live_paused = set()  # mids paused via /live/pause — the pump drops audio while
+    # a mid is in here (WallClockPump(paused=...)). Server-side like live_stop, so
+    # it works for BOTH the browser socket and the floatpanel relay, which has no
+    # control channel of its own.
     native_sessions = {}  # mid -> {"proc": None, "task": asyncio.Task, "notice": str|None}
     # for a /ws/native-capture (floatpanel relay) session — task kept alive here (else GC'd)
     _panel = {"p": None, "show_seq": 0}  # subprocess (singleton) + show-request counter
@@ -2825,6 +2861,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         return {"recording": bool(mids), "mid": mid, "count": len(mids),
                 "title": title, "caption": caption, "captions": captions, "notice": notice,
                 "started_at": started_at, "show_seq": _panel["show_seq"],
+                "paused": mid is not None and mid in live_paused,
                 "rev": _live_rev.get(mid, 0)}
 
     @app.get("/native/capability")
@@ -2891,10 +2928,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
             mid = store.create_meeting(title, t0, "zh-TW")
             conn_offset_ms = 0
         await ws.send_json({"type": "meeting", "id": mid})
-        audio_dir = f"data/{mid}-{int(t0)}"
-        os.makedirs(audio_dir, exist_ok=True)
-        store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
-                          started_at=t0, duration_s=0, origin="recorded")
+        # Session mode (see _SETTINGS['live_mode']). The floatpanel sends no mode
+        # of its own, so it inherits the saved setting — same trick live_language
+        # uses to reach the panel without a Swift change.
+        mode = ws.query_params.get("mode") or store.get_setting("live_mode", "both")
         if source == "mic":
             tracks = {recorder.TRACK_MIC: ("mic", "我")}
         elif source == "system":
@@ -2902,7 +2939,17 @@ def create_app(store, *, summary_backend, asr_backend=None,
         else:
             tracks = {recorder.TRACK_MIC: ("mic", "我"),
                       recorder.TRACK_SYSTEM: ("system", "對方")}
-        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb") for tag, lbl in tracks.items()}
+        if mode == "transcribe":
+            # 純字幕: no recording kept. Skip the segment row too — an empty audio
+            # dir is otherwise indistinguishable from a recording that failed.
+            audio_files = {tag: live_session.NullSink() for tag in tracks}
+        else:
+            audio_dir = f"data/{mid}-{int(t0)}"
+            os.makedirs(audio_dir, exist_ok=True)
+            store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
+                              started_at=t0, duration_s=0, origin="recorded")
+            audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
+                           for tag, lbl in tracks.items()}
         live_manager.set_language(store.get_setting("live_language", "") or None)
         sessions = live_session.build_track_sessions(
             tracks, live_manager=live_manager, live_interim_backend=live_interim_backend,
@@ -2926,7 +2973,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     print(f"live diar init failed (continuing): {e}", file=sys.stderr)
             asyncio.create_task(_init_diar())
 
-        pump = live_session.WallClockPump(tracks, audio_files, t0)
+        live_paused.discard(mid)  # a resumed meeting must not inherit a stale pause
+        pump = live_session.WallClockPump(tracks, audio_files, t0,
+                                          paused=lambda: mid in live_paused)
         idle["live"] += 1
         live_active[mid] = 1
         native_sessions[mid] = {"proc": None, "task": None, "notice": None}
@@ -3008,7 +3057,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             drain = asyncio.create_task(_push_drain())
             try:
                 await live_session.consume(
-                    pump, sessions, tracks, rec_on=lambda: False,
+                    pump, sessions, tracks, rec_on=lambda: mode == "record",
                     emit=live_session.make_store_emit(mid, conn_offset_ms, store,
                                                       push=_push),
                     should_stop=_should_stop,
@@ -3023,6 +3072,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 idle["live"] = max(0, idle["live"] - 1)
                 live_active.pop(mid, None)
                 native_sessions.pop(mid, None)
+                live_paused.discard(mid)
                 _touch()
                 for f in audio_files.values():
                     f.close()
@@ -3103,6 +3153,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
             live_stop.add(m)
             n += 1
         return {"stopping": n}
+
+    @app.post("/live/pause")
+    def live_pause(on: bool = True):
+        # Pause/resume every active live session WITHOUT ending it: the pump drops
+        # incoming audio while paused and slides its clock forward on resume, so
+        # the paused span is simply absent from the recording rather than saved as
+        # silence. Server-side (like /live/stop) so it covers the floatpanel relay
+        # too. The meeting, the ASR sessions and the open files all stay put.
+        n = 0
+        for m in list(live_active):
+            live_paused.add(m) if on else live_paused.discard(m)
+            n += 1
+        return {"paused": on, "sessions": n}
 
     @app.post("/floatpanel/open")
     def floatpanel_open():
@@ -3464,12 +3527,21 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # after merges, so a plain data/<mid> could collide with a leftover dir and
         # append onto stale audio. _assemble_track stitches segments by time offset,
         # so a resumed session's new dir is just another ordered segment.
-        audio_dir = f"data/{mid}-{int(t0)}"
-        os.makedirs(audio_dir, exist_ok=True)
-        store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
-                          started_at=t0, duration_s=0, origin="recorded")
-        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
-                       for tag, lbl in tracks.items()}
+        # 純字幕 (mode=transcribe): keep no recording at all — null sinks instead of
+        # files, and no segment row (an empty audio dir would look like a failed
+        # recording). Everything else, including the wall-clock padding the
+        # timestamps depend on, is unchanged.
+        live_mode = (ws.query_params.get("mode")
+                     or store.get_setting("live_mode", "both"))
+        if live_mode == "transcribe":
+            audio_files = {tag: live_session.NullSink() for tag in tracks}
+        else:
+            audio_dir = f"data/{mid}-{int(t0)}"
+            os.makedirs(audio_dir, exist_ok=True)
+            store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
+                              started_at=t0, duration_s=0, origin="recorded")
+            audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
+                           for tag, lbl in tracks.items()}
 
         # Live multi-speaker (?diarize=1): per-track online voiceprint clustering on
         # each finalized utterance, PLUS recognition of voices the user already named
@@ -3524,12 +3596,15 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # lengths line up. Shared with the /ws/native-capture pipeline.
         # ponytail: no lag-drop — it broke the invariant; small-q4 keeps up. Add a
         # smarter back-pressure cap only if a slow model makes the buffer balloon.
-        pump = live_session.WallClockPump(tracks, audio_files, t0)
+        live_paused.discard(mid)  # a resumed meeting must not inherit a stale pause
+        pump = live_session.WallClockPump(tracks, audio_files, t0,
+                                          paused=lambda: mid in live_paused)
         closed = False
         # 純錄音 (record-only): capture + save PCM but run NO ASR — zero inference,
         # zero heat (for "電腦快炸" / quick capture). Re-transcribe later. Hot-
         # toggleable mid-recording via a {type:'mode'} control message.
-        rec = {"on": ws.query_params.get("record_only") == "1"}
+        rec = {"on": ws.query_params.get("record_only") == "1"
+               or live_mode == "record"}
         interim_lag_bytes = int(2 * live_interim_s * 16000) * 2
 
         async def receiver():
@@ -3594,6 +3669,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             idle["live"] = max(0, idle["live"] - 1)
             if live_active.get(mid, 0) <= 1:
                 live_active.pop(mid, None)
+                live_paused.discard(mid)
             else:
                 live_active[mid] -= 1
             _touch()  # idle countdown starts when recording stops
@@ -4173,7 +4249,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
                  "live_source": "mic",
                  # 辨識語系 default ("" = 自動偵測). Applies to live + native capture
                  # so the floatpanel (which had no lang UI) stops mis-detecting.
-                 "live_language": ""}
+                 "live_language": "",
+                 # Session mode: both = 錄音+即時辨識 / record = 純錄音，不辨識 /
+                 # transcribe = 純字幕，不留錄音檔. Read by BOTH live sockets, so the
+                 # floatpanel inherits it with no Swift change (same as live_language).
+                 "live_mode": "both"}
 
     @app.get("/settings/{key}")
     def get_setting_route(key: str):
@@ -4192,6 +4272,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             v = v if v in ("mic", "system", "both", "dual") else "mic"
         elif key == "live_language":
             v = v if v in ("", "zh", "en", "ja", "ko", "yue") else ""
+        elif key == "live_mode":
+            v = v if v in ("both", "record", "transcribe") else "both"
         store.set_setting(key, v)
         return {"value": store.get_setting(key, _SETTINGS[key])}
 

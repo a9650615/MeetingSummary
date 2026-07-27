@@ -303,6 +303,10 @@ final class Model: ObservableObject {
     // breathing); audioLive = first non-zero sample arrived (red). Idle = neither.
     @Published var starting = false
     @Published var audioLive = false
+    // ⏸ 暫停: server-side (POST /live/pause). The relay socket and the capturers
+    // stay up — the server's pump just drops what arrives and elides the gap — so
+    // resuming is instant and the meeting is never split.
+    @Published var paused = false
     @Published var showSubtitle = false   // YouTube-style caption overlay toggle
     @Published var source: Source = .mic
     // A native session can fail AFTER capture already started (e.g. mic/screen-
@@ -329,6 +333,7 @@ final class Model: ObservableObject {
     // waiting for the next /live/state poll (+ the stop flush) to confirm. The poll
     // resumes as the source of truth once the window passes.
     private var intentAt: Date?
+    private var pauseIntentAt: Date?
     // Self-heal: the backend process tree (bootstrap/supervise/app) can die as a
     // whole (whole process group killed) — nothing then brings it back, and this
     // panel would poll "伺服器未連線" forever since supervise.sh's own watchdog
@@ -407,6 +412,11 @@ final class Model: ObservableObject {
             // Only take a server notice when present — don't clobber a locally-set
             // capture warning (e.g. the silent-tap / permission notice) every poll.
             if let n = o["notice"] as? String, !n.isEmpty { self.liveNotice = n }
+            // Same settle window as start/stop: keep the optimistic value briefly
+            // so a poll already in flight can't flip the button back (不跟手).
+            if !(self.pauseIntentAt.map { Date().timeIntervalSince($0) < 2.5 } ?? false) {
+                self.paused = rec && ((o["paused"] as? Bool) ?? false)
+            }
             if let lines = o["captions"] as? [String] {
                 self.captions = lines
             } else if let one = o["caption"] as? String, !one.isEmpty {
@@ -746,6 +756,12 @@ final class Model: ObservableObject {
         req("/live/stop", method: "POST")  // also covers any browser /ws/live session
     }
 
+    func togglePause() {
+        let next = !paused
+        paused = next; pauseIntentAt = Date()  // optimistic; poll confirms after 2.5s
+        req("/live/pause?on=\(next)", method: "POST")
+    }
+
     func saveNote() {
         let line = note.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let m = mid, !line.isEmpty else { return }
@@ -766,10 +782,16 @@ struct PanelView: View {
             HStack(spacing: 8) {
                 // 3-state: idle = grey static; 準備中 (started, no audio yet) = grey
                 // breathing; 錄音中 (real audio flowing) = red breathing.
-                Image(systemName: dotActive ? "record.circle.fill" : "circle")
-                    .foregroundStyle(dotActive ? (m.audioLive ? Color.red : Color.gray) : Color.secondary)
-                    .opacity(dotActive ? pulse : 1)
-                Text(m.title).font(.headline).lineLimit(1)
+                // Paused reads as its own state: a steady ⏸ instead of a red
+                // breathing dot, so a paused session can't look like it's still
+                // capturing.
+                Image(systemName: m.paused ? "pause.circle.fill"
+                                           : (dotActive ? "record.circle.fill" : "circle"))
+                    .foregroundStyle(m.paused ? Color.orange
+                                     : (dotActive ? (m.audioLive ? Color.red : Color.gray)
+                                                  : Color.secondary))
+                    .opacity(dotActive && !m.paused ? pulse : 1)
+                Text(m.paused ? "已暫停" : m.title).font(.headline).lineLimit(1)
                 Spacer()
                 if !m.elapsed.isEmpty {
                     Text(m.elapsed).font(.system(.subheadline, design: .monospaced))
@@ -804,6 +826,12 @@ struct PanelView: View {
                 Button { m.start() } label: {
                     Label("開始錄音", systemImage: "record.circle").frame(maxWidth: .infinity)
                 }.buttonStyle(.borderedProminent).disabled(m.recording)
+                // Icon-only: the panel is a fixed 320pt, so a third labelled
+                // button would squeeze 開始錄音/停止 into ellipses.
+                Button { m.togglePause() } label: {
+                    Image(systemName: m.paused ? "play.fill" : "pause.fill")
+                }.buttonStyle(.bordered).disabled(!m.recording)
+                    .help(m.paused ? "繼續錄音" : "暫停錄音（不會結束會議）")
                 Button { m.stop() } label: {
                     Label("停止", systemImage: "stop.fill").frame(maxWidth: .infinity)
                 }.tint(.red).buttonStyle(.bordered).disabled(!m.recording)
