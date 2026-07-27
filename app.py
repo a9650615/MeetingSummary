@@ -1118,6 +1118,9 @@ startBtn.onclick = async () => {
       if(notesEl&&notesEl.value) saveNotes(); }  // flush notes typed before record
     else if(m.type==='interim'){
       const sp=collapseSpeaker(m.speaker||'', m.track);
+      // Empty text = "drop the tentative line" (the utterance was discarded, so no
+      // final is coming). Clear both, don't render a bare '… ' with no words.
+      if(!m.text){ L.textContent=''; return; }
       C.textContent = m.text;                       // caption: words only
       L.textContent = '… '+(sp?sp+': ':'')+m.text;  // grey in-progress, above history
     }
@@ -2921,7 +2924,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # flush/cleanup ran inline here its `await`s would be cancelled mid-way and
         # live_active would never clear. Detached, it survives the disconnect and
         # finalizes cleanly; the handler only relays frames + signals stop.
-        _push_inflight = {"n": 0}
+        # Ordered, non-blocking push: ONE drain task owns the socket, so events
+        # arrive in the order they were produced. The old fire-and-forget
+        # create_task-per-event let an interim scheduled before a final land AFTER
+        # it (each send suspends independently) — the tentative line reappeared
+        # with stale words under the committed one.
+        _push_q = asyncio.Queue(maxsize=32)
+
+        async def _push_drain():
+            while True:
+                payload = await _push_q.get()
+                try:
+                    await ws.send_json(payload)
+                except Exception:  # noqa: BLE001  socket gone — keep draining
+                    pass
 
         async def _push(payload):
             # Stream interim/final to the floatpanel for a live caption. MUST NOT
@@ -2929,24 +2945,16 @@ def create_app(store, *, summary_backend, asr_backend=None,
             # ALL transcription whenever the socket is slow/half-open (backpressure)
             # — the "captions stop mid-recording, then a big batch dumps at once"
             # bug (consume wedged on the send while audio piles in the pump). So
-            # fire-and-forget: schedule the send and return immediately. Bounded so
-            # a truly wedged socket can't pile tasks forever — drop when saturated
-            # (finals are still persisted; the panel's transcript poll backfills).
-            if _push_inflight["n"] > 32:
-                return
-            _push_inflight["n"] += 1
-
-            async def _send():
-                try:
-                    await ws.send_json(payload)
-                except Exception:  # noqa: BLE001
-                    pass
-                finally:
-                    _push_inflight["n"] -= 1
-
-            asyncio.create_task(_send())
+            # enqueue and return immediately. Bounded so a truly wedged socket
+            # can't pile events forever — drop when saturated (finals are still
+            # persisted; the panel's transcript poll backfills).
+            try:
+                _push_q.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass
 
         async def _run():
+            drain = asyncio.create_task(_push_drain())
             try:
                 await live_session.consume(
                     pump, sessions, tracks, rec_on=lambda: False,
@@ -2956,6 +2964,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                     interim_lag_bytes=int(2 * live_interim_s * 16000) * 2,
                     pop_notice=_pop_notice)
             finally:
+                drain.cancel()
                 pump.pad_to(time.time())  # writes remaining silence to disk (before close)
                 # Clear the recording state FIRST so /live/state (the panel's dot)
                 # flips to idle immediately; persist the trailing utterance after —

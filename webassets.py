@@ -116,12 +116,15 @@ ul.meetings.picking .mact{display:none}
 .selbar{display:none;align-items:center;gap:10px;margin:0 0 8px;padding:8px 10px;
  background:var(--accentsoft);border-radius:var(--radius-sm)}
 .selbar.on{display:flex}
+/* Heights are RESERVED, not collapsed: the caption is rewritten on every interim
+   tick and the live line empties on every final, so height-on-content made the
+   whole page bounce once or twice per utterance. 2 lines covers the usual
+   caption; the live line keeps its slot even while empty. */
 .caption{font-size:clamp(22px,4.2vw,34px);font-weight:800;line-height:1.34;background:var(--capbg);
- color:var(--capink);border-radius:var(--radius);padding:20px 24px;min-height:1.4em;margin:16px 0 8px;
+ color:var(--capink);border-radius:var(--radius);padding:20px 24px;min-height:2.68em;margin:16px 0 8px;
  box-shadow:inset 0 0 0 1px rgba(255,255,255,.05)}
 .caption:empty{display:none}  /* no ugly black bar before the first caption */
 .liveline{color:var(--muted);font-size:17px;min-height:1.5em;margin:6px 2px 14px}
-.liveline:empty{display:none}
 /* /live: prominent primary action + simple recording feedback (timer + pulsing dot + level bar) */
 .live-actionrow{display:flex;flex-wrap:wrap;align-items:center;gap:14px}
 .livebig{font-size:16px;padding:.85em 1.75em}

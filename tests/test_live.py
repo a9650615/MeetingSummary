@@ -151,6 +151,24 @@ def test_twopass_emits_interim_while_speaking():
     assert "interim" in kinds and "final" not in kinds
 
 
+def test_dropped_utterance_clears_a_shown_interim():
+    # The final ASR returns nothing (hallucination gate / silence), so no 'final'
+    # is emitted — the interim already on screen must be cleared explicitly or it
+    # stays frozen there until the next utterance overwrites it.
+    s = TwoPassSession(backend=lambda a: [],  # final: no text -> utterance dropped
+                       interim_backend=lambda a: [{"start": 0, "end": 1, "text": "暫"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=0.09)
+    assert any(e["kind"] == "interim" and e["text"] for e in s.feed(tone(300)))
+    evs = s.feed(silence(150))  # pause -> finalize -> dropped
+    assert [(e["kind"], e["text"]) for e in evs] == [("interim", "")]
+
+
+def test_no_clear_event_when_no_interim_was_shown():
+    s = TwoPassSession(backend=lambda a: [],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=100)
+    assert s.feed(tone(300) + silence(150)) == []  # nothing shown, nothing to clear
+
+
 def test_interim_cadence_adapts_to_compute_load():
     # next interim interval = compute_time / duty, clamped — so a slow model backs
     # off and a fast one runs more often, holding ASR duty cycle ~= target.

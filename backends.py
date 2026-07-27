@@ -525,6 +525,12 @@ _ANE_IDS = {
 
 
 _ANE_HELP = {"proc": None, "lock": None}
+# Live stall guards (see ane_live_backend._run). A healthy ANE runs RTF ~0.15, so a
+# full 29s window lands ~4.4s; 20s is ~4x headroom and still well under live's
+# 40s FEED_TIMEOUT_S even when a feed makes several backend calls.
+ANE_CALL_BUDGET_S = 20   # total inference budget per call, across ALL its windows
+ANE_LOCK_WAIT_S = 25     # give up waiting on a wedged predecessor rather than freeze
+ANE_READY_WAIT_S = 90    # helper startup (first CoreML compile ~13s, slower when cold)
 
 
 def ane_helper_bin():
@@ -559,9 +565,12 @@ def ane_live_backend():
     tracks call concurrently). callable(pcm_bytes) -> [{start,end,text}]."""
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
+    import select  # noqa: PLC0415
     import struct  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
     import threading  # noqa: PLC0415
+    import time  # noqa: PLC0415
     if _ANE_HELP["lock"] is None:
         _ANE_HELP["lock"] = threading.Lock()
 
@@ -576,7 +585,19 @@ def ane_live_backend():
         env = {**os.environ, "SPEECH_COREML_COMPUTE_UNITS": "ane"}
         p = subprocess.Popen([b], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, bufsize=0, env=env)
-        for line in p.stderr:  # block until model loaded (first time ~tens of seconds)
+        # Wait for the model to load (first time ~tens of seconds) — but BOUNDED:
+        # this runs holding the ANE lock, so a helper that never prints READY used
+        # to wedge every live window behind it forever.
+        _ready_by = time.monotonic() + ANE_READY_WAIT_S
+        while True:
+            left = _ready_by - time.monotonic()
+            if left <= 0 or not select.select([p.stderr], [], [], left)[0]:
+                p.kill()
+                raise RuntimeError(f"qwen3-ane helper not READY in {ANE_READY_WAIT_S}s")
+            line = p.stderr.readline()
+            if not line:  # helper died before READY
+                p.kill()
+                raise RuntimeError("qwen3-ane helper exited during load")
             if b"READY" in line:
                 break
             if b"failed" in line.lower():
@@ -586,16 +607,15 @@ def ane_live_backend():
         _ANE_HELP["proc"] = p
         return p
 
-    import select  # noqa: PLC0415
     WIN = 29 * 16000 * 2  # 29s @ 16k mono int16 — CoreML encoder shape is fixed at 30s
 
-    def _send(p, chunk):
-        """Send one ≤29s window, watchdog the reply (30s), return text or None.
+    def _send(p, chunk, timeout):
+        """Send one ≤29s window, watchdog the reply, return text or None.
         None means the helper hung/errored — caller kills + respawns."""
         try:
             p.stdin.write(struct.pack(">I", len(chunk)) + chunk)
             p.stdin.flush()
-            rl, _, _ = select.select([p.stdout], [], [], 30)
+            rl, _, _ = select.select([p.stdout], [], [], timeout)
             if not rl:
                 return None
             line = p.stdout.readline()
@@ -621,14 +641,34 @@ def ane_live_backend():
         # 3000-mel-frame (30s) fixed shape; transcribe each + join. General + safe
         # for any length (mirrors the batch ANE path).
         texts = []
-        with _ANE_HELP["lock"]:
+        # Bounded lock wait: a PREVIOUS call whose caller already gave up (live's
+        # FEED_TIMEOUT_S abandons the threadpool thread, but the thread keeps
+        # running and keeps this lock) must not wedge every later window behind it
+        # — that turned one slow window into an open-ended live freeze. Skip
+        # instead; the audio is on disk for re-transcribe.
+        if not _ANE_HELP["lock"].acquire(timeout=ANE_LOCK_WAIT_S):
+            print(f"ane busy >{ANE_LOCK_WAIT_S}s -> skip window (audio saved)",
+                  file=sys.stderr)
+            return []
+        try:
             p = _ensure()
+            # Budget the whole call, not each window: _run loops over ⌈len/29s⌉
+            # windows, so a per-window watchdog alone could legitimately outlast
+            # the caller's own timeout (2 windows x 30s > live's 40s) and get the
+            # thread abandoned mid-protocol. Deadline starts AFTER _ensure so a
+            # cold CoreML load doesn't eat the inference budget.
+            deadline = time.monotonic() + ANE_CALL_BUDGET_S
             for i in range(0, len(pcm), WIN):
                 ch = pcm[i:i + WIN]
                 if len(ch) < 640:
                     continue
-                t = _send(p, ch)
-                if t is None:  # hung/errored -> kill + respawn next call, stop here
+                left = deadline - time.monotonic()
+                t = None if left <= 0 else _send(p, ch, min(left, 30))
+                if t is None:  # hung/over budget -> kill + respawn next call, stop here
+                    # Must kill: a reply still in flight would desync the
+                    # [len][pcm] -> {text} pairing for every later window.
+                    print(f"ane window hung/over budget ({len(ch)//32000}s) -> respawn",
+                          file=sys.stderr)
                     try:
                         p.kill()
                     except Exception:
@@ -637,6 +677,8 @@ def ane_live_backend():
                     break
                 if t:
                     texts.append(t)
+        finally:
+            _ANE_HELP["lock"].release()
         text = " ".join(texts).strip()
         return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
     return _run

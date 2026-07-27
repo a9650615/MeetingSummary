@@ -272,6 +272,7 @@ def make_store_emit(mid, conn_offset_ms, store, push=None):
         # long gap starts a fresh line — "split by the session's people".
         prev = store.last_live_row(mid, track)
         merged = False
+        shown = ev["text"]  # what the client should DISPLAY for this line
         if prev is not None and prev["speaker"] == spk:
             gap = start - prev["end_ms"]
             joined = (prev["text"] or "") + (ev["text"] or "")
@@ -280,11 +281,17 @@ def make_store_emit(mid, conn_offset_ms, store, push=None):
                     and len(joined) <= _MERGE_MAX_CHARS):
                 store.extend_transcript(prev["id"], joined, end)
                 merged = True
+                shown = joined
         if not merged:
             store.add_transcript(mid, "live", track, start, end, spk, ev["text"])
         if push:
+            # Push the MERGED line, not just this fragment: the panel's 1.5s
+            # /live/state poll shows the stored (merged) text, so pushing the
+            # fragment made every merged utterance visibly rewrite itself a
+            # moment later ("前半句" -> "前半句後半句"). Same text from both
+            # sources = no flip.
             await push({"type": "final", "track": track,
-                        "speaker": spk, "text": ev["text"]})
+                        "speaker": spk, "text": shown})
     return emit
 
 
@@ -370,7 +377,10 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
             except WebSocketDisconnect:
                 raise
             except Exception as e:  # transient ASR error / timeout -> keep going
-                print(f"live consumer error (continuing): {e}", file=sys.stderr)
+                # repr, not str: TimeoutError (the FEED_TIMEOUT_S case, and the one
+                # that actually matters) stringifies to "" — this line used to log
+                # "live consumer error (continuing): " with no cause at all.
+                print(f"live consumer error (continuing): {e!r}", file=sys.stderr)
         if pop_notice and (msg := pop_notice()):
             if on_notice:
                 await on_notice(msg)

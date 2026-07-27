@@ -378,6 +378,15 @@ class TwoPassSession:
         self._noise = max(self.min_floor, self._noise)
         return rms >= self._noise * self.speech_factor
 
+    def _clear_interim_ev(self):
+        """A DROPPED utterance (too little speech, or the hallucination gate ate
+        the text) emits no final, so the interim already on screen used to stay
+        frozen there until the NEXT utterance overwrote it — stale words the user
+        reads as the caption randomly mutating. Emit an empty interim so clients
+        clear the tentative line. [] when nothing is on screen."""
+        return [{"kind": "interim", "text": "", "track": self.track}] \
+            if self._interim_open else []
+
     def _reset_utt(self):
         self._utt = bytearray()
         self._scan = 0
@@ -385,6 +394,7 @@ class TwoPassSession:
         self._speech_frames = 0
         self._has_speech = False
         self._last_interim_len = 0
+        self._interim_open = False  # is a tentative line currently on screen?
 
     def _text(self, backend, audio):
         parts = [s["text"].strip() for s in backend(audio)]
@@ -425,8 +435,9 @@ class TwoPassSession:
         # utterance into one line per speaker.
         if not self._enough_speech():
             self._committed_bytes += len(self._utt)
+            stale = self._clear_interim_ev()
             self._reset_utt()
-            return []
+            return stale
         audio = bytes(self._utt)
         _t_asr = self._clock()
         text = self._text(self.final_backend, audio)
@@ -477,9 +488,10 @@ class TwoPassSession:
             diar_s = self._clock() - _t_diar
         if text:
             self._warn_if_slow(audio, asr_s, diar_s)
+        stale = self._clear_interim_ev()
         self._reset_utt()
         if not text:
-            return []
+            return stale
         ev = {"kind": "final", "text": text, "track": self.track,
               "start_ms": offset_ms, "end_ms": end_ms, "profile": "live"}
         if spk:
@@ -512,6 +524,7 @@ class TwoPassSession:
             text = self._text(self.interim_backend, tail)
             self._adapt_interim(self._clock() - t0)
             if text:
+                self._interim_open = True
                 events.append({"kind": "interim", "text": text, "track": self.track})
         return [e for e in events if e]
 
