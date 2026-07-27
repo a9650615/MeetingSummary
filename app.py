@@ -2211,7 +2211,7 @@ def iter_transcribe(store, mid, backend, window_s=29, sample_rate=16000,
                 pass
 
 
-def _run_transcribe_job(store, mid, backend, jobs, live_busy=None):
+def _run_transcribe_job(store, mid, backend, jobs, live_busy=None, name_spans=None):
     """Run iter_transcribe to completion, recording progress in jobs[mid] so a
     page can poll it (survives client refresh). Transcripts are stored as they
     land, so even a server restart keeps partial work."""
@@ -2233,6 +2233,11 @@ def _run_transcribe_job(store, mid, backend, jobs, live_busy=None):
         # person speaking starts a new line (batch _sentence_split alone only cuts
         # on punctuation — unlike live's per-turn lines). Same pass the upload uses.
         _diarize_meeting(store, mid, jobs)
+        # Put back the names live had already recognized, for any line the
+        # post-meeting pass left on a bare side label.
+        if name_spans:
+            jobs[mid].update(text="套回已辨識的說話者…")
+            apply_name_spans(store, mid, name_spans)
         jobs[mid] = {"state": "done", "done": n_tx, "total": total}
     except Exception as e:
         jobs[mid] = {"state": "error", "msg": str(e)}
@@ -2390,6 +2395,57 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
         jobs[mid] = {"state": "done", "done": len(segs), "total": len(segs)}
     except Exception as e:
         jobs[mid] = {"state": "error", "msg": str(e)}
+
+
+_SIDE_LABELS = {"我", "對方", "混合"}
+
+
+def _real_speaker_name(speaker):
+    """The speaker string if it identifies a PERSON, else None. Side labels (我/
+    對方/混合) and auto cluster labels (說話者3, 對方2) name a channel or a
+    session-local cluster, not someone we recognized."""
+    import live_session  # noqa: PLC0415
+    s = (speaker or "").strip()
+    if not s or s in _SIDE_LABELS or live_session._PLACEHOLDER.match(s):
+        return None
+    return s
+
+
+def live_name_spans(store, mid):
+    """Snapshot the (start, end, track, name) of every LIVE row that carries a
+    recognized person's name. Re-transcribe wipes the transcript, and live's
+    labelling is the better of the two — it embeds one VAD-trimmed utterance of a
+    single track at a 0.55 match bar, where the post-meeting pass embeds a 12s
+    aggregate at 0.62 — so the names are captured here and re-applied afterwards
+    instead of being thrown away."""
+    return [(r["start_ms"], r["end_ms"] if r["end_ms"] is not None else r["start_ms"],
+             r["track"], nm)
+            for r in store.list_transcripts(mid)
+            if r["profile"] == "live" and (nm := _real_speaker_name(r["speaker"]))]
+
+
+def apply_name_spans(store, mid, spans):
+    """Re-apply carried-over live names to the rebuilt transcript by time overlap,
+    per track. Only fills rows that don't already have a real name, so a
+    post-meeting pass that DID recognize someone keeps its answer."""
+    if not spans:
+        return 0
+    n = 0
+    for r in store.list_transcripts(mid):
+        if _real_speaker_name(r["speaker"]):
+            continue
+        end = r["end_ms"] if r["end_ms"] is not None else r["start_ms"]
+        best, best_ov = None, 0
+        for s, e, trk, nm in spans:
+            if trk != r["track"]:
+                continue
+            ov = min(e, end) - max(s, r["start_ms"])
+            if ov > best_ov:
+                best, best_ov = nm, ov
+        if best:
+            store.update_speaker(r["id"], best)
+            n += 1
+    return n
 
 
 def _diarize_meeting(store, mid, jobs, tracks=None):
@@ -3907,6 +3963,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             backend = _default_asr()
         if backend is None:
             raise HTTPException(503, "no ASR backend configured")
+        spans = live_name_spans(store, mid)  # keep live's recognized speakers
         store.clear_transcripts(mid)  # full replace (incl live) -> one coherent set
         base = store.get_meeting(mid)["created_at"]
         n = 0
@@ -3923,6 +3980,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                                          t["start_ms"] + off_ms, t["end_ms"] + off_ms,
                                          speaker, t["text"])
                     n += 1
+        apply_name_spans(store, mid, spans)
         return {"transcripts": n}
 
     @app.post("/meetings/{mid}/transcribe/start")
@@ -3940,10 +3998,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
             backend = _default_asr()
         if backend is None:
             raise HTTPException(503, "no ASR backend configured")
+        # Grab the speakers live already recognized BEFORE wiping — they're the
+        # better labels and clear_transcripts would otherwise destroy them for good.
+        spans = live_name_spans(store, mid)
         store.clear_transcripts(mid)  # full replace (incl live) -> one coherent set
         import threading
         threading.Thread(target=_run_transcribe_job,
-                         args=(store, mid, backend, transcribe_jobs, live_busy),
+                         args=(store, mid, backend, transcribe_jobs, live_busy, spans),
                          daemon=True).start()
         return {"state": "started"}
 
