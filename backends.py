@@ -151,24 +151,85 @@ def qwen3_mlx_backend(model="mlx-community/Qwen3-ASR-1.7B-8bit", language=None):
     return _run
 
 
-def make_live_backend(model, language=None):
-    """Live backend, callable(pcm_bytes) -> segments. language=None -> auto-detect;
-    a code ("zh"/"en"/"ja"...) forces it. whisper-MLX (default), Qwen3-ASR .cpp via a
-    persistent daemon (Metal), or transformers Qwen3-ASR."""
-    if route(model) == "ane":  # persistent Neural-Engine helper (省電, off-GPU)
-        return ane_live_backend()
+def _pcm_bytes(audio):
+    """Anything a caller may hand a backend -> 16 kHz mono int16 PCM bytes."""
+    if isinstance(audio, (bytes, bytearray)):
+        return bytes(audio)
+    p = str(audio)
+    if p.endswith(".pcm"):
+        with open(p, "rb") as f:
+            return f.read()
+    import subprocess  # noqa: PLC0415
+    return subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", p, "-ar", "16000", "-ac", "1",
+         "-f", "s16le", "-"], stdout=subprocess.PIPE, check=True).stdout
+
+
+def _takes_bytes(fn):
+    """Adapt a PCM-bytes engine so it also accepts a path."""
+    return lambda audio: fn(_pcm_bytes(audio))
+
+
+def _takes_path(fn):
+    """Adapt a path-only engine so it also accepts PCM bytes."""
+    def _run(audio):
+        if not isinstance(audio, (bytes, bytearray)):
+            return fn(audio)
+        import os  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+        fd, tmp = tempfile.mkstemp(suffix=".pcm")
+        os.close(fd)
+        try:
+            with open(tmp, "wb") as f:
+                f.write(audio)
+            return fn(tmp)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return _run
+
+
+def make_backend(model, language=None):
+    """THE ASR backend factory: a model id maps to exactly ONE engine, used by
+    both live and re-transcribe. Returns callable(pcm_bytes | audio_path) ->
+    [{start, end, text}].
+
+    There used to be a make_live_backend and a make_batch_backend, and for several
+    ids they picked DIFFERENT implementations of the same model — the reason
+    re-transcribing a meeting could come back worse than the live captions had
+    been. The only real difference between the two was the input type, so that is
+    all this normalizes: where an engine exists in both a persistent and a
+    per-call-subprocess form, the persistent one wins (it is the one live has been
+    running, and it doesn't reload the model every call). Segment timing is not a
+    reason to keep a second variant — asr.transcribe already spreads an untimed
+    blob across the window via clip_ms.
+
+    language=None -> auto-detect; a code ("zh"/"en"/"ja"...) forces it.
+    """
+    if route(model) == "ane":
+        # The in-repo persistent helper, same as live. The homebrew `speech` CLI
+        # stays only as a fallback for machines where the helper isn't built —
+        # not as a user-visible second flavour of the same model.
+        if ane_helper_bin() is not None:
+            return ane_live_backend()
+        engine, m = _ANE_IDS.get(model, ("qwen3-coreml-full", "0.6B"))
+        return ane_speech_backend(engine, m, language)
     model = _honor_language(model, language)
     r = route(model)
     if r == "chatllm":
-        return chatllm_live_backend(language)
+        return _takes_bytes(_chatllm_get(language).transcribe)
     if r == "qwen3mlx":
-        return qwen3_mlx_backend(model, language)
+        return qwen3_mlx_backend(model, language)   # already input-agnostic
     if r == "qwen3cpp":
-        return qwen3_cpp_live_backend(language)
+        return _takes_bytes(qwen3_cpp_live_backend(language))
     if r == "qwen3":
-        return qwen3_live_backend(model, language)
-    from live import mlx_whisper_live_backend
-    return mlx_whisper_live_backend(model, language)
+        return _takes_path(qwen3_batch_backend(model, language))
+    if r == "firered":
+        return _takes_path(firered_batch_backend(model, language))
+    import asr  # noqa: PLC0415
+    return asr.mlx_whisper_backend(model, language)  # bytes, .pcm or container
 
 
 class _ChatllmAsrDaemon:
@@ -256,23 +317,6 @@ def _chatllm_get(language):
         _chatllm_daemon = _ChatllmAsrDaemon()
     _chatllm_daemon.set_lang(_CHATLLM_LANG.get(language or "", "auto"))
     return _chatllm_daemon
-
-
-def chatllm_live_backend(language=None):
-    """Live-final backend over the persistent chatllm 1.7B daemon (module singleton)."""
-    return _chatllm_get(language).transcribe
-
-
-def chatllm_batch_backend(model="qwen3-asr-1.7b", language=None):
-    """Batch/accurate over the same daemon. callable(audio_path) -> segments
-    (raw .pcm read to bytes; daemon wraps to wav)."""
-    be = _chatllm_get(language).transcribe
-
-    def _run(audio_path):
-        with open(str(audio_path), "rb") as f:
-            return be(f.read())
-
-    return _run
 
 
 def release_all():
@@ -372,36 +416,6 @@ def qwen3_cpp_live_backend(language=None):
     if _qwen3_daemon is None:
         _qwen3_daemon = _Qwen3CppDaemon()
     return lambda pcm: _qwen3_daemon.transcribe(pcm, language or "")
-
-
-def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B", language=None):
-    """Per-utterance Qwen3-ASR for live finals (experimental). Slower than
-    whisper-MLX + ~63s cold load; best zh accuracy. Interim must stay whisper.
-    Lazy-loads on first call so hot-swap (set_model) doesn't block the request."""
-    import sys  # noqa: PLC0415
-    import numpy as np  # noqa: PLC0415
-
-    state = {}
-    lang = language or None
-
-    def _run(window_bytes):
-        if len(window_bytes) < 2:
-            return []
-        if len(window_bytes) % 2:
-            window_bytes = window_bytes[:-1]
-        audio = np.frombuffer(window_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        try:
-            if "m" not in state:
-                from qwen_asr import Qwen3ASRModel  # noqa: PLC0415
-                state["m"] = Qwen3ASRModel.from_pretrained(model)
-            out = state["m"].transcribe((audio, 16000), language=lang)
-        except Exception as e:
-            print(f"qwen3 live error (skipped): {e}", file=sys.stderr)
-            return []
-        text = " ".join(t.text for t in out).strip()
-        return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
-
-    return _run
 
 
 def denoise_file(src, *, raw_pcm=False):
@@ -713,27 +727,8 @@ def ane_warm():
     threading.Thread(target=_w, daemon=True).start()
 
 
-def make_batch_backend(model, language=None):
-    """Batch/accurate: route to Qwen3-ASR .cpp (fast, Metal, word-aligned) or
-    transformers Qwen3-ASR or whisper-MLX. callable(audio_path) -> segments.
-    language=None -> auto-detect; a code forces it."""
-    if route(model) == "ane":  # ANE speech CLI (don't honor_language-reroute it)
-        engine, m = _ANE_IDS.get(model, ("qwen3-coreml-full", "0.6B"))
-        return ane_speech_backend(engine, m, language)
-    model = _honor_language(model, language)  # femelo ignores language -> whisper
-    r = route(model)
-    if r == "chatllm":
-        return chatllm_batch_backend(model, language)
-    if r == "qwen3mlx":
-        return qwen3_mlx_backend(model, language)
-    if r == "qwen3cpp":
-        return qwen3_cpp_batch_backend(model, language)
-    if r == "qwen3":
-        return qwen3_batch_backend(model, language)
-    if r == "firered":
-        return firered_batch_backend(model, language)
-    import asr
-    return asr.mlx_whisper_backend(model, language)
+# make_live_backend / make_batch_backend collapsed into make_backend above: the
+# split was the bug, not a feature (same model, two engines, two behaviours).
 
 
 import os as _os
@@ -825,55 +820,6 @@ def _clean_firered(text):
     import re  # noqa: PLC0415
     text = re.sub(r"<[^>]*>", "", text or "")
     return re.sub(r"\s+", " ", text).strip()
-
-
-def qwen3_cpp_batch_backend(model="qwen3-asr-0.6b-q4-k-m", language=None):
-    """Qwen3-ASR via the .cpp/GGUF sidecar (Metal, fast, word-level alignment).
-    Runs in .venv-qwen314 as a subprocess (cp314 native module); the app is 3.10.
-    Raw .pcm is wrapped to a temp wav (the .cpp loader needs a container)."""
-    import json  # noqa: PLC0415
-    import os  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    py = os.path.join(here, ".venv-qwen314/bin/python")
-    cli = os.path.join(here, "qwen3_cpp_cli.py")
-
-    def _run(audio_path):
-        audio_path = str(audio_path)
-        tmp = None
-        if audio_path.endswith(".pcm"):
-            import recorder  # noqa: PLC0415
-            with open(audio_path, "rb") as f:
-                wav = recorder.pcm_to_wav(f.read(), sample_rate=16000, channels=1)
-            tmp = audio_path + ".qwav.wav"
-            with open(tmp, "wb") as f:
-                f.write(wav)
-            audio_path = tmp
-        try:
-            p = subprocess.run([py, cli, audio_path, language or ""],
-                               capture_output=True, text=True, timeout=1800)
-            line = next((l for l in p.stdout.splitlines()
-                         if l.startswith("QWEN3JSON:")), None)
-            if line is None:
-                print(f"qwen3cpp no output: {p.stderr[-300:]}", file=sys.stderr)
-                return []
-            d = json.loads(line[len("QWEN3JSON:"):])
-            # .cpp zh word-alignment is coarse/unreliable (often one tiny-span
-            # "word" for a whole sentence), so don't trust its times — return the
-            # full text as one segment; iter_transcribe's per-window offset supplies
-            # the timeline position. (qwen3_words_to_segments kept for future use.)
-            text = d.get("text", "").strip()
-            return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
-        except Exception as e:
-            print(f"qwen3cpp error: {e}", file=sys.stderr)
-            return []
-        finally:
-            if tmp and os.path.exists(tmp):
-                os.remove(tmp)
-
-    return _run
 
 
 def qwen3_batch_backend(model="Qwen/Qwen3-ASR-0.6B", language=None):

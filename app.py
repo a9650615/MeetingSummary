@@ -441,8 +441,7 @@ def _models_page():
         "<select id=livemodel style='width:100%;padding:.5em;border-radius:8px;"
         "border:1px solid var(--line);background:var(--surface2);color:inherit'>"
         + ("<optgroup label='🧠 NPU · ANE 省電'>"
-           "<option value='ane-qwen3-0.6b'>Qwen3-ASR 0.6B（省電·M系列）</option>"
-           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B（混合·快）</option>"
+           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B（省電·快）</option>"
            "</optgroup>" if _ane_available() else "") +
         "<optgroup label='🔧 .cpp · Metal'>"
         "<option value='qwen3-asr-0.6b-q4-k-m'>Qwen3-ASR 0.6B（預設·快）</option>"
@@ -2616,8 +2615,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<div class=row style='margin-bottom:10px'>"
         "<select id=remodel>"
         + ("<optgroup label='🧠 NPU · ANE 省電'>"
-           "<option value='ane-qwen3-0.6b'>Qwen3-ASR 0.6B(省電·M系列)</option>"
-           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B(混合·快)</option>"
+           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B(省電·快)</option>"
            "</optgroup>" if ane_on else "") +
         "<optgroup label='⚡ MLX · Metal/GPU'>"
         "<option value='mlx-community/whisper-large-v3-turbo-q4'>whisper turbo-q4(準·省)</option>"
@@ -3329,7 +3327,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.get("/live", response_class=HTMLResponse)
     def live_page():
         # Live ANE (省電): show only on Apple Silicon with the prebuilt helper + the
-        # toggle on. Selecting it -> /models -> make_live_backend('ane-live') -> the
+        # toggle on. Selecting it -> /models -> make_backend('ane-live') -> the
         # persistent Neural-Engine helper (off the GPU).
         import backends as _b
         if (_apple_silicon() and _b.ane_helper_bin() is not None
@@ -3947,7 +3945,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if (asr_backend is not None and _ane_available()
                 and store.get_setting("ane", "0") == "1"):
             import backends
-            return backends.make_batch_backend("ane-qwen3-0.6b")
+            return backends.make_backend("ane-qwen3-0.6b-hybrid")
         return asr_backend
 
     @app.post("/meetings/{mid}/transcribe")
@@ -3958,7 +3956,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             raise HTTPException(404, "meeting not found")
         if body.model:
             import backends
-            backend = backends.make_batch_backend(body.model, body.language)
+            backend = backends.make_backend(body.model, body.language)
         else:
             backend = _default_asr()
         if backend is None:
@@ -3993,7 +3991,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
             return {"state": "running"}  # already in progress
         if body.model:
             import backends
-            backend = backends.make_batch_backend(body.model, body.language)
+            backend = backends.make_backend(body.model, body.language)
         else:
             backend = _default_asr()
         if backend is None:
@@ -4465,7 +4463,6 @@ if __name__ == "__main__":  # pragma: no cover
         return _llm["fn"](prompt)
 
     import backends
-    from live import mlx_whisper_live_backend
 
     fallback = [m for m in live_fallback.split(",") if m and m != live_model]
 
@@ -4477,7 +4474,7 @@ if __name__ == "__main__":  # pragma: no cover
 
     # Modular + hot-reloadable: manager rebuilds the live AdaptiveBackend on swap.
     live_manager = backends.LiveModelManager(
-        make=backends.make_live_backend, model=live_model, fallback=fallback,
+        make=backends.make_backend, model=live_model, fallback=fallback,
         rtf_budget=live_rtf_budget,
         on_change=lambda m: mp.save_chosen(profile_path, m))
     if backends.route(live_model) == "ane":  # default is ANE -> warm at boot
@@ -4486,9 +4483,11 @@ if __name__ == "__main__":  # pragma: no cover
     app = create_app(
         Store("data/meetings.db"),
         summary_backend=summary_backend,
-        asr_backend=backends.make_batch_backend(asr_model),  # routes qwen3/whisper
+        asr_backend=backends.make_backend(asr_model),  # routes qwen3/whisper
         live_manager=live_manager,
-        live_interim_backend=(mlx_whisper_live_backend(live_interim_model)
+        # Same factory as everything else — the interim preview is the same engine
+        # on a shorter window, not a separate kind of backend.
+        live_interim_backend=(backends.make_backend(live_interim_model)
                               if live_interim_model else None),
         model_names={"interim": live_interim_model, "accurate": asr_model,
                      "summary": llm_model},

@@ -627,36 +627,3 @@ class AdaptiveBackend:
             else:
                 self._over = 0
         return out
-
-
-def mlx_whisper_live_backend(model="mlx-community/whisper-small-mlx", language=None):
-    """Real live backend — Apple Silicon only, lazy import. Takes int16 PCM
-    bytes for one window, returns whisper segments. language=None -> auto."""
-    import mlx_whisper  # noqa: PLC0415
-    lang = language or None
-
-    def _run(window_bytes):
-        if len(window_bytes) < 2:
-            return []
-        # Keep 16-bit alignment (a dropped/odd tail byte would crash frombuffer).
-        if len(window_bytes) % 2:
-            window_bytes = window_bytes[:-1]
-        audio = np.frombuffer(window_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        audio = preprocess(audio)  # DC removal + normalize for poor recordings
-        try:
-            segs = mlx_whisper.transcribe(
-                audio, path_or_hf_repo=model, language=lang,
-                condition_on_previous_text=False,  # don't propagate a loop forward
-            )["segments"]
-        except Exception as e:  # one bad window must not kill the live session
-            import sys
-            print(f"live ASR error (skipped): {e}", file=sys.stderr)
-            return []
-        # Whisper's standard hallucination guards: drop non-speech / repetitive /
-        # low-confidence segments before they reach the subtitle.
-        return [s for s in segs
-                if s.get("no_speech_prob", 0) < 0.6
-                and s.get("compression_ratio", 0) < 2.4
-                and s.get("avg_logprob", 0) > -1.0]
-
-    return _run
