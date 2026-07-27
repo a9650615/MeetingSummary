@@ -2023,7 +2023,33 @@ def _auto_title(summary_text, backend):
         return None
 
 
-def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
+_PAUSED_TEXT = "⏸ 錄音中，暫停辨識…"
+
+
+def wait_while_live(live_busy, jobs=None, mid=None, poll_s=1.0):
+    """Live-first scheduling: block while a recording is in progress.
+
+    Batch and live recognition drive the SAME Neural Engine from two unrelated
+    processes — backends.ane_speech_backend spawns its own `speech
+    transcribe-batch` per call while ane_live_backend keeps a persistent helper,
+    and nothing arbitrates between them. A re-transcribe running during a meeting
+    therefore steals ANE from the live captions (the RTF blowups in the log).
+    Live wins; the batch job resumes when the recording ends.
+
+    Cooperative by design — only called at points where all prior work is already
+    durable in the store, so pausing never loses any. Returns True if it waited."""
+    if live_busy is None or not live_busy():
+        return False
+    while live_busy():
+        j = jobs.get(mid) if jobs is not None and mid is not None else None
+        if j is not None and j.get("state") == "running":
+            j["text"] = _PAUSED_TEXT
+        time.sleep(poll_s)
+    return True
+
+
+def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000,
+                    live_busy=None):
     """Generator: re-transcribe a meeting window-by-window, yielding progress
     events ({type:start,total} / {type:progress,done,total,text} / {type:done,n})
     and storing each result as it lands. Windowing gives granular progress even
@@ -2067,6 +2093,13 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
 
     try:
       for i, (track, p, seg_off, bs, bl) in enumerate(units):
+        # Yield the ANE to a live recording between windows: every earlier window
+        # is already stored, and the window temp below isn't written yet, so this
+        # is the one clean checkpoint. Worst-case overlap is the window in flight.
+        if live_busy is not None and live_busy():
+            yield {"type": "paused", "done": i, "total": len(units)}
+            wait_while_live(live_busy)
+            yield {"type": "resumed", "done": i, "total": len(units)}
         win_off_ms = seg_off + int(bs / 2 / sample_rate * 1000)
         win_dur_ms = int(bl / 2 / sample_rate * 1000)   # so untimed backends spread within the window
         tmp = f"{os.path.dirname(p)}/_win.pcm"
@@ -2100,18 +2133,22 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
                 pass
 
 
-def _run_transcribe_job(store, mid, backend, jobs):
+def _run_transcribe_job(store, mid, backend, jobs, live_busy=None):
     """Run iter_transcribe to completion, recording progress in jobs[mid] so a
     page can poll it (survives client refresh). Transcripts are stored as they
     land, so even a server restart keeps partial work."""
     jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": ""}
     try:
         n_tx, total = 0, 0
-        for ev in iter_transcribe(store, mid, backend):
+        for ev in iter_transcribe(store, mid, backend, live_busy=live_busy):
             if ev["type"] == "start":
                 jobs[mid]["total"] = total = ev["total"]
             elif ev["type"] == "progress":
                 jobs[mid].update(done=ev["done"], total=ev["total"], text=ev["text"])
+            elif ev["type"] == "paused":  # live recording started — yielding the ANE
+                jobs[mid].update(done=ev["done"], total=ev["total"], text=_PAUSED_TEXT)
+            elif ev["type"] == "resumed":
+                jobs[mid].update(done=ev["done"], total=ev["total"], text="繼續辨識…")
             elif ev["type"] == "done":
                 n_tx = ev["transcripts"]
         # Speaker-aware line breaking: diarize after transcription so a different
@@ -2192,7 +2229,8 @@ def _run_diarize_job(store, mid, body, jobs):
         jobs[mid] = {"state": "error", "msg": str(e)}
 
 
-def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs):
+def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs,
+                     live_busy=None):
     """Background summary generation (the LLM call is seconds-to-minutes). No
     token-stream progress, so it's indeterminate — jobs[mid] stays running with
     no total until done, then carries the text/title so the page renders inline
@@ -2203,6 +2241,10 @@ def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs):
         if meeting is None:
             jobs[mid] = {"state": "error", "msg": "meeting not found"}
             return
+        # Pre-call gate only: summarize() is one blocking LLM call with no
+        # checkpoint, so it can't yield once started — wait it out up front.
+        if wait_while_live(live_busy, jobs, mid):
+            jobs[mid]["text"] = "產生摘要中…"
         text = _summary_input(store, mid, meeting, summary_backend)
         out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend,
                         notes=(meeting["notes"] or ""))
@@ -2219,7 +2261,7 @@ def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs):
 
 
 def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
-                    summary_model, kind, title, jobs):
+                    summary_model, kind, title, jobs, live_busy=None):
     """Background upload pipeline (mirrors run_pipeline, off the request thread):
     transcribe the uploaded file -> summarize -> auto-title -> finalize, writing
     coarse progress into jobs[mid] (same shape the detail page already polls, so
@@ -2230,6 +2272,9 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
     #   1. 辨識 (accurate backend, NOT ANE) 2. 聲紋分群 3. 摘要
     jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": "辨識中…"}
     try:
+        # Whole-file phases, no per-window checkpoint — gate before each one.
+        if wait_while_live(live_busy, jobs, mid):
+            jobs[mid]["text"] = "辨識中…"
         tx_path = audio_path  # denoise the ASR input only; playback uses the original
         if store.get_setting("denoise", "0") == "1" and _ane_available():
             jobs[mid]["text"] = "降噪中…"
@@ -2253,6 +2298,7 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
             return
         # Phase 3: summary — _summary_input already folds in speaker labels + the
         # voiceprint roster, so recognized speakers flow into the meeting record.
+        wait_while_live(live_busy, jobs, mid)
         jobs[mid].update(text="產生摘要中…")
         text = _summary_input(store, mid, meeting, summary_backend)
         out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend,
@@ -2652,6 +2698,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
     # Idle auto-release: free loaded models after N seconds with no activity and no
     # live connection. Loaded weights lazy-reload on next use.
     idle = {"last": time.time(), "live": 0}
+    # Live-first scheduling (see wait_while_live): batch jobs run on plain threads
+    # and can't see this closure, so they take the predicate as an argument.
+    # Counts BOTH sources — /ws/live and the floatpanel's /ws/native-capture.
+    def live_busy():
+        return idle["live"] > 0
     live_active = {}  # mid -> open live connections; surfaced in /jobs (global popout)
     live_stop = set()  # mids the float control panel asked to stop (server-side)
     native_sessions = {}  # mid -> {"proc": None, "task": asyncio.Task, "notice": str|None}
@@ -3761,7 +3812,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         store.clear_transcripts(mid)  # full replace (incl live) -> one coherent set
         import threading
         threading.Thread(target=_run_transcribe_job,
-                         args=(store, mid, backend, transcribe_jobs),
+                         args=(store, mid, backend, transcribe_jobs, live_busy),
                          daemon=True).start()
         return {"state": "started"}
 
@@ -3797,7 +3848,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         threading.Thread(
             target=_run_upload_job,
             args=(store, mid, path, asr_backend, summary_backend, summary_model,
-                  kind, title, transcribe_jobs),
+                  kind, title, transcribe_jobs, live_busy),
             daemon=True).start()
         return RedirectResponse(f"/m/{mid}", status_code=303)
 
@@ -3816,7 +3867,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                              "text": "產生摘要中…"}
         threading.Thread(target=_run_summary_job,
                          args=(store, mid, body.kind, summary_backend,
-                               summary_model, summary_jobs), daemon=True).start()
+                               summary_model, summary_jobs, live_busy),
+                         daemon=True).start()
         return {"started": True}
 
     @app.get("/meetings/{mid}/summary/progress")
