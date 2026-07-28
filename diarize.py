@@ -128,7 +128,8 @@ def _speaker_pieces(s0, s1, segments, min_piece=0.6):
 
 
 def assign_speakers(transcripts, segments, *, prefix="說話者", names=None,
-                    mark_overlap=False, overlap_ratio=0.3, split=False):
+                    mark_overlap=False, overlap_ratio=0.3, split=False,
+                    unnumbered=()):
     """Relabel each transcript with the diarization speaker that has the MOST time
     overlap with the line's [start,end] window — so a short interjection at a line's
     start can't mislabel the whole line (dominant speaker wins). Falls back to the
@@ -140,9 +141,18 @@ def assign_speakers(transcripts, segments, *, prefix="說話者", names=None,
     this is a heuristic from the clustered segments, not true overlap separation."""
     order = {raw: i + 1 for i, raw in
              enumerate(sorted({s["speaker"] for s in segments}))}
+    # unnumbered: clusters with too little audio to claim a distinct identity (see
+    # merge_tiny_clusters). They get the BARE prefix — "對方" rather than "對方29" —
+    # because a number asserts "person #29 in this meeting", which was never true
+    # for a cluster of two seconds of backchannel. Bare labels also collapse
+    # together in the UI instead of parading as a crowd of one-line strangers.
+    weak = set(unnumbered)
+
+    def _auto(spk):
+        return prefix if spk in weak else f"{prefix}{order[spk]}"
+
     # names (optional): cluster id -> persistent voiceprint label; else 說話者N.
-    label = (lambda spk: names.get(spk, f"{prefix}{order[spk]}")) if names \
-        else (lambda spk: f"{prefix}{order[spk]}")
+    label = (lambda spk: names.get(spk, _auto(spk))) if names else _auto
     out = []
     for t in transcripts:
         s0 = t.get("start_ms", 0) / 1000.0
@@ -284,6 +294,61 @@ def cluster_embeddings(pcm_path, segments, *, sample_rate=16000, max_secs=12,
                          dtype=np.float32)
         out[spk] = emb / (np.linalg.norm(emb) + 1e-9)
     return out
+
+
+DIAR_MIN_CLUSTER_S = float(os.environ.get("DIAR_MIN_CLUSTER_S", "4.0"))
+DIAR_MERGE_SIM = float(os.environ.get("DIAR_MERGE_SIM", "0.5"))
+
+
+def merge_tiny_clusters(segments, embs, *, min_secs=None, threshold=None):
+    """Fold clusters holding too little audio into the substantial cluster they
+    sound most like. Returns (segments, embs, info).
+
+    Over-split is the dominant post-meeting failure mode: a real 8-person meeting
+    came back with 24 speakers, and every extra one was a cluster of 1-4 short
+    backchannels ("哦，" / "好好好。") totalling 1.6-3.9s — versus 3.6-8.7s per line
+    for the clusters that DID get named. cluster_embeddings has no minimum, so a
+    cluster with two seconds of speech still gets an embedding, and an embedding
+    from two seconds is too noisy to reach the naming threshold against anyone. Each
+    one therefore became its own 對方N.
+
+    A cluster that thin is not evidence of a distinct person. Attribute it to
+    whoever in THIS meeting it most resembles — same recording, same channel, same
+    mic, so a more lenient bar than cross-meeting naming is the right call — and
+    keep the substantial cluster's own embedding, which is the reliable one.
+
+    info["merged"]: dropped id -> kept id. info["weak"]: clusters still under the
+    floor afterwards (nothing to merge into); the caller should avoid giving those a
+    NUMBERED label, since a number claims we tracked a distinct person.
+    """
+    import sys  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    min_secs = DIAR_MIN_CLUSTER_S if min_secs is None else min_secs
+    threshold = DIAR_MERGE_SIM if threshold is None else threshold
+    secs = {}
+    for s in segments:
+        secs[s["speaker"]] = secs.get(s["speaker"], 0.0) + max(0.0, s["end"] - s["start"])
+    big = [k for k in embs if secs.get(k, 0.0) >= min_secs]
+    small = [k for k in embs if secs.get(k, 0.0) < min_secs]
+    merged = {}
+    for k in small:
+        best, best_sim = None, -1.0
+        for b in big:
+            sim = float(np.asarray(embs[k]) @ np.asarray(embs[b]))
+            if sim > best_sim:
+                best_sim, best = sim, b
+        if best is not None and best_sim >= threshold:
+            merged[k] = best
+    if merged:
+        segments = [{**s, "speaker": merged.get(s["speaker"], s["speaker"])}
+                    for s in segments]
+        embs = {k: v for k, v in embs.items() if k not in merged}
+        print(f"diarize: merged {len(merged)} thin cluster(s) "
+              f"(<{min_secs}s) into {len(set(merged.values()))} speaker(s)",
+              file=sys.stderr)
+    weak = {k for k in embs if secs.get(k, 0.0) < min_secs}
+    return segments, embs, {"merged": merged, "weak": weak}
 
 
 def _diar_worker(q, pcm_path, num_speakers, seg_model, emb_model, enroll, provider="cpu"):

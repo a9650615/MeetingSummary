@@ -2497,10 +2497,16 @@ def _diarize_meeting(store, mid, jobs, tracks=None):
             segments, embs = diar.diarize_with_progress(
                 tmp, num_speakers=-1, enroll=enroll, on_progress=on_prog,
                 on_phase=lambda ph, _p=pre, _l=label: jobs[mid].update(text=f"{_p}{_l} 建立聲紋…"))
+            # Fold clusters too thin to be evidence of a person into whoever they
+            # sound like, BEFORE naming — an embedding built from ~2s of backchannel
+            # can't clear the naming bar against anyone, so each such cluster used to
+            # survive as its own 對方N (a real 8-person meeting came back with 24).
+            segments, embs, thin = diar.merge_tiny_clusters(segments, embs)
             names = _persistent_names(store, embs, label) if embs else None
             rows = [dict(r) for r in store.list_transcripts(mid) if r["track"] == track]
             assigned = diar.assign_speakers(rows, segments, prefix=label,
-                                            names=names, split=True)
+                                            names=names, split=True,
+                                            unnumbered=thin["weak"])
             splits = {}
             for r in assigned:
                 if r.get("split"):
