@@ -15,6 +15,23 @@ def test_correct_transcript_uses_backend_output():
     assert out == "我: 找 Scott 處理"
 
 
+def test_correct_transcript_rejects_merged_lines():
+    # meeting 187: the model glued two of Pei's consecutive lines together. No
+    # words were lost, but the summarizer then only saw the head of the merged
+    # line and dropped his second action item -> reject, keep the raw text.
+    raw = "Pei: 正在等那個。\nPei: owner 幫我 approve,之後我會測 DV 靶站。\nHank: 好。"
+    merged = "Pei: 正在等那個 owner 幫我 approve,之後我會測 DV 靶站。\nHank: 好。"
+    assert correct_transcript(raw, roster=["Pei"], lang="zh-TW",
+                              backend=lambda p: merged) == raw
+
+
+def test_correct_transcript_accepts_line_for_line_fix():
+    raw = "Pei: 針對那個 T C F N 的部分\nHank: 好"
+    fixed = "Pei: 針對那個 TCFN 的部分\nHank: 好"
+    assert correct_transcript(raw, roster=["Pei"], lang="zh-TW",
+                              backend=lambda p: fixed) == fixed
+
+
 def test_correct_transcript_falls_back_on_backend_error():
     def backend(p):
         raise RuntimeError("model down")

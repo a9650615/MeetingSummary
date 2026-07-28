@@ -11,7 +11,9 @@ _INSTRUCTION = {
                "也不要寫「某某沒有提到內容」這種句子。\n"
                "【決議事項】只列已經拍板的決定,沒有就寫「無」。\n"
                "【待辦行動】每件事一行,格式「- 某某:要做的事」,開頭直接寫負責人的"
-               "名字(就是逐字稿裡講出這件事的那位說話者),不要寫「負責人」三個字。\n"
+               "名字(就是逐字稿裡講出這件事的那位說話者),不要寫「負責人」三個字。"
+               "逐字稿裡每一句「我會/我要/今天會…」都要列出來,同一個人講了兩件事就"
+               "寫成兩行,不可以只挑一件寫或把兩件併成一句。\n"
                "同一件事只能出現在一個區塊,不要在不同區塊重複寫一次。",
     "bullets": "請將以下會議逐字稿整理成條列式重點。",
     "actions": "請只從以下會議逐字稿擷取三類並分區塊輸出:\n"
@@ -142,12 +144,33 @@ _CORRECT = (
     "- 逐字稿提到的人名,若與【已知與會者名單】某人明顯同音或近音,改為名單上的正確寫法\n"
     "- 嚴禁改動數字、日期、金額、時間,以及任何你不確定的字詞\n"
     "- 嚴禁新增或刪除實質內容、嚴禁杜撰\n"
-    "- 保留每行「說話者: 內容」的格式,逐行輸出,不要加任何說明、標題或程式碼框\n")
+    "- 保留每行「說話者: 內容」的格式,逐行輸出,不要加任何說明、標題或程式碼框\n"
+    "- **輸出行數必須和輸入完全一樣**:輸入 {n} 行就輸出 {n} 行,一行對一行。"
+    "即使前後兩行是同一個人、句子看起來被切斷,也絕對不可以合併成一行,也不可以拆行\n")
 
 
 def build_correction_prompt(text, *, roster, lang):
     names = "、".join(roster) if roster else "(無)"
-    return f"{_CORRECT}\n已知與會者名單:{names}\n輸出語言:{lang}\n\n逐字稿:\n{text}"
+    # State the expected line count — the model merged two consecutive same-speaker
+    # lines on meeting 187, which cost the summarizer one action item.
+    head = _CORRECT.replace("{n}", str(len(_line_labels(text)) or len(text.splitlines())))
+    return f"{head}\n已知與會者名單:{names}\n輸出語言:{lang}\n\n逐字稿:\n{text}"
+
+
+def _line_labels(text):
+    """The leading "說話者:" label of every labelled line, in order."""
+    import re  # noqa: PLC0415
+    return [m.group(1).strip() for m in
+            re.finditer(r"^[ \t]*([^\s:：][^:：\n]{0,15}?)[:：][ \t]", text or "", re.M)]
+
+
+def _lines_aligned(src, out):
+    """Correction must stay line-for-line. On meeting 187 the model concatenated
+    two of Pei's consecutive lines into one — no words lost, but the line boundary
+    was, and the summarizer only picked up the head of the merged line, silently
+    dropping his second action item. Same speaker sequence in, same sequence out,
+    or the correction is rejected and the raw chunk is used."""
+    return _line_labels(src) == _line_labels(out)
 
 
 def correct_transcript(text, *, roster, lang, backend, max_chars=24000):
@@ -169,7 +192,8 @@ def correct_transcript(text, *, roster, lang, backend, max_chars=24000):
         # dedup=False: this is per-line transcript correction, not summary output.
         # Two speakers genuinely repeating a short line ("我: 好" / "對方: 好") are
         # real content — collapsing them would violate the prompt's no-delete rule.
-        return _post(out, lang, dedup=False) or t
+        out = _post(out, lang, dedup=False)
+        return out if out and _lines_aligned(t, out) else t
 
     if len(text) <= max_chars:
         return _one(text)
