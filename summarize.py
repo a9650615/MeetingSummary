@@ -145,16 +145,21 @@ def _commit_speakers(transcript):
     return {w: said[w] for w in said if w in actors}
 
 
-_FIRST_PERSON = (r"^(?:好[,，]?\s*)?我(?:們)?(?:今天|等下|接下來|之後|明天|下午|早上)?"
+# "我今天也會…" and the same opener with the 我 dropped ("今天會針對…"), which is how
+# the speakers actually talk once the chair has called on them.
+_FIRST_PERSON = (r"^(?:好[,，]?\s*)?(?:我(?:們)?)?(?:今天|等下|接下來|之後|明天|下午|早上)?"
                  r"(?:也|再|先|還)*(?:會|要)[,，]?\s*")
+_FILLER = r"(?<=[,，、])\s*(?:呃|嗯|欸|那個那個)\s*|^\s*(?:呃|嗯|欸)\s*"
 
 
 def _third_person(item):
     """"我今天也會根據…" reads wrong in a third-person action list. Applies to the
     extractor's output too, not just the verbatim fallback — the extractor is told
-    to keep the speaker's own words, so it echoes the 我 as well."""
+    to keep the speaker's own words, so it echoes the 我 and the ASR's filler."""
     import re  # noqa: PLC0415
-    return re.sub(_FIRST_PERSON, "", item).strip()
+    # Only strip the opener when something is left to be the action.
+    stripped = re.sub(_FIRST_PERSON, "", item).strip()
+    return re.sub(_FILLER, "", stripped or item).strip()
 
 
 def _cue_lines(lines):

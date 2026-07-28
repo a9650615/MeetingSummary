@@ -175,6 +175,13 @@ def test_first_person_stripped_from_extractor_output_too():
     assert got == ["- Chester: 根據昨天討論，繼續訓練那個量"]
 
 
+def test_time_opener_and_asr_filler_stripped():
+    from summarize import _third_person
+    assert _third_person("今天會再測一下 latency") == "再測一下 latency"
+    assert _third_person("今天會去產出，呃類似的 prompt") == "去產出，類似的 prompt"
+    assert _third_person("測試 DV 靶站") == "測試 DV 靶站"      # nothing to strip
+
+
 def test_commit_gate_excludes_pure_acknowledgement():
     from summarize import _commit_speakers
     got = _commit_speakers("Pei: 我會測試。\nHank: 好，謝謝。再來去 Nancy。")
