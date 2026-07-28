@@ -1,5 +1,6 @@
 from summarize import (build_correction_prompt, correct_transcript, summarize,
-                       build_prompt, _dedup_lines, _ground)
+                       build_prompt, _dedup_lines, _drop_empty_deadlines,
+                       _drop_meta, _ground, _post, _speakers)
 
 
 def test_correction_prompt_carries_roster():
@@ -39,6 +40,61 @@ def test_ground_keeps_names_actually_said():
 def test_ground_blanks_fabricated_bracket_owner():
     g = _ground("- [小米] 提交報告", "我: 提交報告")
     assert g == "- [未指定] 提交報告"
+
+
+def test_ground_scrubs_owner_in_parens_form():
+    # meeting 187: the 3B summarizer wrote its own name as an action-item owner.
+    g = _ground("2. **測試 DV 環境**: 待辦行動 - Qwen (負責)", "Pei: 我會測試 DV 環境")
+    assert "Qwen" not in g and "未指定 (負責)" in g
+
+
+def test_ground_keeps_paren_owner_actually_said():
+    out = "1. 產出 Prompt: 待辦行動 - Nancy (負責)"
+    assert _ground(out, "Nancy: 今天會產出 prompt") == out
+
+
+def test_speakers_from_transcript():
+    assert _speakers("Pei: 今天早上\nNancy: 好\nPei: 以上") == {"Pei", "Nancy"}
+
+
+def test_prompt_enumerates_speaker_roster():
+    p = build_prompt("Pei: 我會測試\nNancy: 好", kind="minutes", lang="zh-TW")
+    assert "Nancy、Pei" in p and "本次會議的說話者" in p
+
+
+def test_empty_deadline_field_dropped():
+    # user report: "期限：未定" on every line is noise, not information
+    src = ("1. **等待 Access Token 批準**: 待辦行動 - Hank (負責)；期限：未定\n"
+           "2. 測試延遲 (期限: 未定)\n"
+           "3. 上線 期限：2026-08-01")
+    out = _drop_empty_deadlines(src)
+    assert "未定" not in out
+    assert out.splitlines()[0].endswith("(負責)")
+    assert out.splitlines()[1] == "2. 測試延遲"
+    assert "期限：2026-08-01" in out          # a real deadline survives
+
+
+def test_empty_deadline_bullet_line_removed():
+    assert _drop_empty_deadlines("- 交付報告\n- 期限：未定\n- 下一步") == "- 交付報告\n- 下一步"
+
+
+def test_meta_disclaimer_stripped():
+    src = "**會議重點:**\n- 複製靶站\n\n以上內容均根據提供的逐字稿整理，不涉及杜撰任何人物或資訊。"
+    assert _drop_meta(src) == "**會議重點:**\n- 複製靶站"
+
+
+def test_empty_roll_call_bullet_dropped():
+    src = "- Pei: 複製靶站。\n- Hank: 未指定（無實質發言）。\n- Nancy: 測延遲。"
+    assert _drop_meta(src) == "- Pei: 複製靶站。\n- Nancy: 測延遲。"
+    # a real item that merely starts with 無 stays
+    keep = "- Chester: 無法在今天完成訓練"
+    assert _drop_meta(keep) == keep
+
+
+def test_post_applies_deadline_and_meta_cleanup_only_to_summaries():
+    src = "- 測試 (期限: 未定)"
+    assert _post(src, "zh-TW") == "- 測試"
+    assert _post(src, "zh-TW", dedup=False) == src   # transcript correction untouched
 
 
 def test_dedup_collapses_repeated_numbered_loop():

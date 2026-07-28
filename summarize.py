@@ -6,12 +6,17 @@ ponytail: char count is a cheap proxy for token budget; swap for a real
 tokenizer estimate if chunk sizing ever misbehaves on CJK."""
 
 _INSTRUCTION = {
-    "minutes": "請將以下會議逐字稿整理成會議記錄,輸出:會議重點、決議事項、"
-               "待辦行動(含負責人與期限)。",
+    "minutes": "請將以下會議逐字稿整理成會議記錄,依序輸出三個區塊:\n"
+               "【會議重點】條列本次真的談到的事;沒有實質發言的人不要列出來,"
+               "也不要寫「某某沒有提到內容」這種句子。\n"
+               "【決議事項】只列已經拍板的決定,沒有就寫「無」。\n"
+               "【待辦行動】每件事一行,格式「- 某某:要做的事」,開頭直接寫負責人的"
+               "名字(就是逐字稿裡講出這件事的那位說話者),不要寫「負責人」三個字。\n"
+               "同一件事只能出現在一個區塊,不要在不同區塊重複寫一次。",
     "bullets": "請將以下會議逐字稿整理成條列式重點。",
     "actions": "請只從以下會議逐字稿擷取三類並分區塊輸出:\n"
-               "【行動項目】每條格式「- [負責人,逐字稿沒明說是誰就寫 未指定] 事項 "
-               "(期限,沒提到就寫 未定)」\n"
+               "【行動項目】每條格式「- [負責人,逐字稿沒明說是誰就寫 未指定] 事項」,"
+               "逐字稿有明講期限才在事項後面補上「(期限)」\n"
                "【決議】條列已拍板的決定\n"
                "【待解問題】條列尚未解決或待追蹤的問題\n"
                "某類若無內容寫「無」。除這三區塊外不要加其他敘述。",
@@ -19,22 +24,44 @@ _INSTRUCTION = {
 
 
 # Small models invent plausible names/owners/deadlines (e.g. 小明/小紅/小米) that
-# were never said. Hard rule up front + explicit fallbacks cut most of it; the
+# were never said, and mis-attribute one speaker's work to another (Pei's three
+# items credited to Hank/Nancy/Chester, plus a "Qwen (負責)" that is the model's
+# own name). Hard rule up front + the explicit speaker roster cut most of it; the
 # deterministic _ground() pass catches the rest.
 _GUARD = ("嚴格規則:只能根據下方逐字稿的內容,絕對不可杜撰任何人名、數字、日期、期限或"
           "未提及的事項。**逐字稿裡沒出現過的人名一律不准寫**(例如不可憑空寫出 小明/"
-          "小米 這種沒講過的名字),不知道負責人就寫「未指定」,沒提到期限/時間就寫「未定」。"
+          "小米 這種沒講過的名字),不知道負責人就寫「未指定」。"
+          "**負責人只能是說出那句話的說話者本人**:逐字稿每行開頭「說話者:」就是講者,"
+          "誰說「我會做X」,X 的負責人就是誰,不可以安到別人頭上。"
+          "**期限只有逐字稿明講日期或時間才寫**,沒講到就完全不要寫期限這個欄位"
+          "(不要寫「期限:未定」之類的佔位字)。"
           "忽略明顯與會議無關、亂碼、或像影片片頭/字幕台詞的內容(例如『優優獨播劇場』"
-          "之類辨識雜訊),不要納入摘要。寧可少寫,也不要編造。\n")
+          "之類辨識雜訊),不要納入摘要。寧可少寫,也不要編造。"
+          "結尾不要加任何自我說明或聲明。\n")
 
 _GROUND_FALLBACK = {"未指定", "未定", "待定", "無", "未提及", "tbd", "n/a", "-", "—"}
+
+_EMPTY_DEADLINE = "未定|待定|未提及|未指定|不明|無|TBD|tbd|N/A|n/a|-|—|\\?"
+
+
+def _speakers(transcript):
+    """Speaker labels from the "說話者: 內容" transcript fed to the summarizer.
+    This is the closed set of people who can own an action item — anything else
+    the model writes as an owner (a model name, a topic, an invented person) is
+    fabrication, regardless of whether the string happens to appear elsewhere in
+    the transcript."""
+    import re  # noqa: PLC0415
+    return {m.group(1).strip()
+            for m in re.finditer(r"^[ \t]*([^\s:：][^:：\n]{0,15}?)[:：][ \t]",
+                                 transcript or "", re.M)}
 
 
 def _ground(out, transcript):
     """Deterministic anti-fabrication backstop. A value the summary assigns to a
     負責人 / 期限 / 時間 / 日期 field that appears NOWHERE in the transcript was
     invented by the model (the 小米 / 當天 case) -> replace with the safe fallback.
-    A name/time actually said in the meeting is in the transcript, so it's kept."""
+    A name/time actually said in the meeting is in the transcript, so it's kept —
+    an owner who was named but never spoke (「這個給 Michael 處理」) stays."""
     import re  # noqa: PLC0415
     t = transcript or ""
 
@@ -54,13 +81,58 @@ def _ground(out, transcript):
     out = re.sub(r"(?P<pre>^\s*[-*]\s*\[)(?P<v>[^\]]+)\]",
                  lambda m: m.group(0) if not made_up(m.group("v"))
                  else m.group("pre") + "未指定]", out, flags=re.M)
+    # owner form the two patterns above miss — "- Qwen (負責)" in the 決議事項 list,
+    # where 「Qwen」 is the summarizer model naming itself as a participant.
+    out = re.sub(r"(?P<v>[^\s,，。;；:：、(（]+)(?P<post>\s*[(（]\s*負責[^)）]*[)）])",
+                 lambda m: m.group(0) if not made_up(m.group("v"))
+                 else "未指定" + m.group("post"), out)
     return out
+
+
+def _drop_empty_deadlines(out):
+    """A deadline nobody stated is noise, not information — drop the whole field
+    instead of printing 「期限:未定」 on every line (user report). Runs after
+    _ground(), so a fabricated date has already been demoted to 未定 and gets
+    dropped here too."""
+    import re  # noqa: PLC0415
+    # Whole-line first — otherwise stripping the field out of "- 期限：未定" leaves
+    # an orphan "-" bullet that no longer matches the line pattern.
+    out = "\n".join(ln for ln in out.splitlines()
+                    if not re.fullmatch(r"\s*[-*\d.)]*\s*(?:期限|截止|時間)[:：]?\s*(?:"
+                                        + _EMPTY_DEADLINE + r")\s*", ln))
+    # "…批準 (期限: 未定)" then "…批準；期限：未定"
+    out = re.sub(r"[ \t]*[（(]\s*(?:期限|截止|時間|日期)[:：]?\s*(?:" + _EMPTY_DEADLINE
+                 + r")\s*[)）]", "", out)
+    return re.sub(r"[ \t]*[;；,，、|·]?[ \t]*(?:期限|截止日?|完成時間)[:：]\s*(?:"
+                  + _EMPTY_DEADLINE + r")\s*(?=$|[\n|])", "", out, flags=re.M)
+
+
+def _drop_meta(out):
+    """Strip the model talking about itself instead of the meeting: the compliance
+    note it tacks on the end ("以上內容均根據提供的逐字稿整理,不涉及杜撰…") and
+    the empty roll-call bullet for someone who never said anything
+    ("- Hank: 未指定（無實質發言）")."""
+    import re  # noqa: PLC0415
+    nothing = re.compile(r"^\s*(?:[-*]|\d+[.)])?\s*(?:\*\*)?[^:：\n]{0,20}(?:\*\*)?[:：]?\s*"
+                         r"[（(]?(?:未指定|無|沒有|未)[^\n]{0,12}"
+                         r"(?:無實質發言|沒有(?:明確)?(?:提到|發言|說明)|未發言|無內容)"
+                         r"[^\n]{0,4}$")
+    keep = [ln for ln in out.splitlines()
+            if not (re.search(r"逐字稿|以上(?:內容|資訊)", ln)
+                    and re.search(r"杜撰|捏造|虛構|編造|未(?:加以)?添加", ln))
+            and not nothing.match(ln)]
+    return "\n".join(keep).rstrip()
 
 
 def build_prompt(text, *, kind, lang, notes=""):
     ref = (f"\n\n使用者現場筆記（可信參考，優先採用其中的人名、日期、決議）:\n{notes.strip()}"
            if notes and notes.strip() else "")
-    return f"{_GUARD}{_INSTRUCTION[kind]}\n輸出語言:{lang}{ref}\n\n逐字稿:\n{text}"
+    who = sorted(_speakers(text))
+    # The closed owner set, stated up front — a 3B model attributes far better
+    # when the candidates are enumerated than when it has to infer them.
+    roster = (f"\n本次會議的說話者(負責人優先從這份名單挑,名單外的人名只有逐字稿真的"
+              f"提到才可以寫):{'、'.join(who)}" if who else "")
+    return f"{_GUARD}{_INSTRUCTION[kind]}\n輸出語言:{lang}{roster}{ref}\n\n逐字稿:\n{text}"
 
 
 _CORRECT = (
@@ -127,6 +199,7 @@ def _post(out, lang, dedup=True):
     real repeated utterances aren't deleted."""
     if dedup:
         out = _dedup_lines(out)
+        out = _drop_empty_deadlines(_drop_meta(out))
     if (lang or "").lower().startswith("zh"):
         import zhtw  # noqa: PLC0415
         return zhtw.to_tw(out)
