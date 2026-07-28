@@ -165,6 +165,16 @@ def test_action_block_covers_every_committing_speaker():
     assert "Hank" not in out.split("【待辦行動】")[1]        # said only 好，謝謝
 
 
+def test_first_person_stripped_from_extractor_output_too():
+    # The extractor is told to keep the speaker's own words, so it echoes 我 —
+    # that has to be stripped on the model path, not only in the fallback.
+    from summarize import _actions_by_speaker
+    text = "Chester: 我今天也會根據昨天討論，繼續訓練那個量。"
+    got = _actions_by_speaker(text, lang="zh-TW",
+                              backend=lambda p: "- 我今天也會根據昨天討論，繼續訓練那個量。")
+    assert got == ["- Chester: 根據昨天討論，繼續訓練那個量"]
+
+
 def test_commit_gate_excludes_pure_acknowledgement():
     from summarize import _commit_speakers
     got = _commit_speakers("Pei: 我會測試。\nHank: 好，謝謝。再來去 Nancy。")

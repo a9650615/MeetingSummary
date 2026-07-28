@@ -145,6 +145,18 @@ def _commit_speakers(transcript):
     return {w: said[w] for w in said if w in actors}
 
 
+_FIRST_PERSON = (r"^(?:好[,，]?\s*)?我(?:們)?(?:今天|等下|接下來|之後|明天|下午|早上)?"
+                 r"(?:也|再|先|還)*(?:會|要)[,，]?\s*")
+
+
+def _third_person(item):
+    """"我今天也會根據…" reads wrong in a third-person action list. Applies to the
+    extractor's output too, not just the verbatim fallback — the extractor is told
+    to keep the speaker's own words, so it echoes the 我 as well."""
+    import re  # noqa: PLC0415
+    return re.sub(_FIRST_PERSON, "", item).strip()
+
+
 def _cue_lines(lines):
     """The speaker's own commitment sentences, verbatim — the fallback when the
     extractor returns 「無」 for someone the cue gate already proved committed to
@@ -158,9 +170,7 @@ def _cue_lines(lines):
         for s in re.split(r"(?<=[。;；!?])", ln):
             s = s.strip().rstrip("。")
             if s and re.search(_COMMIT_CUE, s) and not re.fullmatch(r"謝謝|以上|好", s):
-                # "我今天也會根據…" reads wrong in a third-person action list.
-                out.append(re.sub(r"^(?:好[,，]?)?我(?:們)?(?:今天|等下|接下來|之後|明天"
-                                  r"|下午|早上)?(?:也|再|先|還)*(?:會|要)[,，]?\s*", "", s))
+                out.append(s)
     return out
 
 
@@ -179,7 +189,8 @@ def _actions_by_speaker(transcript, *, lang, backend, max_chars=24000):
             item = ln.strip().lstrip("-*•").strip()
             if item and item.lower() not in _GROUND_FALLBACK:
                 items.append(item)
-        out += [f"- {name}: {i}" for i in (items or _cue_lines(lines))]
+        out += [f"- {name}: {_third_person(i).rstrip('。')}"
+                for i in (items or _cue_lines(lines))]
     return out
 
 
