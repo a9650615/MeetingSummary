@@ -38,7 +38,7 @@ App 體積小（~70KB launcher）；相依與模型都在**首次啟動時才下
 |------|------|------|
 | Live ASR | whisper small-q4 (mlx) | whisper turbo/base/tiny、Qwen3-ASR |
 | 精校 ASR | whisper turbo-q4 | Qwen3-ASR 0.6B/1.7B |
-| 摘要 | Qwen2.5-3B-4bit (mlx) | — |
+| 摘要 | Qwen2.5-7B-4bit (mlx) | — |
 | 分群 | sherpa pyannote-3-0 + 3D-Speaker（自動下載） | `SHERPA_SEG_MODEL` / `SHERPA_EMB_MODEL` 覆寫 |
 
 **加速 runtime（.cpp · Metal，選用）**

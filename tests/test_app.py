@@ -359,6 +359,31 @@ def test_summary_job_runs_backend_and_stores(tmp_path):
     assert store.list_summaries(mid)[0]["text"] == "會議記錄"
 
 
+def test_summary_job_releases_llm_weights(tmp_path):
+    # The 7B summarizer peaks ~5.5GB; it must not stay resident between jobs.
+    import app
+    freed = []
+
+    def backend(p):
+        return "會議記錄"
+    backend.release = lambda: freed.append(1)
+
+    store = Store(tmp_path / "m.db")
+    store.set_setting("summary_correct", "0")
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    store.add_transcript(mid, "accurate", "mic", 0, 1000, "我", "討論預算")
+    app._run_summary_job(store, mid, "minutes", backend, "mlx-lm", {})
+    assert freed == [1]
+
+    # released on the failure path too, and a backend with no releaser is fine
+    def boom(p):
+        raise RuntimeError("model down")
+    boom.release = lambda: freed.append(2)
+    app._run_summary_job(store, mid, "minutes", boom, "mlx-lm", {})
+    assert freed == [1, 2]
+    app._run_summary_job(store, mid, "minutes", lambda p: "S", "mlx-lm", {})
+
+
 def test_summary_route_is_async_started(tmp_path):
     # The route now spawns a bg job and returns at once (no blocking on the LLM).
     c, store = make_client(tmp_path, summary_backend=lambda p: "S")

@@ -1632,7 +1632,7 @@ _SUPPORTED = [
     {"id": "mlx-community/whisper-base-mlx-q4", "label": "whisper base-q4", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
     {"id": "mlx-community/whisper-tiny-mlx-q4", "label": "whisper tiny-q4", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
     {"id": "mlx-community/whisper-large-v3-mlx", "label": "whisper large-v3", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
-    {"id": "mlx-community/Qwen2.5-3B-Instruct-4bit", "label": "Qwen2.5-3B（摘要）", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
+    {"id": "mlx-community/Qwen2.5-7B-Instruct-4bit", "label": "Qwen2.5-7B（摘要）", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
     {"id": "mlx-community/Qwen3-ASR-1.7B-8bit", "label": "Qwen3-ASR 1.7B（準·快）", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
     {"id": "qwen3-asr-0.6b-q4-k-m", "label": "Qwen3-ASR 0.6B（femelo·快）", "kind": "femelo", "group": "🔧 .cpp · Metal"},
     {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR 1.7B（chatllm·慢·備用）", "kind": "chatllm", "group": "🔧 .cpp · Metal"},
@@ -2335,6 +2335,19 @@ def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs,
         jobs[mid] = {"state": "done", "text": out, "kind": kind, "title": title}
     except Exception as e:
         jobs[mid] = {"state": "error", "msg": str(e)}
+    finally:
+        _release_llm(summary_backend)
+
+
+def _release_llm(summary_backend):
+    """Drop the summary LLM's weights once the job is over. The 7B-4bit summarizer
+    peaks around 5.5GB — leaving it resident for the process lifetime on a 16GB
+    machine is what drove the original OOM that demoted the summary model to 3B.
+    Freeing between jobs costs one reload (~10s, weights come back from page
+    cache) and only on the next summary, which is minutes-to-days later."""
+    release = getattr(summary_backend, "release", None)
+    if release:
+        release()
 
 
 def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
@@ -2389,6 +2402,8 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
         jobs[mid] = {"state": "done", "done": len(segs), "total": len(segs)}
     except Exception as e:
         jobs[mid] = {"state": "error", "msg": str(e)}
+    finally:
+        _release_llm(summary_backend)
 
 
 _SIDE_LABELS = {"我", "對方", "混合"}
@@ -4466,6 +4481,22 @@ if __name__ == "__main__":  # pragma: no cover
         if "fn" not in _llm:
             _llm["fn"] = mlx_lm_backend(llm_model)
         return _llm["fn"](prompt)
+
+    def _release():
+        """Free the summary weights between jobs (see _release_llm). Dropping the
+        closure isn't enough — MLX keeps freed buffers in its own allocator pool,
+        so the arrays only return to the OS after clear_cache()."""
+        if _llm.pop("fn", None) is None:
+            return
+        import gc  # noqa: PLC0415
+        gc.collect()
+        try:
+            import mlx.core as mx  # noqa: PLC0415
+            mx.clear_cache()
+        except Exception:
+            pass
+
+    summary_backend.release = _release
 
     import backends
 
