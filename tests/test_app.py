@@ -354,9 +354,10 @@ def test_summary_job_runs_backend_and_stores(tmp_path):
     store.add_transcript(mid, "accurate", "mic", 0, 1000, "我", "討論預算")
     jobs = {}
     app._run_summary_job(store, mid, "minutes", backend, "mlx-lm", jobs)
-    assert jobs[mid]["state"] == "done" and jobs[mid]["text"] == "會議記錄"
+    assert jobs[mid]["state"] == "done"
+    assert jobs[mid]["text"].startswith("會議記錄") and "【待辦行動】" in jobs[mid]["text"]
     assert "討論預算" in captured["p"]  # transcript fed into the prompt
-    assert store.list_summaries(mid)[0]["text"] == "會議記錄"
+    assert store.list_summaries(mid)[0]["text"].startswith("會議記錄")
 
 
 def test_summary_job_releases_llm_weights(tmp_path):

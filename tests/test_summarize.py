@@ -76,7 +76,7 @@ def test_speakers_from_transcript():
 
 def test_prompt_enumerates_speaker_roster():
     p = build_prompt("Pei: 我會測試\nNancy: 好", kind="minutes", lang="zh-TW")
-    assert "Nancy、Pei" in p and "本次會議的說話者" in p
+    assert "說話者:Nancy、Pei" in p
 
 
 def test_empty_deadline_field_dropped():
@@ -134,8 +134,41 @@ def test_short_transcript_single_pass():
     backend = lambda p: calls.append(p) or "SUMMARY"
     out = summarize("short", kind="minutes", lang="zh-TW",
                     backend=backend, max_chars=1000)
-    assert out == "SUMMARY"
+    # no "說話者: 我會…" line -> nobody committed -> the action block says 無
+    assert out == "SUMMARY\n\n【待辦行動】\n無"
     assert len(calls) == 1  # no map-reduce for short input
+
+
+def test_action_block_covers_every_committing_speaker():
+    # The whole point of per-speaker extraction: over six runs the single-call
+    # version dropped a different speaker each time. Here the stub answers 無 for
+    # Chester (the real 7B did exactly this — his line is vague ASR), so the
+    # verbatim fallback must still put him in the list.
+    text = ("Pei: 我會測試 DV 靶站。\n"
+            "Hank: 好，謝謝。\n"
+            "Chester: 我今天也會根據昨天討論，繼續訓練那個量。\n"
+            "Nancy: 今天會產出 prompt。")
+
+    def backend(p):
+        if "Chester" in p:
+            return "無"
+        if "Pei" in p and "列出" in p:
+            return "- 測試 DV 靶站"
+        if "Nancy" in p and "列出" in p:
+            return "- 產出 prompt"
+        return "【會議重點】\n- 靶站測試"
+
+    out = summarize(text, kind="minutes", lang="zh-TW", backend=backend, max_chars=9999)
+    assert "- Pei: 測試 DV 靶站" in out
+    assert "- Nancy: 產出 prompt" in out
+    assert "- Chester: 根據昨天討論，繼續訓練那個量" in out   # fallback, 我今天也會 stripped
+    assert "Hank" not in out.split("【待辦行動】")[1]        # said only 好，謝謝
+
+
+def test_commit_gate_excludes_pure_acknowledgement():
+    from summarize import _commit_speakers
+    got = _commit_speakers("Pei: 我會測試。\nHank: 好，謝謝。再來去 Nancy。")
+    assert set(got) == {"Pei"}
 
 
 def test_long_transcript_map_reduce():

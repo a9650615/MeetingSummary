@@ -5,34 +5,35 @@ Long transcripts overflow the context window, so they go through map-reduce
 ponytail: char count is a cheap proxy for token budget; swap for a real
 tokenizer estimate if chunk sizing ever misbehaves on CJK."""
 
+# Kept deliberately terse. A 4-bit model's instruction-following degrades as the
+# prompt grows, and the rules that matter (owner = the speaker who said it, no
+# invented names, no placeholder deadline) compete with every extra clause for
+# attention. Each line below earned its place by fixing an observed failure; the
+# deterministic passes (_ground / _drop_empty_deadlines / _drop_meta) are what
+# make the short version safe.
 _INSTRUCTION = {
-    "minutes": "請將以下會議逐字稿整理成會議記錄,依序輸出三個區塊:\n"
-               "【會議重點】條列本次真的談到的事;沒有實質發言的人不要列出來,"
-               "也不要寫「某某沒有提到內容」這種句子。\n"
+    # 待辦行動 is NOT asked for here — it's assembled per speaker by
+    # _actions_by_speaker(), which is the only way it comes out complete.
+    "minutes": "請將以下會議逐字稿整理成會議記錄,輸出兩個區塊:\n"
+               "【會議重點】條列本次談到的主題,每條開頭用「- 」;不要用人名開頭,"
+               "也不要寫「某某提到/表示/回應」這種句子。\n"
                "【決議事項】只列已經拍板的決定,沒有就寫「無」。\n"
-               "【待辦行動】每件事一行,格式「- 某某:要做的事」,開頭直接寫負責人的"
-               "名字(就是逐字稿裡講出這件事的那位說話者),不要寫「負責人」三個字。"
-               "逐字稿裡每一句「我會/我要/今天會…」都要列出來,同一個人講了兩件事就"
-               "寫成兩行,不可以只挑一件寫或把兩件併成一句。\n"
-               "同一件事只能出現在一個區塊,不要在不同區塊重複寫一次。",
+               "不要輸出其他區塊。用逐字稿的原話,別換講法。",
     "bullets": "請將以下會議逐字稿整理成條列式重點。",
-    "actions": "請只從以下會議逐字稿擷取三類並分區塊輸出:\n"
-               "【行動項目】每條格式「- [負責人,逐字稿沒明說是誰就寫 未指定] 事項」,"
-               "逐字稿有明講期限才在事項後面補上「(期限)」\n"
-               "【決議】條列已拍板的決定\n"
-               "【待解問題】條列尚未解決或待追蹤的問題\n"
-               "某類若無內容寫「無」。除這三區塊外不要加其他敘述。",
+    "actions": "只擷取三段:\n"
+               "【行動項目】一行一件「- [名字] 事情」,沒說是誰寫 [未指定];"
+               "有明講期限才在後面加「(期限)」\n"
+               "【決議】已拍板的決定\n"
+               "【待解問題】未解決或待追蹤的\n"
+               "某段無內容寫「無」。不要其他敘述。",
 }
 
 
-# Small models invent plausible names/owners/deadlines (e.g. 小明/小紅/小米) that
-# were never said, and mis-attribute one speaker's work to another (Pei's three
-# items credited to Hank/Nancy/Chester, plus a "Qwen (負責)" that is the model's
-# own name). Hard rule up front + the explicit speaker roster cut most of it; the
-# deterministic _ground() pass catches the rest.
+# Small models invent plausible names/owners/deadlines (小明/小紅/小米, and on
+# meeting 187 a "Qwen (負責)" — the model's own name) and credit one speaker's
+# work to another. These rules plus the enumerated speaker roster cut most of it.
 _GUARD = ("嚴格規則:只能根據下方逐字稿的內容,絕對不可杜撰任何人名、數字、日期、期限或"
-          "未提及的事項。**逐字稿裡沒出現過的人名一律不准寫**(例如不可憑空寫出 小明/"
-          "小米 這種沒講過的名字),不知道負責人就寫「未指定」。"
+          "未提及的事項。**逐字稿裡沒出現過的人名一律不准寫**,不知道負責人就寫「未指定」。"
           "**負責人只能是說出那句話的說話者本人**:逐字稿每行開頭「說話者:」就是講者,"
           "誰說「我會做X」,X 的負責人就是誰,不可以安到別人頭上。"
           "**期限只有逐字稿明講日期或時間才寫**,沒講到就完全不要寫期限這個欄位"
@@ -109,6 +110,79 @@ def _drop_empty_deadlines(out):
                   + _EMPTY_DEADLINE + r")\s*(?=$|[\n|])", "", out, flags=re.M)
 
 
+# A first-person commitment cue. Only a gate for "is this person an actor at all"
+# — once a speaker qualifies, the extractor sees ALL of their lines, so an item
+# phrased without a cue (「那早上會追蹤一下這邊的進度」) is still picked up.
+_COMMIT_CUE = r"我(?:們)?(?:今天|等下|接下來|之後|明天|下午|早上)?(?:也|再|先|還)*(?:會|要|來|去)|" \
+              r"(?:今天|明天|下午|早上|等下|接下來)(?:也|再|先|還)*會"
+
+_ACTIONS_ONE = ("這是 {name} 在會議中說的話。列出 {name} 說自己要做的事,一行一件,"
+                "格式「- 事情」,用原話,不要寫名字,不要編造。"
+                "只要他講了「我會/我要/今天會」就算一件,照原話寫,"
+                "就算內容聽起來不具體也要寫出來。\n"
+                "輸出語言:{lang}\n\n{lines}")
+
+
+def _commit_speakers(transcript):
+    """{speaker: [their lines]} for speakers who committed to doing something.
+
+    Asking one call for the whole 待辦行動 list drops items nondeterministically —
+    over six runs on the same transcript the 7B-4bit model lost a different
+    speaker almost every time (Pei's second item, then Chester entirely, then
+    Pei entirely). Iterating speakers in code makes completeness structural, and
+    feeding each extractor only that speaker's own words makes mis-attribution
+    impossible rather than merely discouraged."""
+    import re  # noqa: PLC0415
+    said, actors = {}, set()
+    for m in re.finditer(r"^[ \t]*([^\s:：][^:：\n]{0,15}?)[:：][ \t]*(.*)$",
+                         transcript or "", re.M):
+        who, line = m.group(1).strip(), m.group(2).strip()
+        if not line:
+            continue
+        said.setdefault(who, []).append(line)
+        if re.search(_COMMIT_CUE, line):
+            actors.add(who)
+    return {w: said[w] for w in said if w in actors}
+
+
+def _cue_lines(lines):
+    """The speaker's own commitment sentences, verbatim — the fallback when the
+    extractor returns 「無」 for someone the cue gate already proved committed to
+    something. Chester's 「我今天也會根據昨天討論還有測試結果,繼續訓練那個量」 is
+    vague ASR, so the model judged it not concrete and dropped him entirely.
+    Quoting him is worse prose than the model's phrasing but infinitely better
+    than silently losing an attendee's work."""
+    import re  # noqa: PLC0415
+    out = []
+    for ln in lines:
+        for s in re.split(r"(?<=[。;；!?])", ln):
+            s = s.strip().rstrip("。")
+            if s and re.search(_COMMIT_CUE, s) and not re.fullmatch(r"謝謝|以上|好", s):
+                # "我今天也會根據…" reads wrong in a third-person action list.
+                out.append(re.sub(r"^(?:好[,，]?)?我(?:們)?(?:今天|等下|接下來|之後|明天"
+                                  r"|下午|早上)?(?:也|再|先|還)*(?:會|要)[,，]?\s*", "", s))
+    return out
+
+
+def _actions_by_speaker(transcript, *, lang, backend, max_chars=24000):
+    """The 【待辦行動】 block, one focused extraction per committing speaker."""
+    out = []
+    for name, lines in _commit_speakers(transcript).items():
+        prompt = _ACTIONS_ONE.format(name=name, lang=lang,
+                                     lines="\n".join(lines)[:max_chars])
+        try:
+            got = _post(backend(prompt), lang)
+        except Exception:
+            got = ""  # best-effort: one speaker's failure can't sink the summary
+        items = []
+        for ln in got.splitlines():
+            item = ln.strip().lstrip("-*•").strip()
+            if item and item.lower() not in _GROUND_FALLBACK:
+                items.append(item)
+        out += [f"- {name}: {i}" for i in (items or _cue_lines(lines))]
+    return out
+
+
 def _drop_meta(out):
     """Strip the model talking about itself instead of the meeting: the compliance
     note it tacks on the end ("以上內容均根據提供的逐字稿整理,不涉及杜撰…") and
@@ -130,23 +204,20 @@ def build_prompt(text, *, kind, lang, notes=""):
     ref = (f"\n\n使用者現場筆記（可信參考，優先採用其中的人名、日期、決議）:\n{notes.strip()}"
            if notes and notes.strip() else "")
     who = sorted(_speakers(text))
-    # The closed owner set, stated up front — a 3B model attributes far better
-    # when the candidates are enumerated than when it has to infer them.
-    roster = (f"\n本次會議的說話者(負責人優先從這份名單挑,名單外的人名只有逐字稿真的"
-              f"提到才可以寫):{'、'.join(who)}" if who else "")
+    # The owner candidates, stated up front — the model attributes far better when
+    # they're enumerated than when it has to infer them from the line prefixes.
+    roster = f"\n說話者:{'、'.join(who)}" if who else ""
     return f"{_GUARD}{_INSTRUCTION[kind]}\n輸出語言:{lang}{roster}{ref}\n\n逐字稿:\n{text}"
 
 
 _CORRECT = (
-    "你是逐字稿校正員。以下是語音辨識(ASR)產生的會議逐字稿,可能含同音字、錯別字、"
-    "斷詞錯誤。只做保守校正:\n"
-    "- 修正明顯的同音/錯別字與斷詞,使語句通順\n"
-    "- 逐字稿提到的人名,若與【已知與會者名單】某人明顯同音或近音,改為名單上的正確寫法\n"
-    "- 嚴禁改動數字、日期、金額、時間,以及任何你不確定的字詞\n"
-    "- 嚴禁新增或刪除實質內容、嚴禁杜撰\n"
-    "- 保留每行「說話者: 內容」的格式,逐行輸出,不要加任何說明、標題或程式碼框\n"
-    "- **輸出行數必須和輸入完全一樣**:輸入 {n} 行就輸出 {n} 行,一行對一行。"
-    "即使前後兩行是同一個人、句子看起來被切斷,也絕對不可以合併成一行,也不可以拆行\n")
+    "校正這份語音辨識逐字稿的同音字、錯別字、斷詞:\n"
+    "- 人名若與名單某人同音或近音,改成名單的寫法\n"
+    "- 不改數字、日期、金額、時間,和任何你不確定的字\n"
+    "- 不增不刪內容\n"
+    "- 輸入 {n} 行就輸出 {n} 行,保持「說話者: 內容」一行對一行。"
+    "就算前後兩行同一人、句子像被切斷,也不可合併或拆行\n"
+    "- 只輸出逐字稿,不要說明或程式碼框\n")
 
 
 def build_correction_prompt(text, *, roster, lang):
@@ -243,9 +314,7 @@ def _chunk(text, max_chars):
     return chunks
 
 
-def summarize(text, *, kind, lang, backend, max_chars=24000, notes=""):
-    if not (text or "").strip():
-        return "（無逐字稿，無法產生摘要）"
+def _summary_body(text, *, kind, lang, backend, max_chars, notes):
     # Notes are user-provided ground truth: pass to _ground as valid source so a
     # name/date the user typed isn't scrubbed as "fabricated".
     ground = text + ("\n" + notes if notes else "")
@@ -257,8 +326,21 @@ def summarize(text, *, kind, lang, backend, max_chars=24000, notes=""):
         _ground(backend(build_prompt(c, kind=kind, lang=lang, notes=notes)), c + "\n" + notes)
         for c in _chunk(text, max_chars)
     ]
-    return summarize("\n".join(partials), kind=kind, lang=lang,
-                     backend=backend, max_chars=max_chars, notes=notes)
+    return _summary_body("\n".join(partials), kind=kind, lang=lang, backend=backend,
+                         max_chars=max_chars, notes=notes)
+
+
+def summarize(text, *, kind, lang, backend, max_chars=24000, notes=""):
+    if not (text or "").strip():
+        return "（無逐字稿，無法產生摘要）"
+    out = _summary_body(text, kind=kind, lang=lang, backend=backend,
+                        max_chars=max_chars, notes=notes)
+    if kind != "minutes":
+        return out
+    # 待辦行動 is built per speaker from the ORIGINAL transcript — never from the
+    # map-reduce partials, which have already lost per-line attribution.
+    items = _actions_by_speaker(text, lang=lang, backend=backend, max_chars=max_chars)
+    return out + "\n\n【待辦行動】\n" + ("\n".join(items) if items else "無")
 
 
 def mlx_lm_backend(model="mlx-community/Qwen2.5-14B-Instruct-4bit", max_tokens=1024):

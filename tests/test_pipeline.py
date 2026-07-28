@@ -13,7 +13,7 @@ def test_pipeline_transcribes_then_summarizes(tmp_path):
     )
 
     mid = result["meeting_id"]
-    assert result["summary"] == "會議記錄"
+    assert result["summary"].startswith("會議記錄")
     assert store.list_transcripts(mid)[0]["text"] == "討論預算"
-    assert store.list_summaries(mid)[0]["text"] == "會議記錄"
+    assert store.list_summaries(mid)[0]["text"].startswith("會議記錄")
     assert store.get_meeting(mid)["status"] == "finalized"  # batch run is done
