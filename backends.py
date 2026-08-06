@@ -14,6 +14,8 @@ def route(model):
     m = model.lower()
     if m.startswith("ane-"):  # ANE (Neural Engine) via the `speech` CLI
         return "ane"
+    if m.startswith("groq-"):  # Groq's remote OpenAI-compatible whisper API
+        return "groq"
     if model == "qwen3-asr-1.7b":
         return "chatllm"
     if "qwen3-asr" in m and "mlx-community" in m:  # MLX-native Qwen3-ASR (Metal, fast)
@@ -191,6 +193,115 @@ def _takes_path(fn):
     return _run
 
 
+# Groq's OpenAI-compatible transcription endpoint. whisper-large-v3 = most
+# accurate; turbo = faster, still solid. Free tier caps at 20 requests/min
+# per model — _GROQ_RPM_SAFE leaves a margin so we skip client-side instead
+# of burning quota on a call that would just come back 429.
+_GROQ_MODELS = {
+    "groq-whisper-large-v3": "whisper-large-v3",
+    "groq-whisper-large-v3-turbo": "whisper-large-v3-turbo",
+}
+_GROQ_RPM_SAFE = 18
+_GROQ_STATE = {"calls": {}, "lock": None}  # model -> deque of recent call times
+_GROQ_QUOTA_WARN_REQUESTS = 5
+_GROQ_QUOTA_WARN_TOKENS = 500
+
+
+def _groq_can_call(model):
+    """Client-side RPM guard: True (and records the attempt) if this model has
+    made fewer than _GROQ_RPM_SAFE calls in the trailing 60s; False if a call
+    right now would risk a 429. Skipping is safe — the audio isn't lost, it's
+    just not sent to Groq for this window (re-transcribe can retry later)."""
+    import threading  # noqa: PLC0415
+    import time  # noqa: PLC0415
+    from collections import deque  # noqa: PLC0415
+    if _GROQ_STATE["lock"] is None:
+        _GROQ_STATE["lock"] = threading.Lock()
+    with _GROQ_STATE["lock"]:
+        now = time.monotonic()
+        dq = _GROQ_STATE["calls"].setdefault(model, deque())
+        while dq and now - dq[0] > 60:
+            dq.popleft()
+        if len(dq) >= _GROQ_RPM_SAFE:
+            return False
+        dq.append(now)
+        return True
+
+
+def _groq_warn_quota(resp):
+    """Low-quota heads-up only. Groq puts remaining RPM/TPM in response
+    headers on every call; we stay quiet unless it's actually running low, so
+    a live session's stderr isn't spammed once per utterance."""
+    import sys  # noqa: PLC0415
+    try:
+        rem_req = resp.headers.get("x-ratelimit-remaining-requests")
+        if rem_req is not None and float(rem_req) < _GROQ_QUOTA_WARN_REQUESTS:
+            print(f"groq quota low: {rem_req} requests remaining", file=sys.stderr)
+        rem_tok = resp.headers.get("x-ratelimit-remaining-tokens")
+        if rem_tok is not None and float(rem_tok) < _GROQ_QUOTA_WARN_TOKENS:
+            print(f"groq quota low: {rem_tok} tokens remaining", file=sys.stderr)
+    except (TypeError, ValueError):
+        pass
+
+
+def groq_backend(model, language=None):
+    """Remote Whisper via Groq's OpenAI-compatible transcription endpoint.
+    callable(pcm_bytes | audio_path) -> [{start, end, text}] (seconds) — same
+    contract as every other backend. Network call: fail-soft on any error
+    (log + return []), matching mlx_whisper_backend's "one bad window can't
+    kill a session" rule. Raises at construction time (not per-call) if
+    GROQ_API_KEY is missing — that's a config problem, not a transient one."""
+    import os  # noqa: PLC0415
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY not set — put it in .env or export it before "
+            "selecting a groq-* model")
+    groq_model = _GROQ_MODELS.get(model, model)
+
+    def _run(audio):
+        import sys  # noqa: PLC0415
+
+        import httpx  # noqa: PLC0415
+
+        import recorder  # noqa: PLC0415
+        pcm = _pcm_bytes(audio)
+        if len(pcm) < 3200:  # <0.1s -> not worth a call
+            return []
+        if not _groq_can_call(model):
+            print(f"groq {model}: near RPM limit, skipping window "
+                  f"(audio kept for re-transcribe)", file=sys.stderr)
+            return []
+        wav = recorder.pcm_to_wav(pcm, sample_rate=16000, channels=1)
+        data = {"model": groq_model, "response_format": "verbose_json"}
+        if language:
+            data["language"] = language
+        try:
+            resp = httpx.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": ("audio.wav", wav, "audio/wav")},
+                data=data, timeout=20.0)
+        except httpx.HTTPError as e:
+            print(f"groq request failed: {e}", file=sys.stderr)
+            return []
+        if resp.status_code != 200:
+            print(f"groq error {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+            return []
+        _groq_warn_quota(resp)
+        try:
+            segments = resp.json().get("segments", [])
+        except ValueError:
+            return []
+        return [{"start": s["start"], "end": s["end"], "text": s["text"]}
+                for s in segments
+                if s.get("no_speech_prob", 0) < 0.6
+                and s.get("compression_ratio", 0) < 2.4
+                and s.get("avg_logprob", 0) > -1.0]
+
+    return _run
+
+
 def make_backend(model, language=None):
     """THE ASR backend factory: a model id maps to exactly ONE engine, used by
     both live and re-transcribe. Returns callable(pcm_bytes | audio_path) ->
@@ -228,6 +339,8 @@ def make_backend(model, language=None):
         return _takes_path(qwen3_batch_backend(model, language))
     if r == "firered":
         return _takes_path(firered_batch_backend(model, language))
+    if r == "groq":
+        return groq_backend(model, language)
     import asr  # noqa: PLC0415
     return asr.mlx_whisper_backend(model, language)  # bytes, .pcm or container
 

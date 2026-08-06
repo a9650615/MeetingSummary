@@ -80,3 +80,109 @@ def test_clean_firered_strips_sil_and_special_tokens():
     assert _clean_firered("要打 BP<sil>的時候") == "要打 BP的時候"
     assert _clean_firered("hello <sil> world") == "hello world"
     assert _clean_firered(None) == ""
+
+
+def test_route_groq():
+    assert backends.route("groq-whisper-large-v3") == "groq"
+    assert backends.route("groq-whisper-large-v3-turbo") == "groq"
+
+
+def test_groq_backend_requires_api_key(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    import pytest
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        backends.groq_backend("groq-whisper-large-v3")
+
+
+class _FakeResp:
+    def __init__(self, status_code=200, json_data=None, headers=None, text=""):
+        self.status_code = status_code
+        self._json = json_data if json_data is not None else {}
+        self.headers = headers or {}
+        self.text = text
+
+    def json(self):
+        return self._json
+
+
+def test_groq_backend_maps_segments_and_filters_hallucinations(monkeypatch):
+    import httpx
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    backends._GROQ_STATE["calls"].clear()
+    seen = {}
+
+    def fake_post(url, headers=None, files=None, data=None, timeout=None):
+        seen["url"] = url
+        seen["data"] = data
+        return _FakeResp(json_data={"segments": [
+            {"start": 0.0, "end": 1.2, "text": "你好",
+             "no_speech_prob": 0.1, "compression_ratio": 1.5, "avg_logprob": -0.3},
+            {"start": 1.2, "end": 2.0, "text": "靜音噪音",
+             "no_speech_prob": 0.9, "compression_ratio": 1.2, "avg_logprob": -0.1},
+        ]})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    run = backends.groq_backend("groq-whisper-large-v3")
+    out = run(b"\x00\x01" * 4000)  # 8000 bytes, > 3200 floor
+    assert out == [{"start": 0.0, "end": 1.2, "text": "你好"}]
+    assert seen["url"] == "https://api.groq.com/openai/v1/audio/transcriptions"
+    assert seen["data"]["model"] == "whisper-large-v3"
+
+
+def test_groq_backend_skips_tiny_audio_without_calling_api(monkeypatch):
+    import httpx
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    backends._GROQ_STATE["calls"].clear()
+
+    def fail_post(*a, **k):
+        raise AssertionError("should not call the API for tiny audio")
+
+    monkeypatch.setattr(httpx, "post", fail_post)
+    run = backends.groq_backend("groq-whisper-large-v3")
+    assert run(b"\x00\x01") == []  # 2 bytes, well under the 3200 floor
+
+
+def test_groq_backend_non_200_returns_empty_not_raise(monkeypatch):
+    import httpx
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    backends._GROQ_STATE["calls"].clear()
+    monkeypatch.setattr(httpx, "post",
+                        lambda *a, **k: _FakeResp(status_code=429, text="rate limited"))
+    run = backends.groq_backend("groq-whisper-large-v3")
+    assert run(b"\x00\x01" * 4000) == []
+
+
+def test_groq_backend_network_error_returns_empty_not_raise(monkeypatch):
+    import httpx
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    backends._GROQ_STATE["calls"].clear()
+
+    def raise_timeout(*a, **k):
+        raise httpx.ConnectTimeout("boom")
+
+    monkeypatch.setattr(httpx, "post", raise_timeout)
+    run = backends.groq_backend("groq-whisper-large-v3")
+    assert run(b"\x00\x01" * 4000) == []
+
+
+def test_groq_rpm_guard_skips_past_the_safe_margin(monkeypatch):
+    import httpx
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    backends._GROQ_STATE["calls"].clear()
+    calls = {"n": 0}
+
+    def counting_post(*a, **k):
+        calls["n"] += 1
+        return _FakeResp(json_data={"segments": []})
+
+    monkeypatch.setattr(httpx, "post", counting_post)
+    run = backends.groq_backend("groq-whisper-large-v3")
+    for _ in range(25):  # well past _GROQ_RPM_SAFE (18)
+        run(b"\x00\x01" * 4000)
+    assert calls["n"] == backends._GROQ_RPM_SAFE
+
+
+def test_make_backend_dispatches_groq(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    run = backends.make_backend("groq-whisper-large-v3-turbo")
+    assert callable(run)
