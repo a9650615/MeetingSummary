@@ -128,7 +128,8 @@ def _speaker_pieces(s0, s1, segments, min_piece=0.6):
 
 
 def assign_speakers(transcripts, segments, *, prefix="說話者", names=None,
-                    mark_overlap=False, overlap_ratio=0.3, split=False):
+                    mark_overlap=False, overlap_ratio=0.3, split=False,
+                    unnumbered=()):
     """Relabel each transcript with the diarization speaker that has the MOST time
     overlap with the line's [start,end] window — so a short interjection at a line's
     start can't mislabel the whole line (dominant speaker wins). Falls back to the
@@ -140,9 +141,18 @@ def assign_speakers(transcripts, segments, *, prefix="說話者", names=None,
     this is a heuristic from the clustered segments, not true overlap separation."""
     order = {raw: i + 1 for i, raw in
              enumerate(sorted({s["speaker"] for s in segments}))}
+    # unnumbered: clusters with too little audio to claim a distinct identity (see
+    # merge_tiny_clusters). They get the BARE prefix — "對方" rather than "對方29" —
+    # because a number asserts "person #29 in this meeting", which was never true
+    # for a cluster of two seconds of backchannel. Bare labels also collapse
+    # together in the UI instead of parading as a crowd of one-line strangers.
+    weak = set(unnumbered)
+
+    def _auto(spk):
+        return prefix if spk in weak else f"{prefix}{order[spk]}"
+
     # names (optional): cluster id -> persistent voiceprint label; else 說話者N.
-    label = (lambda spk: names.get(spk, f"{prefix}{order[spk]}")) if names \
-        else (lambda spk: f"{prefix}{order[spk]}")
+    label = (lambda spk: names.get(spk, _auto(spk))) if names else _auto
     out = []
     for t in transcripts:
         s0 = t.get("start_ms", 0) / 1000.0
@@ -219,15 +229,31 @@ class SpeakerTracker:
         return self.last_id
 
 
+_EMB_EXT = {}  # (emb_path, provider) -> SpeakerEmbeddingExtractor, shared across sessions
+
+
 def embedding_extractor(model=None, provider="cpu"):
     """sherpa-onnx speaker embedding extractor: int16 PCM bytes -> vector. Lazy.
-    provider='coreml' offloads to the Neural Engine (power-efficient)."""
+    provider='coreml' offloads to the Neural Engine (power-efficient).
+
+    The extractor is cached per (model, provider) and reused across live
+    sessions: create_stream() makes a fresh stream per call, so the extractor
+    itself is stateless and safe to share — this skips the CoreML compile/load
+    (~hundreds of ms) that was blocking every /ws start handshake."""
     import numpy as np  # noqa: PLC0415
     import sherpa_onnx  # noqa: PLC0415
+    import sys, time  # noqa: PLC0415
 
     _, emb = _resolve_models(emb_model=model)
-    ext = sherpa_onnx.SpeakerEmbeddingExtractor(
-        sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb, provider=provider))
+    key = (emb, provider)
+    ext = _EMB_EXT.get(key)
+    if ext is None:
+        t = time.perf_counter()
+        ext = sherpa_onnx.SpeakerEmbeddingExtractor(
+            sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb, provider=provider))
+        _EMB_EXT[key] = ext
+        print(f"[live start] emb extractor load {(time.perf_counter()-t)*1000:.0f}ms "
+              f"(cold, {provider})", file=sys.stderr)
 
     def _run(pcm_bytes, sample_rate=16000):
         samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -268,6 +294,61 @@ def cluster_embeddings(pcm_path, segments, *, sample_rate=16000, max_secs=12,
                          dtype=np.float32)
         out[spk] = emb / (np.linalg.norm(emb) + 1e-9)
     return out
+
+
+DIAR_MIN_CLUSTER_S = float(os.environ.get("DIAR_MIN_CLUSTER_S", "4.0"))
+DIAR_MERGE_SIM = float(os.environ.get("DIAR_MERGE_SIM", "0.5"))
+
+
+def merge_tiny_clusters(segments, embs, *, min_secs=None, threshold=None):
+    """Fold clusters holding too little audio into the substantial cluster they
+    sound most like. Returns (segments, embs, info).
+
+    Over-split is the dominant post-meeting failure mode: a real 8-person meeting
+    came back with 24 speakers, and every extra one was a cluster of 1-4 short
+    backchannels ("哦，" / "好好好。") totalling 1.6-3.9s — versus 3.6-8.7s per line
+    for the clusters that DID get named. cluster_embeddings has no minimum, so a
+    cluster with two seconds of speech still gets an embedding, and an embedding
+    from two seconds is too noisy to reach the naming threshold against anyone. Each
+    one therefore became its own 對方N.
+
+    A cluster that thin is not evidence of a distinct person. Attribute it to
+    whoever in THIS meeting it most resembles — same recording, same channel, same
+    mic, so a more lenient bar than cross-meeting naming is the right call — and
+    keep the substantial cluster's own embedding, which is the reliable one.
+
+    info["merged"]: dropped id -> kept id. info["weak"]: clusters still under the
+    floor afterwards (nothing to merge into); the caller should avoid giving those a
+    NUMBERED label, since a number claims we tracked a distinct person.
+    """
+    import sys  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    min_secs = DIAR_MIN_CLUSTER_S if min_secs is None else min_secs
+    threshold = DIAR_MERGE_SIM if threshold is None else threshold
+    secs = {}
+    for s in segments:
+        secs[s["speaker"]] = secs.get(s["speaker"], 0.0) + max(0.0, s["end"] - s["start"])
+    big = [k for k in embs if secs.get(k, 0.0) >= min_secs]
+    small = [k for k in embs if secs.get(k, 0.0) < min_secs]
+    merged = {}
+    for k in small:
+        best, best_sim = None, -1.0
+        for b in big:
+            sim = float(np.asarray(embs[k]) @ np.asarray(embs[b]))
+            if sim > best_sim:
+                best_sim, best = sim, b
+        if best is not None and best_sim >= threshold:
+            merged[k] = best
+    if merged:
+        segments = [{**s, "speaker": merged.get(s["speaker"], s["speaker"])}
+                    for s in segments]
+        embs = {k: v for k, v in embs.items() if k not in merged}
+        print(f"diarize: merged {len(merged)} thin cluster(s) "
+              f"(<{min_secs}s) into {len(set(merged.values()))} speaker(s)",
+              file=sys.stderr)
+    weak = {k for k in embs if secs.get(k, 0.0) < min_secs}
+    return segments, embs, {"merged": merged, "weak": weak}
 
 
 def _diar_worker(q, pcm_path, num_speakers, seg_model, emb_model, enroll, provider="cpu"):
@@ -520,10 +601,93 @@ def reconcile_speakers(speakers, *, merge_threshold=0.75, cohesion=0.45):
                     merges[keep].append(did)
                     consumed.add(did)
 
+    # Purge EVERY remaining placeholder. The global 語者庫 holds only human-named
+    # people now — an unrecognized voice is never enrolled (see app._persistent_names),
+    # it stays a per-meeting 對方N. Pass 2 already folded placeholders close to a named
+    # person into that name (salvaging the voiceprint); whatever's left is an unnamed
+    # cluster that shouldn't live in the global库 at all. (Was: only count<=1 noise.)
     purge = [r["id"] for r in rows
-             if r["id"] not in consumed and _is_placeholder(r["name"]) and (r["count"] or 1) <= 1]
+             if r["id"] not in consumed and _is_placeholder(r["name"])]
 
     return {"merge": [(keep, drops) for keep, drops in merges.items()], "purge": purge}
+
+
+def split_candidates(speakers, *, cohesion=0.45, min_group=2):
+    """FREE pre-filter (stored centroids only, no audio): named people whose
+    voiceprint rows fall into >=2 separate single-linkage clusters, each with
+    >=min_group rows — a strong hint the same name was given to two DIFFERENT
+    people (two separately reinforced voiceprints that never link at cohesion).
+    High precision, low recall: a name carrying one averaged centroid can't be
+    flagged here (audio sampling via two_way_split is what confirms/finds those).
+    Returns [{"name", "groups": n, "sizes": [big, ...]}]. Read-only."""
+    import numpy as np  # noqa: PLC0415
+    from collections import defaultdict  # noqa: PLC0415
+    byname = defaultdict(list)
+    for r in speakers:
+        if r["centroid"] and not _is_placeholder(r["name"]):
+            v = np.frombuffer(r["centroid"], dtype=np.float32)
+            byname[r["name"]].append(v / (np.linalg.norm(v) + 1e-9))
+    out = []
+    for name, vs in byname.items():
+        n = len(vs)
+        if n < 2 * min_group:
+            continue
+        parent = list(range(n))
+
+        def find(x, parent=parent):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        for i in range(n):
+            for j in range(i + 1, n):
+                if float(vs[i] @ vs[j]) >= cohesion:
+                    parent[find(i)] = find(j)
+        sizes = defaultdict(int)
+        for i in range(n):
+            sizes[find(i)] += 1
+        big = sorted([c for c in sizes.values() if c >= min_group], reverse=True)
+        if len(big) >= 2:
+            out.append({"name": name, "groups": len(big), "sizes": big})
+    return out
+
+
+def two_way_split(embs, *, min_side=2, iters=5):
+    """Split L2-normalized utterance embeddings into TWO voice groups. Used to
+    decide whether one named person's voiceprint is actually two people — run on
+    FRESH per-utterance embeddings (sampled from audio), NOT the stored fragmented
+    centroids: a stored centroid is an average that hides bimodality, and same-person
+    fragments already sit at cosine 0.26-0.47 (measured), overlapping the
+    different-person range, so a split judged off stored centroids would tear one
+    person in two. Fresh long-clip embeddings separate far better.
+
+    Cosine 2-means: seed with the most-distant pair, a few Lloyd passes (k=2
+    converges fast). Returns (labels, sep): labels in {0,1} per input, sep = cosine
+    between the two group centroids (LOW = clearly different voices). Returns
+    (None, sep) when there aren't >=min_side embeddings per side to trust the split
+    (a lone outlier is noise/purge territory, not a second person). Pure vector math."""
+    import numpy as np  # noqa: PLC0415
+    X = np.asarray([e / (np.linalg.norm(e) + 1e-9) for e in embs], dtype=np.float64)
+    n = len(X)
+    if n < 2 * min_side:
+        return None, 1.0
+    sims = X @ X.T
+    i, j = np.unravel_index(int(np.argmin(sims)), sims.shape)  # most-distant pair = seeds
+    ci, cj = X[i].copy(), X[j].copy()
+    labels = np.zeros(n, dtype=int)
+    for _ in range(iters):
+        labels = (X @ cj > X @ ci).astype(int)
+        if labels.min() == labels.max():   # degenerate: all one side
+            break
+        a, b = X[labels == 0], X[labels == 1]
+        ca, cb = a.mean(0), b.mean(0)
+        ci = ca / (np.linalg.norm(ca) + 1e-9)
+        cj = cb / (np.linalg.norm(cb) + 1e-9)
+    sep = float(ci @ cj)
+    n0 = int((labels == 0).sum())
+    if n0 < min_side or n - n0 < min_side:
+        return None, sep
+    return labels.tolist(), sep
 
 
 def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
@@ -796,6 +960,10 @@ def similar_speaker_pairs(rows, threshold=0.5, dismissed=()):
                 continue  # same name = same person; dedupe name pairs
             if _is_placeholder(a) and _is_placeholder(b):
                 continue  # two un-named speakers -> can't judge, not a useful suggestion
+            if not _is_placeholder(a) and not _is_placeholder(b):
+                continue  # two DIFFERENT human-named people -> the user already asserted
+                #           they differ by naming them; never suggest merging Jimmy<->Frank.
+                #           (A true typo-dup like Scoot/Scott: fix with the manual merge.)
             if frozenset((a, b)) in dismissed:
                 continue  # user said 'not the same person'
             sim = float(np.dot(vecs[i][2], vecs[j][2]))

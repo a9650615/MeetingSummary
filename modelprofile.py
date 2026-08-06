@@ -93,13 +93,16 @@ def recommend(hw, lang="zh-TW"):
     covers English/code-switch if BELLE struggles."""
     ram = hw.get("ram_gb", 16)
     if ram >= 16:
-        # q4 live/interim + 3B summary: several whisper tiers + the LLM can be
+        # q4 live/interim + 7B summary: several whisper tiers + the LLM can be
         # resident at once, so favor the lighter quantized variants to avoid OOM.
+        # 3B was too small for the summary — it mis-attributed action items to the
+        # wrong speaker and invented owners; the summary runs after recording, so
+        # 7B-4bit (~4.3GB) doesn't compete with the live models for memory.
         return {
             "live": "qwen3-asr-0.6b-q4-k-m",  # default: Qwen3-ASR .cpp 0.6B (Metal, best zh)
             "interim": _SMALL_Q4,             # whisper interim stays instant
             "accurate": _TURBO_Q4,
-            "summary": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+            "summary": "mlx-community/Qwen2.5-7B-Instruct-4bit",
             "fallback": [_SMALL_Q4, _BASE_Q4],  # -> whisper if the .cpp sidecar fails
         }
     if ram >= 8:

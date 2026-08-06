@@ -91,3 +91,20 @@ def test_merge_meetings_clears_tags(tmp_path):
     # the source's meeting_tags row is gone (no orphan)
     n = s.db.execute("SELECT COUNT(*) c FROM meeting_tags WHERE meeting_id=?", (src,)).fetchone()["c"]
     assert n == 0
+
+
+def test_rename_speaker_global_nonmatch_collision(tmp_path):
+    # Renaming old->new must not blow up when a nonmatch pair for `new` already
+    # exists (UNIQUE(a,b)) — reconcile merges names and would otherwise abort.
+    from store import Store
+    s = Store(tmp_path / "m.db")
+    s.add_speaker("old", b"\x00" * 4)
+    s.add_speaker("new", b"\x00" * 4)
+    s.add_speaker_nonmatch("old", "X")
+    s.add_speaker_nonmatch("new", "X")     # after rename this collides with (old->new, X)
+    s.add_speaker_nonmatch("new", "old")   # after rename becomes (new,new) self-pair
+    s.rename_speaker_global("old", "new")  # must not raise
+    pairs = {frozenset(p) for p in s.list_speaker_nonmatches()}
+    assert frozenset(("new", "X")) in pairs        # kept, deduped
+    assert frozenset(("new",)) not in pairs         # self-pair dropped
+    assert all("old" not in p for p in s.list_speaker_nonmatches())  # no stale old

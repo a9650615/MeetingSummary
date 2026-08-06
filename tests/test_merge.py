@@ -5,6 +5,19 @@ from app import (_assemble_track, _meeting_tracks, _run_transcribe_job,
 from store import Store, group_by_proximity
 
 
+def _audio(secs=2.0, sr=16000):
+    """Non-degenerate 16k mono int16 PCM for the ASR-plumbing tests. NOT a constant
+    (the old b"\x00\x01" fixture was pure DC): iter_transcribe now high-passes each
+    window and skips it when nothing survives, which is exactly what DC and the
+    on-disk silence padding are. These tests exercise windowing/progress/decoding,
+    so they just need audio the silence gate won't discard."""
+    import numpy as np
+    n = int(secs * sr)
+    t = np.arange(n) / sr
+    sig = 6000 * np.sin(2 * np.pi * 220 * t) + 1500 * np.sin(2 * np.pi * 1400 * t)
+    return sig.astype("<i2").tobytes()
+
+
 def test_iter_transcribe_streams_progress(tmp_path):
     s = Store(tmp_path / "m.db")
     mid = s.create_meeting("M", 1000.0, "zh-TW")
@@ -12,7 +25,7 @@ def test_iter_transcribe_streams_progress(tmp_path):
     os.makedirs(d)
     # 2 s of pcm @ 16k -> with window_s=1 -> 2 windows
     with open(os.path.join(d, "mic.pcm"), "wb") as f:
-        f.write(b"\x00\x01" * 32000)
+        f.write(_audio(2.0))
     s.add_segment(mid, 0, d, started_at=1000.0, duration_s=2, origin="recorded")
     backend = lambda p: [{"start": 0.0, "end": 1.0, "text": "視窗"}]
     evs = list(iter_transcribe(s, mid, backend, window_s=1))
@@ -43,7 +56,7 @@ def test_iter_transcribe_reads_compressed_m4a(tmp_path):
     os.makedirs(d)
     pcm = os.path.join(d, "mic.pcm")
     with open(pcm, "wb") as f:
-        f.write(b"\x00\x01" * 32000)  # 2 s @ 16k
+        f.write(_audio(2.0))  # 2 s @ 16k
     recorder.pcm_to_m4a(pcm, os.path.join(d, "mic.m4a"))
     os.remove(pcm)  # simulate finalize compression
     s.add_segment(mid, 0, d, started_at=1000.0, duration_s=2, origin="recorded")
@@ -61,7 +74,7 @@ def test_run_transcribe_job_records_progress(tmp_path):
     d = str(tmp_path / "seg")
     os.makedirs(d)
     with open(os.path.join(d, "mic.pcm"), "wb") as f:
-        f.write(b"\x00\x01" * 32000)  # 2 s
+        f.write(_audio(2.0))  # 2 s
     s.add_segment(mid, 0, d, started_at=1000.0, duration_s=2, origin="recorded")
     jobs = {}
     _run_transcribe_job(s, mid, lambda p: [{"start": 0, "end": 1, "text": "x"}], jobs)

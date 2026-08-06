@@ -5,7 +5,6 @@ callables (lazy — weights load on first use, so hot-swapping is instant). The
 LiveModelManager lets the running server switch the live model with no restart:
 TwoPassSession calls `manager.backend` through a thin shim, so set_model() takes
 effect on the next utterance — even mid-session."""
-from live import AdaptiveBackend, mlx_whisper_live_backend
 
 
 def route(model):
@@ -15,6 +14,8 @@ def route(model):
     m = model.lower()
     if m.startswith("ane-"):  # ANE (Neural Engine) via the `speech` CLI
         return "ane"
+    if m.startswith("groq-"):  # Groq's remote OpenAI-compatible whisper API
+        return "groq"
     if model == "qwen3-asr-1.7b":
         return "chatllm"
     if "qwen3-asr" in m and "mlx-community" in m:  # MLX-native Qwen3-ASR (Metal, fast)
@@ -152,23 +153,220 @@ def qwen3_mlx_backend(model="mlx-community/Qwen3-ASR-1.7B-8bit", language=None):
     return _run
 
 
-def make_live_backend(model, language=None):
-    """Live backend, callable(pcm_bytes) -> segments. language=None -> auto-detect;
-    a code ("zh"/"en"/"ja"...) forces it. whisper-MLX (default), Qwen3-ASR .cpp via a
-    persistent daemon (Metal), or transformers Qwen3-ASR."""
-    if route(model) == "ane":  # persistent Neural-Engine helper (省電, off-GPU)
-        return ane_live_backend()
+def _pcm_bytes(audio):
+    """Anything a caller may hand a backend -> 16 kHz mono int16 PCM bytes."""
+    if isinstance(audio, (bytes, bytearray)):
+        return bytes(audio)
+    p = str(audio)
+    if p.endswith(".pcm"):
+        with open(p, "rb") as f:
+            return f.read()
+    import subprocess  # noqa: PLC0415
+    return subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", p, "-ar", "16000", "-ac", "1",
+         "-f", "s16le", "-"], stdout=subprocess.PIPE, check=True).stdout
+
+
+def _takes_bytes(fn):
+    """Adapt a PCM-bytes engine so it also accepts a path."""
+    return lambda audio: fn(_pcm_bytes(audio))
+
+
+def _takes_path(fn):
+    """Adapt a path-only engine so it also accepts PCM bytes."""
+    def _run(audio):
+        if not isinstance(audio, (bytes, bytearray)):
+            return fn(audio)
+        import os  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+        fd, tmp = tempfile.mkstemp(suffix=".pcm")
+        os.close(fd)
+        try:
+            with open(tmp, "wb") as f:
+                f.write(audio)
+            return fn(tmp)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return _run
+
+
+# Groq's OpenAI-compatible transcription endpoint. whisper-large-v3 = most
+# accurate; turbo = faster, still solid. Free tier caps at 20 requests/min
+# per model — _GROQ_RPM_SAFE leaves a margin so we skip client-side instead
+# of burning quota on a call that would just come back 429.
+_GROQ_MODELS = {
+    "groq-whisper-large-v3": "whisper-large-v3",
+    "groq-whisper-large-v3-turbo": "whisper-large-v3-turbo",
+}
+_GROQ_RPM_SAFE = 18
+_GROQ_STATE = {"calls": {}, "lock": None}  # model -> deque of recent call times
+_GROQ_QUOTA_WARN_REQUESTS = 5
+_GROQ_QUOTA_WARN_TOKENS = 500
+_GROQ_QUOTA_WARN_AUDIO_SECONDS = 60
+
+
+def _groq_can_call(model, wait=False):
+    """Client-side RPM guard: True (and records the attempt) once this model
+    has fewer than _GROQ_RPM_SAFE calls in the trailing 60s. wait=False (live):
+    returns False immediately if throttled — the window is skipped, audio stays
+    on disk. wait=True (batch): blocks until a slot frees up instead of
+    skipping, because a batch job may have already deleted the old transcript
+    and cannot afford to silently drop windows."""
+    import threading  # noqa: PLC0415
+    import time  # noqa: PLC0415
+    from collections import deque  # noqa: PLC0415
+    if _GROQ_STATE["lock"] is None:
+        _GROQ_STATE["lock"] = threading.Lock()
+    while True:
+        with _GROQ_STATE["lock"]:
+            now = time.monotonic()
+            dq = _GROQ_STATE["calls"].setdefault(model, deque())
+            while dq and now - dq[0] > 60:
+                dq.popleft()
+            if len(dq) < _GROQ_RPM_SAFE:
+                dq.append(now)
+                return True
+            sleep_for = 60 - (now - dq[0]) + 0.05
+        if not wait:
+            return False
+        time.sleep(max(0.1, sleep_for))
+
+
+def _groq_warn_quota(resp):
+    """Low-quota heads-up only. Groq puts remaining RPM/TPM/audio-seconds in
+    response headers on every call; we stay quiet unless it's actually
+    running low, so a live session's stderr isn't spammed once per utterance.
+    The transcription endpoint's real cap is audio-seconds (duration-based),
+    not tokens — the tokens header may not even be present here, but the
+    check is harmless to keep."""
+    import sys  # noqa: PLC0415
+    try:
+        rem_req = resp.headers.get("x-ratelimit-remaining-requests")
+        if rem_req is not None and float(rem_req) < _GROQ_QUOTA_WARN_REQUESTS:
+            print(f"groq quota low: {rem_req} requests remaining", file=sys.stderr)
+        rem_tok = resp.headers.get("x-ratelimit-remaining-tokens")
+        if rem_tok is not None and float(rem_tok) < _GROQ_QUOTA_WARN_TOKENS:
+            print(f"groq quota low: {rem_tok} tokens remaining", file=sys.stderr)
+        rem_audio = resp.headers.get("x-ratelimit-remaining-audio-seconds")
+        if rem_audio is not None and float(rem_audio) < _GROQ_QUOTA_WARN_AUDIO_SECONDS:
+            print(f"groq quota low: {rem_audio} audio-seconds remaining", file=sys.stderr)
+    except (TypeError, ValueError):
+        pass
+
+
+def groq_backend(model, language=None, wait=False):
+    """Remote Whisper via Groq's OpenAI-compatible transcription endpoint.
+    callable(pcm_bytes | audio_path) -> [{start, end, text}] (seconds) — same
+    contract as every other backend. Network call: fail-soft on any error
+    (log + return []), matching mlx_whisper_backend's "one bad window can't
+    kill a session" rule. Raises at construction time (not per-call) if
+    GROQ_API_KEY is missing — that's a config problem, not a transient one.
+    wait: forwarded to the RPM guard — False (live) skips a throttled window,
+    True (batch) blocks until a slot frees up (see _groq_can_call)."""
+    import os  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY not set — put it in .env or export it before "
+            "selecting a groq-* model")
+    if model not in _GROQ_MODELS:
+        print(f"groq_backend: unrecognized model id '{model}', forwarding as-is",
+              file=sys.stderr)
+    groq_model = _GROQ_MODELS.get(model, model)
+
+    def _run(audio):
+        import sys  # noqa: PLC0415
+
+        import httpx  # noqa: PLC0415
+
+        import recorder  # noqa: PLC0415
+        pcm = _pcm_bytes(audio)
+        if len(pcm) < 3200:  # <0.1s -> not worth a call
+            return []
+        if not _groq_can_call(model, wait=wait):
+            print(f"groq {model}: near RPM limit, skipping window "
+                  f"(audio kept for re-transcribe)", file=sys.stderr)
+            return []
+        wav = recorder.pcm_to_wav(pcm, sample_rate=16000, channels=1)
+        data = {"model": groq_model, "response_format": "verbose_json"}
+        if language:
+            data["language"] = language
+        try:
+            resp = httpx.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": ("audio.wav", wav, "audio/wav")},
+                data=data, timeout=20.0)
+        except httpx.HTTPError as e:
+            print(f"groq request failed: {e}", file=sys.stderr)
+            return []
+        if resp.status_code != 200:
+            print(f"groq error {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+            return []
+        _groq_warn_quota(resp)
+        try:
+            body = resp.json()
+        except ValueError:
+            return []
+        segments = body.get("segments") if isinstance(body, dict) else None
+        if not isinstance(segments, list):
+            return []
+        return [{"start": s.get("start", 0.0), "end": s.get("end", 0.0), "text": s.get("text", "")}
+                for s in segments
+                if s.get("no_speech_prob", 0) < 0.6
+                and s.get("compression_ratio", 0) < 2.4
+                and s.get("avg_logprob", 0) > -1.0]
+
+    return _run
+
+
+def make_backend(model, language=None, wait=False):
+    """THE ASR backend factory: a model id maps to exactly ONE engine, used by
+    both live and re-transcribe. Returns callable(pcm_bytes | audio_path) ->
+    [{start, end, text}].
+
+    There used to be a make_live_backend and a make_batch_backend, and for several
+    ids they picked DIFFERENT implementations of the same model — the reason
+    re-transcribing a meeting could come back worse than the live captions had
+    been. The only real difference between the two was the input type, so that is
+    all this normalizes: where an engine exists in both a persistent and a
+    per-call-subprocess form, the persistent one wins (it is the one live has been
+    running, and it doesn't reload the model every call). Segment timing is not a
+    reason to keep a second variant — asr.transcribe already spreads an untimed
+    blob across the window via clip_ms.
+
+    language=None -> auto-detect; a code ("zh"/"en"/"ja"...) forces it.
+    wait: only meaningful for the groq engine's RPM guard — see groq_backend.
+    Every other branch ignores it (no other engine has this concept).
+    """
+    if route(model) == "ane":
+        # The in-repo persistent helper, same as live. The homebrew `speech` CLI
+        # stays only as a fallback for machines where the helper isn't built —
+        # not as a user-visible second flavour of the same model.
+        if ane_helper_bin() is not None:
+            return ane_live_backend()
+        engine, m = _ANE_IDS.get(model, ("qwen3-coreml-full", "0.6B"))
+        return ane_speech_backend(engine, m, language)
     model = _honor_language(model, language)
     r = route(model)
     if r == "chatllm":
-        return chatllm_live_backend(language)
+        return _takes_bytes(_chatllm_get(language).transcribe)
     if r == "qwen3mlx":
-        return qwen3_mlx_backend(model, language)
+        return qwen3_mlx_backend(model, language)   # already input-agnostic
     if r == "qwen3cpp":
-        return qwen3_cpp_live_backend(language)
+        return _takes_bytes(qwen3_cpp_live_backend(language))
     if r == "qwen3":
-        return qwen3_live_backend(model, language)
-    return mlx_whisper_live_backend(model, language)
+        return _takes_path(qwen3_batch_backend(model, language))
+    if r == "firered":
+        return _takes_path(firered_batch_backend(model, language))
+    if r == "groq":
+        return groq_backend(model, language, wait=wait)
+    import asr  # noqa: PLC0415
+    return asr.mlx_whisper_backend(model, language)  # bytes, .pcm or container
 
 
 class _ChatllmAsrDaemon:
@@ -258,21 +456,36 @@ def _chatllm_get(language):
     return _chatllm_daemon
 
 
-def chatllm_live_backend(language=None):
-    """Live-final backend over the persistent chatllm 1.7B daemon (module singleton)."""
-    return _chatllm_get(language).transcribe
-
-
-def chatllm_batch_backend(model="qwen3-asr-1.7b", language=None):
-    """Batch/accurate over the same daemon. callable(audio_path) -> segments
-    (raw .pcm read to bytes; daemon wraps to wav)."""
-    be = _chatllm_get(language).transcribe
-
-    def _run(audio_path):
-        with open(str(audio_path), "rb") as f:
-            return be(f.read())
-
-    return _run
+def kill_subprocesses():
+    """Reap every helper process this server spawned. Called from app.py's exit
+    handler — nothing used to do this, so the ANE helper (holding a loaded CoreML
+    model) and the qwen3cpp daemon reparented to launchd on every shutdown and
+    accumulated. release_all() is about freeing RAM while running and deliberately
+    leaves the ANE helper alive; this is the exit path, so it takes everything."""
+    import sys  # noqa: PLC0415
+    killed = []
+    p = _ANE_HELP.get("proc")
+    if p is not None and p.poll() is None:
+        try:
+            p.terminate()
+            p.wait(timeout=3)
+        except Exception:  # noqa: BLE001
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        killed.append("qwen3-ane")
+    _ANE_HELP["proc"] = None
+    if _qwen3_daemon is not None and getattr(_qwen3_daemon, "_proc", None) is not None:
+        try:
+            _qwen3_daemon._proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+        _qwen3_daemon._proc = None
+        killed.append("qwen3cpp")
+    if killed:
+        print(f"[exit] reaped helpers: {', '.join(killed)}", file=sys.stderr)
+    return killed
 
 
 def release_all():
@@ -374,36 +587,6 @@ def qwen3_cpp_live_backend(language=None):
     return lambda pcm: _qwen3_daemon.transcribe(pcm, language or "")
 
 
-def qwen3_live_backend(model="Qwen/Qwen3-ASR-0.6B", language=None):
-    """Per-utterance Qwen3-ASR for live finals (experimental). Slower than
-    whisper-MLX + ~63s cold load; best zh accuracy. Interim must stay whisper.
-    Lazy-loads on first call so hot-swap (set_model) doesn't block the request."""
-    import sys  # noqa: PLC0415
-    import numpy as np  # noqa: PLC0415
-
-    state = {}
-    lang = language or None
-
-    def _run(window_bytes):
-        if len(window_bytes) < 2:
-            return []
-        if len(window_bytes) % 2:
-            window_bytes = window_bytes[:-1]
-        audio = np.frombuffer(window_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        try:
-            if "m" not in state:
-                from qwen_asr import Qwen3ASRModel  # noqa: PLC0415
-                state["m"] = Qwen3ASRModel.from_pretrained(model)
-            out = state["m"].transcribe((audio, 16000), language=lang)
-        except Exception as e:
-            print(f"qwen3 live error (skipped): {e}", file=sys.stderr)
-            return []
-        text = " ".join(t.text for t in out).strip()
-        return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
-
-    return _run
-
-
 def denoise_file(src, *, raw_pcm=False):
     """Background-noise removal via `speech denoise` (DeepFilterNet3, CoreML/ANE).
     Returns a cleaned temp path, or `src` unchanged on any failure (graceful — a
@@ -493,8 +676,17 @@ def ane_speech_backend(engine="qwen3-coreml-full", model="0.6B", language=None):
             # Force CoreML onto the Neural Engine (encoder defaults to .all = GPU,
             # which is why 'ANE' still spun the GPU). ane = .cpuAndNeuralEngine.
             env = {**os.environ, "SPEECH_COREML_COMPUTE_UNITS": "ane"}
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
-                                env=env).stdout
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
+                               env=env)
+            out = p.stdout
+            # A non-zero exit used to be swallowed: stdout is empty, every window
+            # silently yields no text, and the meeting just comes back missing
+            # chunks with no clue why (e.g. the CLI rejecting --language).
+            if p.returncode != 0:
+                import sys as _sys  # noqa: PLC0415
+                print(f"ane batch ASR failed (rc={p.returncode}): "
+                      f"{(p.stderr or '').strip()[:300]}", file=_sys.stderr)
+                raise RuntimeError(f"speech transcribe-batch failed (rc={p.returncode})")
             segs = []
             for line in out.splitlines():
                 line = line.strip()
@@ -525,6 +717,12 @@ _ANE_IDS = {
 
 
 _ANE_HELP = {"proc": None, "lock": None}
+# Live stall guards (see ane_live_backend._run). A healthy ANE runs RTF ~0.15, so a
+# full 29s window lands ~4.4s; 20s is ~4x headroom and still well under live's
+# 40s FEED_TIMEOUT_S even when a feed makes several backend calls.
+ANE_CALL_BUDGET_S = 20   # total inference budget per call, across ALL its windows
+ANE_LOCK_WAIT_S = 25     # give up waiting on a wedged predecessor rather than freeze
+ANE_READY_WAIT_S = 90    # helper startup (first CoreML compile ~13s, slower when cold)
 
 
 def ane_helper_bin():
@@ -559,9 +757,12 @@ def ane_live_backend():
     tracks call concurrently). callable(pcm_bytes) -> [{start,end,text}]."""
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
+    import select  # noqa: PLC0415
     import struct  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
     import threading  # noqa: PLC0415
+    import time  # noqa: PLC0415
     if _ANE_HELP["lock"] is None:
         _ANE_HELP["lock"] = threading.Lock()
 
@@ -576,7 +777,19 @@ def ane_live_backend():
         env = {**os.environ, "SPEECH_COREML_COMPUTE_UNITS": "ane"}
         p = subprocess.Popen([b], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, bufsize=0, env=env)
-        for line in p.stderr:  # block until model loaded (first time ~tens of seconds)
+        # Wait for the model to load (first time ~tens of seconds) — but BOUNDED:
+        # this runs holding the ANE lock, so a helper that never prints READY used
+        # to wedge every live window behind it forever.
+        _ready_by = time.monotonic() + ANE_READY_WAIT_S
+        while True:
+            left = _ready_by - time.monotonic()
+            if left <= 0 or not select.select([p.stderr], [], [], left)[0]:
+                p.kill()
+                raise RuntimeError(f"qwen3-ane helper not READY in {ANE_READY_WAIT_S}s")
+            line = p.stderr.readline()
+            if not line:  # helper died before READY
+                p.kill()
+                raise RuntimeError("qwen3-ane helper exited during load")
             if b"READY" in line:
                 break
             if b"failed" in line.lower():
@@ -586,16 +799,15 @@ def ane_live_backend():
         _ANE_HELP["proc"] = p
         return p
 
-    import select  # noqa: PLC0415
     WIN = 29 * 16000 * 2  # 29s @ 16k mono int16 — CoreML encoder shape is fixed at 30s
 
-    def _send(p, chunk):
-        """Send one ≤29s window, watchdog the reply (30s), return text or None.
+    def _send(p, chunk, timeout):
+        """Send one ≤29s window, watchdog the reply, return text or None.
         None means the helper hung/errored — caller kills + respawns."""
         try:
             p.stdin.write(struct.pack(">I", len(chunk)) + chunk)
             p.stdin.flush()
-            rl, _, _ = select.select([p.stdout], [], [], 30)
+            rl, _, _ = select.select([p.stdout], [], [], timeout)
             if not rl:
                 return None
             line = p.stdout.readline()
@@ -621,14 +833,34 @@ def ane_live_backend():
         # 3000-mel-frame (30s) fixed shape; transcribe each + join. General + safe
         # for any length (mirrors the batch ANE path).
         texts = []
-        with _ANE_HELP["lock"]:
+        # Bounded lock wait: a PREVIOUS call whose caller already gave up (live's
+        # FEED_TIMEOUT_S abandons the threadpool thread, but the thread keeps
+        # running and keeps this lock) must not wedge every later window behind it
+        # — that turned one slow window into an open-ended live freeze. Skip
+        # instead; the audio is on disk for re-transcribe.
+        if not _ANE_HELP["lock"].acquire(timeout=ANE_LOCK_WAIT_S):
+            print(f"ane busy >{ANE_LOCK_WAIT_S}s -> skip window (audio saved)",
+                  file=sys.stderr)
+            return []
+        try:
             p = _ensure()
+            # Budget the whole call, not each window: _run loops over ⌈len/29s⌉
+            # windows, so a per-window watchdog alone could legitimately outlast
+            # the caller's own timeout (2 windows x 30s > live's 40s) and get the
+            # thread abandoned mid-protocol. Deadline starts AFTER _ensure so a
+            # cold CoreML load doesn't eat the inference budget.
+            deadline = time.monotonic() + ANE_CALL_BUDGET_S
             for i in range(0, len(pcm), WIN):
                 ch = pcm[i:i + WIN]
                 if len(ch) < 640:
                     continue
-                t = _send(p, ch)
-                if t is None:  # hung/errored -> kill + respawn next call, stop here
+                left = deadline - time.monotonic()
+                t = None if left <= 0 else _send(p, ch, min(left, 30))
+                if t is None:  # hung/over budget -> kill + respawn next call, stop here
+                    # Must kill: a reply still in flight would desync the
+                    # [len][pcm] -> {text} pairing for every later window.
+                    print(f"ane window hung/over budget ({len(ch)//32000}s) -> respawn",
+                          file=sys.stderr)
                     try:
                         p.kill()
                     except Exception:
@@ -637,6 +869,8 @@ def ane_live_backend():
                     break
                 if t:
                     texts.append(t)
+        finally:
+            _ANE_HELP["lock"].release()
         text = " ".join(texts).strip()
         return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
     return _run
@@ -662,44 +896,28 @@ def ane_warm():
     threading.Thread(target=_w, daemon=True).start()
 
 
-def make_batch_backend(model, language=None):
-    """Batch/accurate: route to Qwen3-ASR .cpp (fast, Metal, word-aligned) or
-    transformers Qwen3-ASR or whisper-MLX. callable(audio_path) -> segments.
-    language=None -> auto-detect; a code forces it."""
-    if route(model) == "ane":  # ANE speech CLI (don't honor_language-reroute it)
-        engine, m = _ANE_IDS.get(model, ("qwen3-coreml-full", "0.6B"))
-        return ane_speech_backend(engine, m, language)
-    model = _honor_language(model, language)  # femelo ignores language -> whisper
-    r = route(model)
-    if r == "chatllm":
-        return chatllm_batch_backend(model, language)
-    if r == "qwen3mlx":
-        return qwen3_mlx_backend(model, language)
-    if r == "qwen3cpp":
-        return qwen3_cpp_batch_backend(model, language)
-    if r == "qwen3":
-        return qwen3_batch_backend(model, language)
-    if r == "firered":
-        return firered_batch_backend(model, language)
-    import asr
-    return asr.mlx_whisper_backend(model, language)
+# make_live_backend / make_batch_backend collapsed into make_backend above: the
+# split was the bug, not a feature (same model, two engines, two behaviours).
 
 
 import os as _os
 
 _MODELS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "models")
-# FireRedASR-AED-L (int8) from the sherpa-onnx model zoo (public, no auth). SOTA zh
-# CER but CPU-only — re-recognition (offline batch) only, never live.
+# FireRedASR-v2 CTC int8 from the sherpa-onnx model zoo (public, no auth). CPU-only
+# offline re-recognition. CTC (single model.onnx, RTF ~0.17 @1 thread) — ~10x faster
+# than the v1 AED encoder/decoder (RTF ~2), so a 1-core box (the remote server)
+# keeps up. ~500MB on disk.
 _FIRERED_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-                "asr-models/sherpa-onnx-fire-red-asr-large-zh_en-2025-02-16.tar.bz2")
-_FIRERED_DIR = _os.path.join(_MODELS, "sherpa-onnx-fire-red-asr-large-zh_en-2025-02-16")
+                "asr-models/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.tar.bz2")
+_FIRERED_DIR = _os.path.join(_MODELS, "sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25")
 _FIRERED = {}  # lazy recognizer cache
 
 
 def _ensure_firered(progress=None):
-    """(encoder, decoder, tokens) paths — download+extract the ~1GB model on first
-    use so a fresh machine needs no manual setup. Globs the extracted dir so a
-    renamed onnx (int8 vs fp32) still resolves."""
+    """(model, tokens) paths — download+extract the ~500MB CTC model on first use so
+    a fresh machine needs no manual setup. CTC is a SINGLE model.onnx (not the AED
+    encoder/decoder pair). Globs so int8/fp32 naming still resolves. The tarball is
+    named after the model dir so a switch of model version never reuses a stale cache."""
     import glob
     import tarfile
     import urllib.request
@@ -708,16 +926,15 @@ def _ensure_firered(progress=None):
         # prefer the int8 quant (smaller/faster) when both are present
         return next((p for p in paths if "int8" in p), paths[0]) if paths else None
 
-    enc = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "encoder*.onnx")))
-    dec = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "decoder*.onnx")))
     tok = _os.path.join(_FIRERED_DIR, "tokens.txt")
-    if enc and dec and _os.path.exists(tok):
-        return enc, dec, tok
+    mdl = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "model*.onnx")))
+    if mdl and _os.path.exists(tok):
+        return mdl, tok
     _os.makedirs(_MODELS, exist_ok=True)
-    tar = _os.path.join(_MODELS, "firered.tar.bz2")
+    tar = _FIRERED_DIR + ".tar.bz2"  # unique per model version -> no stale-cache reuse
     if not _os.path.exists(tar):
         if progress:
-            progress("下載 FireRedASR 模型（約 1GB，首次較久）…")
+            progress("下載 FireRedASR-v2 CTC 模型（約 500MB，首次較久）…")
         tmp = tar + ".part"
         urllib.request.urlretrieve(_FIRERED_URL, tmp)
         _os.replace(tmp, tar)
@@ -725,19 +942,18 @@ def _ensure_firered(progress=None):
         progress("解壓 FireRedASR…")
     with tarfile.open(tar) as tf:
         tf.extractall(_MODELS)
-    enc = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "encoder*.onnx")))
-    dec = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "decoder*.onnx")))
-    if not (enc and dec and _os.path.exists(tok)):
-        raise RuntimeError("FireRedASR model files missing after extract")
-    return enc, dec, tok
+    mdl = _pick(glob.glob(_os.path.join(_FIRERED_DIR, "model*.onnx")))
+    if not (mdl and _os.path.exists(tok)):
+        raise RuntimeError("FireRedASR CTC model files missing after extract")
+    return mdl, tok
 
 
 def _firered_recognizer(progress=None):
     if "rec" not in _FIRERED:
         import sherpa_onnx  # noqa: PLC0415
-        enc, dec, tok = _ensure_firered(progress)
-        _FIRERED["rec"] = sherpa_onnx.OfflineRecognizer.from_fire_red_asr(
-            encoder=enc, decoder=dec, tokens=tok,
+        mdl, tok = _ensure_firered(progress)
+        _FIRERED["rec"] = sherpa_onnx.OfflineRecognizer.from_fire_red_asr_ctc(
+            model=mdl, tokens=tok,
             # never oversubscribe: 1-core boxes get 1 thread, not 2 fighting for it
             num_threads=max(1, (_os.cpu_count() or 4) - 2))
     return _FIRERED["rec"]
@@ -759,59 +975,20 @@ def firered_batch_backend(model="firered", language=None):
         st = rec.create_stream()
         st.accept_waveform(16000, samples)
         rec.decode_stream(st)
-        text = st.result.text.strip()
+        text = _clean_firered(st.result.text)
         return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
 
     return _run
 
 
-def qwen3_cpp_batch_backend(model="qwen3-asr-0.6b-q4-k-m", language=None):
-    """Qwen3-ASR via the .cpp/GGUF sidecar (Metal, fast, word-level alignment).
-    Runs in .venv-qwen314 as a subprocess (cp314 native module); the app is 3.10.
-    Raw .pcm is wrapped to a temp wav (the .cpp loader needs a container)."""
-    import json  # noqa: PLC0415
-    import os  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    py = os.path.join(here, ".venv-qwen314/bin/python")
-    cli = os.path.join(here, "qwen3_cpp_cli.py")
-
-    def _run(audio_path):
-        audio_path = str(audio_path)
-        tmp = None
-        if audio_path.endswith(".pcm"):
-            import recorder  # noqa: PLC0415
-            with open(audio_path, "rb") as f:
-                wav = recorder.pcm_to_wav(f.read(), sample_rate=16000, channels=1)
-            tmp = audio_path + ".qwav.wav"
-            with open(tmp, "wb") as f:
-                f.write(wav)
-            audio_path = tmp
-        try:
-            p = subprocess.run([py, cli, audio_path, language or ""],
-                               capture_output=True, text=True, timeout=1800)
-            line = next((l for l in p.stdout.splitlines()
-                         if l.startswith("QWEN3JSON:")), None)
-            if line is None:
-                print(f"qwen3cpp no output: {p.stderr[-300:]}", file=sys.stderr)
-                return []
-            d = json.loads(line[len("QWEN3JSON:"):])
-            # .cpp zh word-alignment is coarse/unreliable (often one tiny-span
-            # "word" for a whole sentence), so don't trust its times — return the
-            # full text as one segment; iter_transcribe's per-window offset supplies
-            # the timeline position. (qwen3_words_to_segments kept for future use.)
-            text = d.get("text", "").strip()
-            return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
-        except Exception as e:
-            print(f"qwen3cpp error: {e}", file=sys.stderr)
-            return []
-        finally:
-            if tmp and os.path.exists(tmp):
-                os.remove(tmp)
-
-    return _run
+def _clean_firered(text):
+    """Strip FireRed v2 CTC special tokens. The CTC vocab includes <sil> (silence)
+    and friends, which sherpa emits verbatim into result.text — a silent span comes
+    back as '<sil><sil><sil>…' and leaks into the transcript. Drop any <...> token
+    and collapse the whitespace it leaves between words. (v1 AED never emitted these.)"""
+    import re  # noqa: PLC0415
+    text = re.sub(r"<[^>]*>", "", text or "")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def qwen3_batch_backend(model="Qwen/Qwen3-ASR-0.6B", language=None):
@@ -847,6 +1024,7 @@ class LiveModelManager:
 
     def set_model(self, model):
         chain = [model] + [m for m in self._fallback if m != model]
+        from live import AdaptiveBackend
         self.backend = AdaptiveBackend(
             [self._make(m, self.language) for m in chain], chain,
             rtf_budget=self._rtf_budget, on_change=self._on_change)

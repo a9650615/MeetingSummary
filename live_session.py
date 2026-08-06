@@ -29,6 +29,14 @@ FEED_TIMEOUT_S = 40  # safety net so a wedged backend can't freeze consume forev
 
 _PLACEHOLDER = re.compile(r"^(我|對方|說話者|混合)\d+$")
 
+# Live line merging (see make_store_emit): merge a continuing same-speaker
+# utterance into the previous line instead of a new row per VAD pause. A speaker
+# change or a gap > _MERGE_GAP_MS starts a new line; the caps stop a monologue
+# from becoming one unbounded row.
+_MERGE_GAP_MS = 3000     # same speaker within 3s -> continuation, merge
+_MERGE_MAX_MS = 30000    # one line spans at most ~30s
+_MERGE_MAX_CHARS = 60    # ...and at most ~60 chars
+
 
 def resolve_speaker(diar_label, side_label):
     """The speaker to DISPLAY for a live final. A recognized name (from the
@@ -66,22 +74,57 @@ def display_speaker(stored, track):
     return stored
 
 
+class NullSink:
+    """Stand-in for an audio file when the session must NOT keep a recording
+    (純字幕 / transcribe-only): accepts the same write/close the pump uses and
+    throws the PCM away. Everything else — the wall-clock padding, `written`,
+    the ASR buffers — is untouched, so timestamps stay identical to a recorded
+    session; only the bytes on disk go away."""
+
+    def write(self, _b):
+        pass
+
+    def close(self):
+        pass
+
+
 class WallClockPump:
     """Keeps every track's saved PCM + ASR buffer on one shared wall clock:
     on each feed(), pads EVERY track with silence up to now-t0 first, so all
     tracks stay the same length and on one clock regardless of when each
     source starts or how bursty it is (mic vs. system audio vs. a subprocess
-    that hasn't written in a while)."""
+    that hasn't written in a while).
 
-    def __init__(self, tracks, audio_files, t0):
+    paused: optional predicate. While it returns True the pump drops incoming
+    audio and freezes the clock, and the paused span is ELIDED on resume (t0
+    slides forward) rather than backfilled — a meeting paused for 15 minutes
+    stays a 30-minute recording, and, just as importantly, resume doesn't dump
+    one 15-minute block of silence into the ASR buffer."""
+
+    def __init__(self, tracks, audio_files, t0, paused=None):
         self.tracks = tracks
         self.audio_files = audio_files
         self.t0 = t0
+        self.paused = paused
+        self.paused_at = None
         self.buffers = {tag: bytearray() for tag in tracks}
         self.written = {tag: 0 for tag in tracks}
         self.got = asyncio.Event()
 
+    def _paused_now(self):
+        """Poll the predicate and handle the edges. Idempotent — safe to call
+        more than once per frame (feed calls it, then pad_to calls it again)."""
+        p = bool(self.paused and self.paused())
+        if p and self.paused_at is None:
+            self.paused_at = time.time()
+        elif not p and self.paused_at is not None:
+            self.t0 += time.time() - self.paused_at  # elide the paused span
+            self.paused_at = None
+        return p
+
     def pad_to(self, now):
+        if self._paused_now():
+            return  # clock frozen: no silence accrues while paused
         target = int((now - self.t0) * 16000) * 2
         for tag in self.tracks:
             gap = target - self.written[tag]
@@ -95,6 +138,8 @@ class WallClockPump:
     def feed(self, tag, pcm):
         if tag not in self.buffers or not pcm:
             return
+        if self._paused_now():
+            return  # drop: nothing saved, nothing transcribed, clock frozen
         self.pad_to(time.time())
         self.audio_files[tag].write(pcm)
         self.buffers[tag].extend(pcm)
@@ -167,13 +212,31 @@ def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
     import os  # noqa: PLC0415
     try:
         import diarize as diar  # noqa: PLC0415
-        extractor = diar.embedding_extractor()
+        # Live voiceprint embedding on CoreML/ANE (off the CPU): measured ~113ms vs
+        # ~156ms/utterance on CPU here — faster AND frees the CPU, unlike the diarize
+        # SEG model whose onnx ops fall back on CoreML (kept CPU). Falls back to CPU
+        # if CoreML init fails on a given machine. Override via LIVE_DIAR_PROVIDER.
+        _prov = os.environ.get("LIVE_DIAR_PROVIDER", "coreml")
+        try:
+            extractor = diar.embedding_extractor(provider=_prov)
+        except Exception:
+            extractor = diar.embedding_extractor(provider="cpu")
         thr = float(os.environ.get("LIVE_DIAR_THRESHOLD", "0.4"))
         cont = float(os.environ.get("LIVE_DIAR_CONTINUITY", "0.5"))  # same-speaker continuity
         try:
             gthr = float(store.get_setting("speaker_threshold", "0.62"))
         except (ValueError, TypeError):
             gthr = 0.62
+        # LIVE match uses a LOWER bar than the global (post-meeting) threshold.
+        # gthr=0.62 is tuned for the accurate post-meeting re-cluster on AGGREGATE
+        # embeddings; live labels one short, noisy single utterance, which scores
+        # well under that — worst on the system/對方 track (compressed call audio):
+        # measured meeting-168 system clusters landed at 0.54–0.66 cosine to the
+        # right enrolled voice, so at 0.62 almost none promoted and every remote
+        # speaker stayed 對方/說話者N. A separate, lower live bar (never stricter
+        # than the global) lets clusters promote to real names; a wrong live guess
+        # is cheap — the post-meeting /diarize pass re-labels accurately.
+        live_match = min(float(os.environ.get("LIVE_DIAR_MATCH", "0.55")), gthr)
         rows = store.list_speakers()  # known voiceprints, read-only for live
         # One embedding per finalized utterance (省效能): label the whole
         # utterance ONCE via speaker_fn. The within-utterance windowed split
@@ -207,7 +270,7 @@ def enable_diarization(sessions, tracks, store, mid=None, on_rename=None):
         # the real name.
         for tag, (_trk, _spk) in tracks.items():
             labeler = diar.live_speaker_labeler(
-                extractor, rows, session_threshold=thr, match_threshold=gthr,
+                extractor, rows, session_threshold=thr, match_threshold=live_match,
                 continuity_threshold=cont,
                 on_promote=make_on_promote(_trk) if mid is not None else None)
             if split:
@@ -236,13 +299,36 @@ def make_store_emit(mid, conn_offset_ms, store, push=None):
             return
         ev["ts"] = time.time()
         spk = store_speaker(ev.get("speaker"), speaker)
-        store.add_transcript(mid, "live", track,
-                              ev["start_ms"] + conn_offset_ms,
-                              ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
-                              spk, ev["text"])
+        start = ev["start_ms"] + conn_offset_ms
+        end = ev.get("end_ms", ev["start_ms"]) + conn_offset_ms
+        # Merge a continuing utterance into the previous line instead of adding a
+        # new row per VAD pause — live cut a line on every silence >=500ms, so one
+        # person pausing mid-sentence over-fragmented. Merge when it's the SAME
+        # track + SAME session speaker within a short gap, capped so a monologue
+        # doesn't grow one unbounded line. A speaker change (different label) or a
+        # long gap starts a fresh line — "split by the session's people".
+        prev = store.last_live_row(mid, track)
+        merged = False
+        shown = ev["text"]  # what the client should DISPLAY for this line
+        if prev is not None and prev["speaker"] == spk:
+            gap = start - prev["end_ms"]
+            joined = (prev["text"] or "") + (ev["text"] or "")
+            if (0 <= gap <= _MERGE_GAP_MS
+                    and (end - prev["start_ms"]) <= _MERGE_MAX_MS
+                    and len(joined) <= _MERGE_MAX_CHARS):
+                store.extend_transcript(prev["id"], joined, end)
+                merged = True
+                shown = joined
+        if not merged:
+            store.add_transcript(mid, "live", track, start, end, spk, ev["text"])
         if push:
+            # Push the MERGED line, not just this fragment: the panel's 1.5s
+            # /live/state poll shows the stored (merged) text, so pushing the
+            # fragment made every merged utterance visibly rewrite itself a
+            # moment later ("前半句" -> "前半句後半句"). Same text from both
+            # sources = no flip.
             await push({"type": "final", "track": track,
-                        "speaker": spk, "text": ev["text"]})
+                        "speaker": spk, "text": shown})
     return emit
 
 
@@ -259,6 +345,13 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
     dropping whatever's buffered; should_stop() (e.g. a remote /live/stop) is
     checked AFTER draining this round's buffers, so the last bit of audio
     still gets transcribed."""
+    import os  # noqa: PLC0415
+    # Low-freq rumble removal on the ASR INPUT only (both backends): the saved
+    # PCM (pump.feed -> disk) stays raw, so playback and the post-meeting denoise
+    # re-transcribe are untouched. One-pole HPF per track, stateful across
+    # windows. Disable with LIVE_HPF=0. Best-effort: a missing scipy just skips it.
+    hpf_on = os.environ.get("LIVE_HPF", "1") != "0"
+    filters = {}  # tag -> HighPass instance (or False if it failed to build)
     while True:
         # Wake on new audio OR on a 0.5s tick. The tick matters: a native
         # source can start (helper alive, no error) yet stream ZERO frames --
@@ -285,7 +378,25 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
                 print(f"live ASR backlog {len(chunk)//32000}s -> trim (audio saved)",
                       file=sys.stderr)
                 chunk = chunk[-TRACK_BACKLOG_MAXB:]
+            if hpf_on:  # de-rumble only the audio ASR actually sees (post-trim)
+                f = filters.get(tag)
+                if f is None:
+                    try:
+                        from live import HighPass  # noqa: PLC0415
+                        f = HighPass()
+                    except Exception as e:  # noqa: BLE001  scipy missing etc.
+                        print(f"live HPF unavailable, raw ASR input: {e}", file=sys.stderr)
+                        f = False
+                    filters[tag] = f
+                if f:
+                    chunk = f(chunk)
+            # When BEHIND realtime (backlog building) drop BOTH the interim preview
+            # AND the per-utterance diarization embedding for this window, so the
+            # live loop spends its ANE/compute budget catching up on final ASR text.
+            # Speaker labels for skipped lines fall back to the side label; the
+            # post-meeting /diarize pass relabels accurately. Same gate as interim.
             want_interim = len(chunk) <= interim_lag_bytes
+            want_diarize = want_interim
             try:
                 # Safety net: a wedged backend must NOT hang consume forever (the
                 # "live captions stop mid-recording and never recover" bug). flush
@@ -296,14 +407,17 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
                 # timeout we skip this window and continue (audio is on disk for
                 # re-transcribe). Normal feed is <1s, so this never fires in practice.
                 events = await asyncio.wait_for(
-                    run_in_threadpool(sessions[tag].feed, chunk, want_interim),
+                    run_in_threadpool(sessions[tag].feed, chunk, want_interim, want_diarize),
                     timeout=FEED_TIMEOUT_S)
                 for ev in events:
                     await emit(ev, tracks[tag])
             except WebSocketDisconnect:
                 raise
             except Exception as e:  # transient ASR error / timeout -> keep going
-                print(f"live consumer error (continuing): {e}", file=sys.stderr)
+                # repr, not str: TimeoutError (the FEED_TIMEOUT_S case, and the one
+                # that actually matters) stringifies to "" — this line used to log
+                # "live consumer error (continuing): " with no cause at all.
+                print(f"live consumer error (continuing): {e!r}", file=sys.stderr)
         if pop_notice and (msg := pop_notice()):
             if on_notice:
                 await on_notice(msg)
@@ -326,11 +440,14 @@ async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store):
     wedged backend can't hang stop forever — the backend's own watchdog
     reaps the thread."""
     for tag, s in sessions.items():
+        t = time.perf_counter()
         try:
             evs = await asyncio.wait_for(run_in_threadpool(s.flush), timeout=15)
         except Exception as e:  # noqa: BLE001  (TimeoutError or backend error)
             print(f"live flush skipped ({tag}): {e}", file=sys.stderr)
             evs = []
+        print(f"[live stop] flush {tag} {(time.perf_counter()-t)*1000:.0f}ms",
+              file=sys.stderr)
         for ev in evs:
             if ev["kind"] == "final":  # audio-position offset, not wall-clock
                 spk = store_speaker(ev.get("speaker"), tracks[tag][1])
@@ -338,3 +455,9 @@ async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store):
                                       ev["start_ms"] + conn_offset_ms,
                                       ev.get("end_ms", ev["start_ms"]) + conn_offset_ms,
                                       spk, ev["text"])
+    try:  # diagnostic: peak process RSS, to catch a live memory blowup (macOS: bytes)
+        import resource  # noqa: PLC0415
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
+        print(f"[live stop] peak RSS {rss:.0f}MB", file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        pass

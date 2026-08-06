@@ -303,6 +303,10 @@ final class Model: ObservableObject {
     // breathing); audioLive = first non-zero sample arrived (red). Idle = neither.
     @Published var starting = false
     @Published var audioLive = false
+    // ⏸ 暫停: server-side (POST /live/pause). The relay socket and the capturers
+    // stay up — the server's pump just drops what arrives and elides the gap — so
+    // resuming is instant and the meeting is never split.
+    @Published var paused = false
     @Published var showSubtitle = false   // YouTube-style caption overlay toggle
     @Published var source: Source = .mic
     // A native session can fail AFTER capture already started (e.g. mic/screen-
@@ -324,6 +328,12 @@ final class Model: ObservableObject {
     // cleared. start_ms of the gap = outageStart − startedAt.
     private var outageStart: Date?
     private var relayMid: Int?          // learned from the server's {"type":"meeting"} message
+    // Optimistic start/stop: flip `recording` locally the instant the button is
+    // tapped and trust it for a short settle window, so the UI is 跟手 instead of
+    // waiting for the next /live/state poll (+ the stop flush) to confirm. The poll
+    // resumes as the source of truth once the window passes.
+    private var intentAt: Date?
+    private var pauseIntentAt: Date?
     // Self-heal: the backend process tree (bootstrap/supervise/app) can die as a
     // whole (whole process group killed) — nothing then brings it back, and this
     // panel would poll "伺服器未連線" forever since supervise.sh's own watchdog
@@ -373,7 +383,14 @@ final class Model: ObservableObject {
             }
             self.pollFailStreak = 0
             self.connected = true
-            let rec = (o["recording"] as? Bool) ?? false
+            var rec = (o["recording"] as? Bool) ?? false
+            // Settle window: right after a start/stop tap the server may not have
+            // registered/cleared the session yet (and stop still has to flush), so
+            // trust the local optimistic `recording` for 2.5s instead of letting a
+            // lagging poll flip the button back and forth (the 不跟手 flicker).
+            if let t = self.intentAt, Date().timeIntervalSince(t) < 2.5 {
+                rec = self.recording
+            }
             if rec && !self.recording { self.startedAt = Date() }
             if !rec { self.startedAt = nil; self.elapsed = "" }
             // A live session that ends (stop OR the relay dying) returns the top
@@ -395,6 +412,11 @@ final class Model: ObservableObject {
             // Only take a server notice when present — don't clobber a locally-set
             // capture warning (e.g. the silent-tap / permission notice) every poll.
             if let n = o["notice"] as? String, !n.isEmpty { self.liveNotice = n }
+            // Same settle window as start/stop: keep the optimistic value briefly
+            // so a poll already in flight can't flip the button back (不跟手).
+            if !(self.pauseIntentAt.map { Date().timeIntervalSince($0) < 2.5 } ?? false) {
+                self.paused = rec && ((o["paused"] as? Bool) ?? false)
+            }
             if let lines = o["captions"] as? [String] {
                 self.captions = lines
             } else if let one = o["caption"] as? String, !one.isEmpty {
@@ -431,6 +453,16 @@ final class Model: ObservableObject {
     // dev raw binary has no outer launcher to find and silently skips, same
     // "degraded on dev" fallback build_app.sh already documents elsewhere.
     private func tryRelaunchBackend() {
+        // A human asked the app to quit (stop.sh / restart.sh / in-app 結束, all via
+        // lifecycle.sh's ms_stop_all, which drops this sentinel before killing
+        // anything). Without this check the panel outlived the backend, saw it
+        // gone, and relaunched the entire tree ~7.5s later — so "quit" never quit.
+        // Relaunching is only correct when the backend died on its own.
+        let quitFlag = "/tmp/meetingsummary-quit.\(port)"
+        if FileManager.default.fileExists(atPath: quitFlag) {
+            NSApp.terminate(nil)
+            return
+        }
         if let last = lastRelaunchAttempt, Date().timeIntervalSince(last) < 60 { return }
         lastRelaunchAttempt = Date()
         // Bundle.main is the NESTED panel bundle (.../Contents/Resources/panel/
@@ -475,6 +507,7 @@ final class Model: ObservableObject {
     }
 
     func start() {
+        self.recording = true; self.intentAt = Date()   // optimistic: button flips now, poll confirms
         // Always capture natively, in this app (single TCC identity) — no
         // browser fallback, no server-spawned helper. Permission prompts
         // (mic / screen-recording) fire inline in startNativeRelay(); any
@@ -552,7 +585,9 @@ final class Model: ObservableObject {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
                         guard let self = self, self.relayEpoch == epoch else { return }
                         if (self.sysCap as? PanelSystemTapCapturer)?.sawSignal == false {
-                            self.liveNotice = "⚠️ 未擷取到系統音（可能未授權）：系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製 開啟 MeetingSummary 後重新開始"
+                            // No leading ⚠️ here — PanelView already prefixes one,
+                            // and two in a row read as a rendering glitch.
+                            self.liveNotice = "未擷取到系統音（可能未授權）：系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製 開啟 MeetingSummary 後重新開始"
                         }
                     }
                 } else {
@@ -665,7 +700,13 @@ final class Model: ObservableObject {
     private func scheduleReconnect(epoch: Int) {
         guard relayEpoch == epoch, !userStopped else { return }
         if outageStart == nil { outageStart = Date() }  // mark gap start for backfill
-        guard reconnectAttempt < 6 else {
+        // Keep retrying for a TIME budget, not a fixed attempt count: a full backend
+        // restart (./restart.sh) can leave the server down far longer than the old
+        // 6-attempt/~17.5s cap — its own health wait is up to ~80s (cold start +
+        // model load) — so the panel used to give up mid-restart and lose the
+        // recording. 180s comfortably covers a restart; the buffered gap (pendingCap
+        // = 6 min) backfills the audio once the server is back.
+        if let s = outageStart, Date().timeIntervalSince(s) > 180 {
             liveNotice = "重新連線失敗，請手動重新開始錄音"
             return
         }
@@ -722,8 +763,15 @@ final class Model: ObservableObject {
     }
 
     func stop() {
+        self.recording = false; self.intentAt = Date()  // optimistic: button flips now, poll confirms
         stopNativeRelay()                  // stop our in-process capture + close the socket
         req("/live/stop", method: "POST")  // also covers any browser /ws/live session
+    }
+
+    func togglePause() {
+        let next = !paused
+        paused = next; pauseIntentAt = Date()  // optimistic; poll confirms after 2.5s
+        req("/live/pause?on=\(next)", method: "POST")
     }
 
     func saveNote() {
@@ -746,10 +794,16 @@ struct PanelView: View {
             HStack(spacing: 8) {
                 // 3-state: idle = grey static; 準備中 (started, no audio yet) = grey
                 // breathing; 錄音中 (real audio flowing) = red breathing.
-                Image(systemName: dotActive ? "record.circle.fill" : "circle")
-                    .foregroundStyle(dotActive ? (m.audioLive ? Color.red : Color.gray) : Color.secondary)
-                    .opacity(dotActive ? pulse : 1)
-                Text(m.title).font(.headline).lineLimit(1)
+                // Paused reads as its own state: a steady ⏸ instead of a red
+                // breathing dot, so a paused session can't look like it's still
+                // capturing.
+                Image(systemName: m.paused ? "pause.circle.fill"
+                                           : (dotActive ? "record.circle.fill" : "circle"))
+                    .foregroundStyle(m.paused ? Color.orange
+                                     : (dotActive ? (m.audioLive ? Color.red : Color.gray)
+                                                  : Color.secondary))
+                    .opacity(dotActive && !m.paused ? pulse : 1)
+                Text(m.paused ? "已暫停" : m.title).font(.headline).lineLimit(1)
                 Spacer()
                 if !m.elapsed.isEmpty {
                     Text(m.elapsed).font(.system(.subheadline, design: .monospaced))
@@ -784,6 +838,12 @@ struct PanelView: View {
                 Button { m.start() } label: {
                     Label("開始錄音", systemImage: "record.circle").frame(maxWidth: .infinity)
                 }.buttonStyle(.borderedProminent).disabled(m.recording)
+                // Icon-only: the panel is a fixed 320pt, so a third labelled
+                // button would squeeze 開始錄音/停止 into ellipses.
+                Button { m.togglePause() } label: {
+                    Image(systemName: m.paused ? "play.fill" : "pause.fill")
+                }.buttonStyle(.bordered).disabled(!m.recording)
+                    .help(m.paused ? "繼續錄音" : "暫停錄音（不會結束會議）")
                 Button { m.stop() } label: {
                     Label("停止", systemImage: "stop.fill").frame(maxWidth: .infinity)
                 }.tint(.red).buttonStyle(.bordered).disabled(!m.recording)

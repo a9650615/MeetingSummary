@@ -8,6 +8,7 @@ Chunking is pluggable:
 
 Each chunk is transcribed independently (no cross-chunk context) — live is a
 preview; the accurate re-pass is the trusted transcript (spec M1)."""
+import sys
 import time
 
 import numpy as np
@@ -31,6 +32,32 @@ def preprocess(audio):
     if peak > 1e-4:
         audio = audio / peak * 0.95
     return audio
+
+
+class HighPass:
+    """2nd-order Butterworth high-pass on int16 PCM bytes, stateful across chunks
+    (carries filter memory via zi) so consecutive live windows filter continuously
+    with no seam clicks. Strips low-freq rumble — fan/AC/冷氣/handling noise — that
+    muddies noisy-room ASR, with no model (unlike DeepFilterNet, which contends for
+    the ANE). fc=80Hz, 12 dB/oct: rumble ≤40Hz drops ~12dB while the speech band
+    (>~120Hz) is essentially untouched — and it only touches the ASR input, the
+    saved recording stays raw.
+
+    ponytail: fixed 80Hz order-2. Raise the cutoff if rumble still gets through;
+    disable entirely with LIVE_HPF=0."""
+
+    def __init__(self, sample_rate=16000, cutoff_hz=80.0):
+        from scipy.signal import butter, lfilter  # noqa: PLC0415
+        self._lfilter = lfilter
+        self._b, self._a = butter(2, cutoff_hz / (sample_rate / 2.0), btype="high")
+        self._zi = np.zeros(max(len(self._a), len(self._b)) - 1, dtype=np.float64)
+
+    def __call__(self, pcm_bytes):
+        if not pcm_bytes:
+            return pcm_bytes
+        x = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float64)
+        y, self._zi = self._lfilter(self._b, self._a, x, zi=self._zi)
+        return np.clip(np.rint(y), -32768, 32767).astype(np.int16).tobytes()
 
 
 def _compress_ratio(stripped):
@@ -90,6 +117,36 @@ _HALLUCINATION_STRONG = [
 _MAX_CHARS_PER_SPEECH_S = 25
 
 
+def speech_seconds(pcm, sample_rate=16000, frame_ms=30, rms_threshold=80):
+    """Seconds of actual SPEECH in a PCM buffer, using the same silero VAD live
+    endpoints with (energy RMS if the model is unavailable).
+
+    Exists so the BATCH path can reuse live's two anti-hallucination guards. Live
+    never transcribes silence — the VAD gates it and _enough_speech drops sub-350ms
+    blips — but the batch path fed every fixed window to the model, including the
+    wall-clock silence padding WallClockPump writes to disk. Handing Qwen3-ASR
+    minutes of digital silence is how a quiet 對方 track grows invented sentences."""
+    fb = int(sample_rate * frame_ms / 1000) * 2
+    if fb <= 0 or len(pcm) < fb:
+        return 0.0
+    try:
+        vad = SileroVad()          # onnx session is module-cached; cheap per call
+    except Exception:              # noqa: BLE001
+        vad = None
+    n = 0
+    for i in range(0, len(pcm) - fb + 1, fb):
+        frame = bytes(pcm[i:i + fb])
+        if vad(frame) if vad else (_rms(frame) >= rms_threshold):
+            n += 1
+    return n * frame_ms / 1000.0
+
+
+def is_overlong_for_speech(text, speech_s):
+    """live's silence-hallucination gate (see _finalize): text too long for the
+    speech actually present is confabulation, not transcription."""
+    return bool(text) and len(text) > 12 and len(text) > speech_s * _MAX_CHARS_PER_SPEECH_S
+
+
 def _norm(text):
     return text.strip().lower().strip(" .,!?。，、！？、")
 
@@ -110,14 +167,32 @@ def _is_hallucination(text):
     return False
 
 
+_SILERO_SESS = {}  # path -> ort.InferenceSession, shared across tracks/sessions
+
+
+def _silero_session(path):
+    """Load the silero ONNX session ONCE per path and reuse it. The RNN state
+    (h/c/buf) is per-SileroVad-instance (passed as run() inputs), so sharing the
+    stateless session across tracks/live-sessions is safe and skips the per-
+    session onnxruntime load that was blocking the /ws start handshake."""
+    sess = _SILERO_SESS.get(path)
+    if sess is None:
+        import onnxruntime as ort  # noqa: PLC0415
+        t = time.perf_counter()
+        sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        _SILERO_SESS[path] = sess
+        print(f"[live start] silero VAD load {(time.perf_counter()-t)*1000:.0f}ms (cold)",
+              file=sys.stderr)
+    return sess
+
+
 class SileroVad:
     """Optional neural VAD (snakers4 silero v4, via onnxruntime — no torch). A
     callable frame_bytes->bool for TwoPassSession.speech_fn. Buffers to 512-sample
     chunks (v4 16k window), carries the h/c RNN state, returns the latest decision."""
 
     def __init__(self, path="models/silero_vad_v4.onnx", sample_rate=16000, threshold=0.5):
-        import onnxruntime as ort  # noqa: PLC0415
-        self._s = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        self._s = _silero_session(path)
         self.sr = sample_rate
         self.th = threshold
         self._win = 512 if sample_rate == 16000 else 256
@@ -333,6 +408,15 @@ class TwoPassSession:
         self._noise = max(self.min_floor, self._noise)
         return rms >= self._noise * self.speech_factor
 
+    def _clear_interim_ev(self):
+        """A DROPPED utterance (too little speech, or the hallucination gate ate
+        the text) emits no final, so the interim already on screen used to stay
+        frozen there until the NEXT utterance overwrote it — stale words the user
+        reads as the caption randomly mutating. Emit an empty interim so clients
+        clear the tentative line. [] when nothing is on screen."""
+        return [{"kind": "interim", "text": "", "track": self.track}] \
+            if self._interim_open else []
+
     def _reset_utt(self):
         self._utt = bytearray()
         self._scan = 0
@@ -340,6 +424,7 @@ class TwoPassSession:
         self._speech_frames = 0
         self._has_speech = False
         self._last_interim_len = 0
+        self._interim_open = False  # is a tentative line currently on screen?
 
     def _text(self, backend, audio):
         parts = [s["text"].strip() for s in backend(audio)]
@@ -351,7 +436,27 @@ class TwoPassSession:
     def _enough_speech(self):
         return self._speech_frames >= self.min_speech_frames
 
-    def _finalize(self):
+    def _warn_if_slow(self, audio, asr_s, diar_s):
+        # Live stall diagnosis ("跑一跑卡住一陣子"): a finalize does final-ASR then
+        # the per-utterance diarization embedding SERIALLY, both on the Neural
+        # Engine — if they take longer than the utterance's own realtime the live
+        # loop falls behind and backlog grows until the 45s trim. Log the split
+        # (asr vs diar) ONLY when we're behind realtime, so a real session's log
+        # says whether the stall is ASR, the embedding, or ANE contention between
+        # them. Silent on the normal fast path (RTF<1) — no log spam.
+        audio_s = len(audio) / (self.sr * 2)
+        compute_s = asr_s + diar_s
+        if audio_s > 0 and compute_s > audio_s:
+            print(f"live SLOW [{self.track}] {audio_s:.1f}s audio -> "
+                  f"asr {asr_s:.1f}s + diar {diar_s:.1f}s = {compute_s:.1f}s "
+                  f"(RTF {compute_s / audio_s:.1f}x)", file=sys.stderr)
+
+    def _finalize(self, want_diarize=True):
+        # want_diarize=False (set by consume when the track is BEHIND realtime)
+        # skips the per-utterance voiceprint embedding for this line to catch up
+        # on ASR text — the embedding is the heavy per-line cost and contends with
+        # ASR on the Neural Engine. The line just falls back to its side label
+        # (對方/我); the post-meeting /diarize pass relabels accurately anyway.
         # Drop blips (cough/breath) BEFORE the ASR call — saves compute (perf).
         # But STILL advance the committed-byte clock by their length: the audio
         # file keeps those bytes, so skipping them would make every later
@@ -360,10 +465,14 @@ class TwoPassSession:
         # utterance into one line per speaker.
         if not self._enough_speech():
             self._committed_bytes += len(self._utt)
+            stale = self._clear_interim_ev()
             self._reset_utt()
-            return []
+            return stale
         audio = bytes(self._utt)
+        _t_asr = self._clock()
         text = self._text(self.final_backend, audio)
+        asr_s = self._clock() - _t_asr
+        diar_s = 0.0
         # Silence-hallucination gate: drop text too long for the speech present.
         speech_s = self._speech_frames * self.frame_bytes / (self.sr * 2)
         if text and len(text) > 12 and len(text) > speech_s * _MAX_CHARS_PER_SPEECH_S:
@@ -375,12 +484,15 @@ class TwoPassSession:
         # over the single-label speaker_fn. The splitter labels every piece itself
         # (it owns the embedding), so use its pieces whenever it returns any — a
         # single piece is just the normal one-speaker case; >1 means a real split.
-        if text and self.splitter:
+        if text and want_diarize and self.splitter:
+            _t_diar = self._clock()
             try:
                 parts = self.splitter(audio, text)
             except Exception:
                 parts = None
+            diar_s = self._clock() - _t_diar
             if parts:
+                self._warn_if_slow(audio, asr_s, diar_s)
                 self._reset_utt()
                 multi = len(parts) > 1
                 evs = []
@@ -397,21 +509,26 @@ class TwoPassSession:
                     evs.append(e)
                 return evs
         spk = None
-        if text and self.speaker_fn:
+        if text and want_diarize and self.speaker_fn:
+            _t_diar = self._clock()
             try:
                 spk = self.speaker_fn(audio)  # online voiceprint speaker label
             except Exception:
                 spk = None
+            diar_s = self._clock() - _t_diar
+        if text:
+            self._warn_if_slow(audio, asr_s, diar_s)
+        stale = self._clear_interim_ev()
         self._reset_utt()
         if not text:
-            return []
+            return stale
         ev = {"kind": "final", "text": text, "track": self.track,
               "start_ms": offset_ms, "end_ms": end_ms, "profile": "live"}
         if spk:
             ev["speaker"] = spk
         return [ev]
 
-    def feed(self, pcm, want_interim=True):
+    def feed(self, pcm, want_interim=True, want_diarize=True):
         self._utt.extend(pcm)
         events = []
         while self._scan + self.frame_bytes <= len(self._utt):
@@ -425,9 +542,9 @@ class TwoPassSession:
             else:
                 self._silence_run += 1
                 if self._has_speech and self._silence_run >= self.silence_frames:
-                    events.extend(self._finalize())
+                    events.extend(self._finalize(want_diarize))
         if self._has_speech and len(self._utt) >= self.max_bytes:
-            events.extend(self._finalize())
+            events.extend(self._finalize(want_diarize))
         # interim only once there's real sustained speech (no work on blips/silence)
         if (want_interim and self.interim_backend and self._enough_speech()
                 and len(self._utt) - self._last_interim_len >= self._interim_dyn):
@@ -437,6 +554,7 @@ class TwoPassSession:
             text = self._text(self.interim_backend, tail)
             self._adapt_interim(self._clock() - t0)
             if text:
+                self._interim_open = True
                 events.append({"kind": "interim", "text": text, "track": self.track})
         return [e for e in events if e]
 
@@ -493,7 +611,11 @@ class AdaptiveBackend:
         t0 = self.clock()
         out = self.backends[self.idx](window_bytes)
         dur = len(window_bytes) / (self.sr * 2)
-        if dur > 0:
+        # A remote/network backend's wall time is dominated by round-trip
+        # latency, not audio length — RTF is not a meaningful signal for it,
+        # and judging it would permanently (one-way) downgrade Groq off a
+        # couple of ordinary-latency round trips. Exempt any groq-* tier.
+        if dur > 0 and not self.models[self.idx].lower().startswith("groq-"):
             rtf = (self.clock() - t0) / dur
             if self._warmup:
                 self._warmup = False  # cold-load call — ignore its inflated RTF
@@ -509,36 +631,3 @@ class AdaptiveBackend:
             else:
                 self._over = 0
         return out
-
-
-def mlx_whisper_live_backend(model="mlx-community/whisper-small-mlx", language=None):
-    """Real live backend — Apple Silicon only, lazy import. Takes int16 PCM
-    bytes for one window, returns whisper segments. language=None -> auto."""
-    import mlx_whisper  # noqa: PLC0415
-    lang = language or None
-
-    def _run(window_bytes):
-        if len(window_bytes) < 2:
-            return []
-        # Keep 16-bit alignment (a dropped/odd tail byte would crash frombuffer).
-        if len(window_bytes) % 2:
-            window_bytes = window_bytes[:-1]
-        audio = np.frombuffer(window_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        audio = preprocess(audio)  # DC removal + normalize for poor recordings
-        try:
-            segs = mlx_whisper.transcribe(
-                audio, path_or_hf_repo=model, language=lang,
-                condition_on_previous_text=False,  # don't propagate a loop forward
-            )["segments"]
-        except Exception as e:  # one bad window must not kill the live session
-            import sys
-            print(f"live ASR error (skipped): {e}", file=sys.stderr)
-            return []
-        # Whisper's standard hallucination guards: drop non-speech / repetitive /
-        # low-confidence segments before they reach the subtitle.
-        return [s for s in segs
-                if s.get("no_speech_prob", 0) < 0.6
-                and s.get("compression_ratio", 0) < 2.4
-                and s.get("avg_logprob", 0) > -1.0]
-
-    return _run

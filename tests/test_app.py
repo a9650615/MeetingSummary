@@ -1,3 +1,5 @@
+import os
+
 from fastapi.testclient import TestClient
 
 from app import create_app
@@ -244,11 +246,12 @@ def test_speaker_suggestions_route(tmp_path):
     c, store = make_client(tmp_path)
     mid = store.create_meeting(title="m", created_at=0.0, lang="zh-TW")
     store.add_speaker("A", struct.pack("2f", 1.0, 0.0))
-    store.add_speaker("B", struct.pack("2f", 0.95, 0.31))  # near-duplicate voice
+    store.add_speaker("對方5", struct.pack("2f", 0.95, 0.31))  # unnamed cluster ~ A
     store.add_transcript(mid, "accurate", "mic", 0, 2000, "A", "hi")  # playable samples
-    store.add_transcript(mid, "accurate", "mic", 0, 2000, "B", "yo")
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "對方5", "yo")
     pairs = c.get("/speakers/suggestions").json()["pairs"]
-    assert pairs and pairs[0]["a"] == "A" and pairs[0]["b"] == "B" and pairs[0]["sim"] > 0.8
+    names = {pairs[0]["a"], pairs[0]["b"]}
+    assert pairs and names == {"A", "對方5"} and pairs[0]["sim"] > 0.8
 
 
 def test_persist_speakers_toggle_route(tmp_path):
@@ -258,6 +261,16 @@ def test_persist_speakers_toggle_route(tmp_path):
     assert store.get_setting("persist_speakers") == "0"
 
 
+def test_live_language_setting_persists_and_validates(tmp_path):
+    c, store = make_client(tmp_path)
+    assert c.get("/settings/live_language").json()["value"] == ""   # default 自動偵測
+    assert c.post("/settings/live_language", json={"value": "ja"}).json()["value"] == "ja"
+    assert store.get_setting("live_language") == "ja"
+    # unknown code is rejected -> falls back to "" (auto), never stored raw
+    assert c.post("/settings/live_language", json={"value": "klingon"}).json()["value"] == ""
+    assert store.get_setting("live_language") == ""
+
+
 def test_auto_pipeline_uses_ane_when_toggled(tmp_path, monkeypatch):
     # ANE toggle on -> the default/auto ASR (no explicit model) routes to the ANE
     # backend, not just manual dropdown picks.
@@ -265,17 +278,18 @@ def test_auto_pipeline_uses_ane_when_toggled(tmp_path, monkeypatch):
     import backends
     calls = []
     monkeypatch.setattr(app, "_ane_available", lambda: True)
-    monkeypatch.setattr(backends, "make_batch_backend",
+    monkeypatch.setattr(backends, "make_backend",
                         lambda model, language=None: calls.append(model) or (lambda p: []))
     c, store = make_client(tmp_path, asr_backend=lambda p: [])
     mid = store.create_meeting("m", 1.0, "zh-TW")
     store.set_setting("ane", "1")
     c.post(f"/meetings/{mid}/transcribe", json={})         # no model -> _default_asr
-    assert "ane-qwen3-0.6b" in calls
+    # one ANE id now (the two options were the same engine after unification)
+    assert "ane-qwen3-0.6b-hybrid" in calls
     calls.clear()
     store.set_setting("ane", "0")
     c.post(f"/meetings/{mid}/transcribe", json={})         # toggle off -> configured default
-    assert "ane-qwen3-0.6b" not in calls
+    assert not any(m.startswith("ane-") for m in calls)
 
 
 def test_merge_nearby_route(tmp_path):
@@ -342,9 +356,35 @@ def test_summary_job_runs_backend_and_stores(tmp_path):
     store.add_transcript(mid, "accurate", "mic", 0, 1000, "我", "討論預算")
     jobs = {}
     app._run_summary_job(store, mid, "minutes", backend, "mlx-lm", jobs)
-    assert jobs[mid]["state"] == "done" and jobs[mid]["text"] == "會議記錄"
+    assert jobs[mid]["state"] == "done"
+    assert jobs[mid]["text"].startswith("會議記錄") and "【待辦行動】" in jobs[mid]["text"]
     assert "討論預算" in captured["p"]  # transcript fed into the prompt
-    assert store.list_summaries(mid)[0]["text"] == "會議記錄"
+    assert store.list_summaries(mid)[0]["text"].startswith("會議記錄")
+
+
+def test_summary_job_releases_llm_weights(tmp_path):
+    # The 7B summarizer peaks ~5.5GB; it must not stay resident between jobs.
+    import app
+    freed = []
+
+    def backend(p):
+        return "會議記錄"
+    backend.release = lambda: freed.append(1)
+
+    store = Store(tmp_path / "m.db")
+    store.set_setting("summary_correct", "0")
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    store.add_transcript(mid, "accurate", "mic", 0, 1000, "我", "討論預算")
+    app._run_summary_job(store, mid, "minutes", backend, "mlx-lm", {})
+    assert freed == [1]
+
+    # released on the failure path too, and a backend with no releaser is fine
+    def boom(p):
+        raise RuntimeError("model down")
+    boom.release = lambda: freed.append(2)
+    app._run_summary_job(store, mid, "minutes", boom, "mlx-lm", {})
+    assert freed == [1, 2]
+    app._run_summary_job(store, mid, "minutes", lambda p: "S", "mlx-lm", {})
 
 
 def test_summary_route_is_async_started(tmp_path):
@@ -468,15 +508,17 @@ def test_suggestions_skip_speakers_without_audio_sample(tmp_path):
     client, store = make_client(tmp_path)
     mid = store.create_meeting(title="m", created_at=0.0, lang="zh-TW")
     v = np.array([1, 0, 0], dtype=np.float32).tobytes()  # identical -> cos sim 1.0
-    for nm in ("Alice", "Bob", "Ghost"):
+    # only 未命名群<->真名 is a valid suggestion now (two named people are never
+    # compared), so pair a name with a placeholder cluster.
+    for nm in ("Alice", "對方5", "對方9"):
         store.add_speaker(nm, v)
     store.add_transcript(mid, "accurate", "mic", 0, 2000, "Alice", "hi")
-    store.add_transcript(mid, "accurate", "mic", 0, 2000, "Bob", "yo")
-    store.add_transcript(mid, "accurate", "mic", 0, 300, "Ghost", "x")  # <800ms = no sample
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "對方5", "yo")
+    store.add_transcript(mid, "accurate", "mic", 0, 300, "對方9", "x")  # <800ms = no sample
     pairs = client.get("/speakers/suggestions").json()["pairs"]
     names = {n for p in pairs for n in (p["a"], p["b"])}
-    assert "Ghost" not in names
-    assert {"Alice", "Bob"} <= names
+    assert "對方9" not in names
+    assert {"Alice", "對方5"} <= names
 
 
 def test_nonmatch_dismisses_suggestion(tmp_path):
@@ -485,11 +527,11 @@ def test_nonmatch_dismisses_suggestion(tmp_path):
     c, store = make_client(tmp_path)
     mid = store.create_meeting("m", 0.0, "zh-TW")
     store.add_speaker("Alice", struct.pack("2f", 1.0, 0.0))
-    store.add_speaker("Bob", struct.pack("2f", 0.95, 0.31))
+    store.add_speaker("對方5", struct.pack("2f", 0.95, 0.31))   # unnamed cluster ~ Alice
     store.add_transcript(mid, "accurate", "mic", 0, 2000, "Alice", "hi")
-    store.add_transcript(mid, "accurate", "mic", 0, 2000, "Bob", "yo")
+    store.add_transcript(mid, "accurate", "mic", 0, 2000, "對方5", "yo")
     assert c.get("/speakers/suggestions").json()["pairs"]  # suggested first
-    c.post("/speakers/nonmatch", json={"keep": "Bob", "drop": "Alice"})  # any order
+    c.post("/speakers/nonmatch", json={"keep": "對方5", "drop": "Alice"})  # any order
     assert c.get("/speakers/suggestions").json()["pairs"] == []  # gone
 
 
@@ -586,3 +628,243 @@ def test_rename_speaker_into_existing_person_backs_up_first(tmp_path):
     r2 = c.post(f"/meetings/{mid}/speaker",
                 json={"old": "李四", "new": "陌生人", "track": "mic"}).json()
     assert r2["merged"] is False and r2["backup"] is None
+
+
+def test_speaker_split_check_and_apply(tmp_path, monkeypatch):
+    # Global voiceprint split: one name is actually two voices. Fake the audio
+    # sampling so no sherpa/audio is needed — feed two clean voice groups.
+    import numpy as np
+    import app
+    import diarize
+    store = Store(tmp_path / "m.db")
+    rng = np.random.default_rng(0)
+    va = rng.normal(size=16); va /= np.linalg.norm(va)
+    vb = rng.normal(size=16); vb /= np.linalg.norm(vb)
+    store.add_speaker("Hank", va.astype(np.float32).tobytes())   # polluted single row
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b: va))
+
+    def fake_sample(st, name, ext, sample_rate=16000):
+        sp = lambda: {"meeting_id": 1, "track": "mic", "start_ms": 0, "end_ms": 3000}
+        return [(sp(), (va + 0.03 * rng.normal(size=16)).astype(np.float32)) for _ in range(4)] + \
+               [(sp(), (vb + 0.03 * rng.normal(size=16)).astype(np.float32)) for _ in range(4)]
+    monkeypatch.setattr(app, "_sample_speaker_embeddings", fake_sample)
+
+    chk = app._speaker_split_check(store, "Hank")
+    assert chk["enough"] and chk["split"] is True and chk["sep"] < 0.5
+    assert len(chk["groups"]) == 2
+
+    res = app._apply_speaker_split(store, "Hank", "Amy")
+    assert res["ok"] and res["kept"] == "Hank" and res["new"] == "Amy"
+    names = sorted(r["name"] for r in store.list_speakers())
+    assert names == ["Amy", "Hank"]            # one clean centroid each
+
+
+def test_speaker_split_refuses_single_voice(tmp_path, monkeypatch):
+    import numpy as np
+    import app
+    import diarize
+    store = Store(tmp_path / "m.db")
+    rng = np.random.default_rng(1)
+    v = rng.normal(size=16); v /= np.linalg.norm(v)
+    store.add_speaker("Solo", v.astype(np.float32).tobytes())
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b: v))
+    monkeypatch.setattr(app, "_sample_speaker_embeddings", lambda st, n, e, sample_rate=16000:
+                        [({"meeting_id": 1, "track": "mic", "start_ms": 0, "end_ms": 3000},
+                          (v + 0.03 * rng.normal(size=16)).astype(np.float32)) for _ in range(8)])
+    assert app._speaker_split_check(store, "Solo")["split"] is False
+    assert app._apply_speaker_split(store, "Solo", "Ghost")["ok"] is False
+    assert [r["name"] for r in store.list_speakers()] == ["Solo"]   # untouched
+
+
+def test_unlearn_speaker_clip_decrements_and_moves_centroid(tmp_path, monkeypatch):
+    # 抽離 = MOVE: subtracting a mis-attributed clip drops the row's count and pulls
+    # its centroid away from that clip.
+    import numpy as np, struct, app, diarize
+    from store import Store
+    s = Store(tmp_path / "m.db")
+    va = np.zeros(16, np.float32); va[0] = 1.0          # Imp's centroid
+    vb = np.zeros(16, np.float32); vb[1] = 1.0          # the clip actually belongs to someone else
+    s.add_speaker("Imp", va.tobytes())
+    sid = s.list_speakers()[0]["id"]
+    s.update_speaker_centroid(sid, va.tobytes(), 4)     # count=4
+    monkeypatch.setattr(app, "_assemble_track", lambda st, m, t: b"\x00" * 64000)
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b: vb))
+    assert app._unlearn_speaker_clip(s, 1, "mic", "Imp", 0, 2000) is True
+    row = s.list_speakers()[0]
+    assert row["count"] == 3                            # 4 - 1
+    new = np.frombuffer(row["centroid"], np.float32)
+    assert float(new @ vb) < float(va @ vb) + 1e-6      # moved away from the removed clip
+    assert new[1] < 0                                    # subtracted vb -> negative on that axis
+
+
+def test_unlearn_speaker_clip_guards(tmp_path, monkeypatch):
+    import numpy as np, app, diarize
+    from store import Store
+    s = Store(tmp_path / "m.db")
+    va = np.zeros(16, np.float32); va[0] = 1.0
+    monkeypatch.setattr(app, "_assemble_track", lambda st, m, t: b"\x00" * 64000)
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b: va))
+    # placeholder name -> never un-learn
+    assert app._unlearn_speaker_clip(s, 1, "mic", "對方3", 0, 2000) is False
+    # unknown real name -> nothing to un-learn
+    assert app._unlearn_speaker_clip(s, 1, "mic", "Ghost", 0, 2000) is False
+    # count<=1 -> refuse to wipe the last remaining sample
+    s.add_speaker("Solo", va.tobytes())                 # count defaults to 1
+    assert app._unlearn_speaker_clip(s, 1, "mic", "Solo", 0, 2000) is False
+    assert s.list_speakers()[0]["count"] in (1, None)   # untouched
+
+
+def test_persistent_names_does_not_enroll_unrecognized(tmp_path):
+    # New model: an unrecognized cluster gets NO global voiceprint (stays 對方N via
+    # assign_speakers). Only a human assignment enrolls.
+    import numpy as np
+    import app
+    from store import Store
+    s = Store(tmp_path / "m.db")
+    names = app._persistent_names(s, {0: np.array([1, 0, 0, 0], dtype=np.float32)}, "對方")
+    assert names == {}                                  # not labelled here -> local 對方N
+    assert list(s.list_speakers()) == []                # nothing written to global 語者庫
+
+
+def test_enroll_meeting_speaker_on_assignment(tmp_path, monkeypatch):
+    import numpy as np
+    import app
+    import diarize
+    from store import Store
+    s = Store(tmp_path / "m.db")
+    mid = s.create_meeting("m", 1.0, "zh-TW")
+    s.add_transcript(mid, "accurate", "system", 0, 3000, "Alice", "hi there")
+    v = np.array([0.1, 0.9, 0.2, 0.0], dtype=np.float32)
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b: v))
+    monkeypatch.setattr(app, "_assemble_track", lambda st, m, t, sr=16000: b"\x01\x02" * (16000 * 3))
+    assert app._enroll_meeting_speaker(s, mid, "system", "Alice") is True
+    assert any(r["name"] == "Alice" for r in s.list_speakers())
+    # naming again REINFORCES (learns) the existing voiceprint — no dup row, no skip
+    assert app._enroll_meeting_speaker(s, mid, "system", "Alice") is True
+    assert sum(1 for r in s.list_speakers() if r["name"] == "Alice") == 1
+
+
+def test_set_line_speaker_reassigns_one_line(tmp_path, monkeypatch):
+    # 抽離: a single mislabeled line moves to the right person; siblings stay put.
+    import app
+    import diarize
+    client, store = make_client(tmp_path)
+    mid = store.create_meeting(title="m", created_at=0.0, lang="zh-TW")
+    t1 = store.add_transcript(mid, "accurate", "system", 0, 3000, "Imp", "line one")
+    t2 = store.add_transcript(mid, "accurate", "system", 3000, 6000, "Imp", "line two")
+    monkeypatch.setattr(app, "_enroll_meeting_speaker", lambda *a, **k: False)  # skip audio
+    r = client.post(f"/meetings/{mid}/transcript/{t2}/speaker",
+                    json={"speaker": "Angle", "track": "system"})
+    assert r.status_code == 200 and r.json()["changed"] == 1
+    by_id = {row["id"]: row["speaker"] for row in store.list_transcripts(mid)}
+    assert by_id[t1] == "Imp" and by_id[t2] == "Angle"      # only the one line moved
+
+
+def test_upload_runs_diarize_before_summary(tmp_path, monkeypatch):
+    # Upload pipeline must call the voiceprint step (so summary gets speakers),
+    # and must transcribe with the backend it was GIVEN (accurate), not ANE.
+    import app, asr
+    store = Store(tmp_path / "m.db")
+    seen = {}
+    def fake_tx(path, **k):
+        seen["backend"] = k.get("backend")
+        return [{"profile": "accurate", "track": "mic", "start_ms": 0,
+                 "end_ms": 1000, "text": "討論預算"}]
+    monkeypatch.setattr(asr, "transcribe", fake_tx)
+    monkeypatch.setattr(app, "_save_upload_pcm", lambda *a, **k: None)
+    monkeypatch.setattr(app, "_diarize_meeting",
+                        lambda *a, **k: seen.__setitem__("diarized", True))
+    mid = store.create_meeting("實測", 1.0, "zh-TW")
+    jobs = {}
+    app._run_upload_job(store, mid, "x.m4a", asr_backend="ACCURATE_BE",
+                        summary_backend=lambda p: "摘要", summary_model="m",
+                        kind="minutes", title="實測", jobs=jobs)
+    assert seen.get("diarized") is True            # voiceprint step ran
+    assert seen.get("backend") == "ACCURATE_BE"    # used given (accurate) backend
+    assert jobs[mid]["state"] == "done"
+
+
+def test_retranscribe_runs_diarize_for_speaker_breaks(tmp_path, monkeypatch):
+    # Re-transcribe must also diarize (speaker-aware line breaks), like upload —
+    # otherwise batch lines only split on punctuation, not on speaker change.
+    import app
+    store = Store(tmp_path / "m.db")
+    mid = store.create_meeting("實測", 1.0, "zh-TW")
+    monkeypatch.setattr(app, "iter_transcribe",
+                        lambda *a, **k: iter([{"type": "start", "total": 1},
+                                              {"type": "done", "transcripts": 3}]))
+    called = {}
+    monkeypatch.setattr(app, "_diarize_meeting",
+                        lambda s, m, j, **k: called.setdefault("mid", m))
+    jobs = {}
+    app._run_transcribe_job(store, mid, backend=None, jobs=jobs)
+    assert called.get("mid") == mid            # diarize ran after transcription
+    assert jobs[mid]["state"] == "done" and jobs[mid]["done"] == 3
+
+
+def test_load_dotenv_sets_missing_keys_without_overriding(tmp_path, monkeypatch):
+    import app
+    env_file = tmp_path / ".env"
+    env_file.write_text("GROQ_API_KEY=from-dotenv\nALREADY_SET=from-dotenv\n# comment\n\n")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("ALREADY_SET", "from-shell")
+    app._load_dotenv(str(env_file))
+    assert os.environ["GROQ_API_KEY"] == "from-dotenv"
+    assert os.environ["ALREADY_SET"] == "from-shell"  # .env never overrides
+
+
+def test_load_dotenv_strips_surrounding_quotes(tmp_path, monkeypatch):
+    # GROQ_API_KEY="gsk_..." is a natural way to write a .env line — the
+    # literal quote characters must not end up in the value.
+    import app
+    env_file = tmp_path / ".env"
+    env_file.write_text('GROQ_API_KEY="gsk_abc123"\nSINGLE=\'quoted-val\'\n')
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("SINGLE", raising=False)
+    app._load_dotenv(str(env_file))
+    assert os.environ["GROQ_API_KEY"] == "gsk_abc123"
+    assert os.environ["SINGLE"] == "quoted-val"
+
+
+def test_live_page_offers_groq_models(tmp_path):
+    c, _ = make_client(tmp_path)
+    html = c.get("/live").text
+    assert "groq-whisper-large-v3-turbo" in html
+    assert "groq-whisper-large-v3" in html
+
+
+def test_meeting_detail_offers_groq_remodel(tmp_path):
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    html = c.get(f"/m/{mid}").text
+    assert "groq-whisper-large-v3-turbo" in html
+
+
+def test_settings_page_offers_groq_livemodel(tmp_path):
+    c, _ = make_client(tmp_path)
+    html = c.get("/models/manage").text
+    assert "groq-whisper-large-v3-turbo" in html
+    assert "groq-whisper-large-v3" in html
+
+
+def test_set_models_groq_without_api_key_returns_400_not_500(tmp_path, monkeypatch):
+    # Missing GROQ_API_KEY raises RuntimeError inside LiveModelManager.set_model
+    # (eager chain construction) — the /models POST handler must turn that into
+    # a real 400 with the reason, not an unhandled 500 the live page's fetch
+    # silently swallows.
+    import backends
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    store = Store(tmp_path / "m.db")
+
+    def _make(model, language=None):
+        if backends.route(model) == "groq":
+            return backends.make_backend(model, language)  # real -> raises if unconfigured
+        return lambda audio: []  # avoid needing real ASR deps for the non-groq path
+
+    live_manager = backends.LiveModelManager(make=_make, model="qwen3-asr-0.6b-q4-k-m")
+    app = create_app(store, summary_backend=lambda p: "x", live_manager=live_manager)
+    c = TestClient(app)
+    r = c.post("/models", json={"live": "groq-whisper-large-v3"})
+    assert r.status_code == 400
+    assert "GROQ_API_KEY" in r.text
+    assert live_manager.requested == "qwen3-asr-0.6b-q4-k-m"  # unchanged on failure

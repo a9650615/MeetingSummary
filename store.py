@@ -190,6 +190,21 @@ class Store:
             return None
         return f"{_disp_speaker(r['speaker'], r['track'])}：{r['text']}"
 
+    def last_live_row(self, meeting_id, track):
+        """The most recent live line for a track (full row) — for merging a
+        continuing same-speaker utterance into it instead of adding a new row."""
+        return self.db.execute(
+            "SELECT * FROM transcripts WHERE meeting_id=? AND track=? "
+            "AND profile='live' ORDER BY id DESC LIMIT 1",
+            (meeting_id, track)).fetchone()
+
+    def extend_transcript(self, transcript_id, text, end_ms):
+        """Grow a line in place (merge a continuing same-speaker utterance):
+        replace text + push end_ms out. start_ms/speaker/track unchanged."""
+        self.db.execute("UPDATE transcripts SET text=?, end_ms=? WHERE id=?",
+                        (text, end_ms, transcript_id))
+        self.db.commit()
+
     def recent_transcripts(self, meeting_id, limit=3):
         """Last `limit` finalized lines, oldest first — for the native panel's
         multi-line live captions. Same id-order rationale as latest_transcript."""
@@ -245,6 +260,24 @@ class Store:
                 (new, meeting_id, old, track))
         self.db.commit()
         return cur.rowcount
+
+    def set_transcript_speaker(self, meeting_id, transcript_id, speaker):
+        """Reassign ONE transcript line's speaker (抽離 a mislabeled line — e.g. a
+        line tagged Imp that's actually Angle). Scoped to the meeting so a stray id
+        can't touch another meeting. Returns rows changed (0/1)."""
+        cur = self.db.execute(
+            "UPDATE transcripts SET speaker=? WHERE id=? AND meeting_id=?",
+            (speaker, transcript_id, meeting_id))
+        self.db.commit()
+        return cur.rowcount
+
+    def transcript_row(self, meeting_id, transcript_id):
+        """One transcript line (id, track, start_ms, end_ms, speaker, text) — used
+        before a 抽離 to learn the line's CURRENT speaker + span, so its voiceprint
+        contribution can be moved off that (mis-attributed) person. None if absent."""
+        return self.db.execute(
+            "SELECT id, track, start_ms, end_ms, speaker, text FROM transcripts "
+            "WHERE id=? AND meeting_id=?", (transcript_id, meeting_id)).fetchone()
 
     def meeting_speaker_names(self, meeting_id, track=None):
         """Distinct speaker labels currently used in a meeting's transcripts
@@ -331,9 +364,14 @@ class Store:
         cur = self.db.execute("UPDATE transcripts SET speaker=? WHERE speaker=?",
                               (new, old))
         self.db.execute("UPDATE speakers SET name=? WHERE name=?", (new, old))
-        # keep nonmatch pairs pointing at the new name (else stale rows linger)
-        self.db.execute("UPDATE speaker_nonmatches SET a=? WHERE a=?", (new, old))
-        self.db.execute("UPDATE speaker_nonmatches SET b=? WHERE b=?", (new, old))
+        # keep nonmatch pairs pointing at the new name (else stale rows linger).
+        # OR IGNORE: if the renamed pair already exists (e.g. merging old->new when
+        # (new,X) is already recorded) the UPDATE would hit the UNIQUE(a,b) and abort
+        # the whole reconcile — skip it instead, then drop the now-redundant old rows
+        # and any self-pair (a==b) the rename produced.
+        self.db.execute("UPDATE OR IGNORE speaker_nonmatches SET a=? WHERE a=?", (new, old))
+        self.db.execute("UPDATE OR IGNORE speaker_nonmatches SET b=? WHERE b=?", (new, old))
+        self.db.execute("DELETE FROM speaker_nonmatches WHERE a=? OR b=? OR a=b", (old, old))
         self.db.commit()
         return cur.rowcount
 
@@ -384,6 +422,32 @@ class Store:
             "SELECT meeting_id, track, start_ms, end_ms FROM transcripts "
             "WHERE speaker=? AND end_ms > start_ms + ? "
             "ORDER BY (end_ms - start_ms) DESC LIMIT 1", (name, min_ms)).fetchone()
+
+    def speaker_long_spans(self, name, min_ms=1000, limit=10):
+        """The longest N utterances (with real duration) for a speaker, as
+        (meeting_id, track, start_ms, end_ms). Longest first — long clips give
+        cleaner speaker embeddings than short noisy ones (used to sample-verify
+        whether a name is actually two people, at bounded audio cost)."""
+        return self.db.execute(
+            "SELECT meeting_id, track, start_ms, end_ms FROM transcripts "
+            "WHERE speaker=? AND end_ms > start_ms + ? "
+            "ORDER BY (end_ms - start_ms) DESC LIMIT ?", (name, min_ms, limit)).fetchall()
+
+    def meeting_speaker_spans(self, meeting_id, name, track=None, min_ms=1000, limit=10):
+        """Longest utterances of a speaker WITHIN one meeting (optionally one track),
+        as (meeting_id, track, start_ms, end_ms). Used to enroll a global voiceprint
+        the moment a human names a meeting-local cluster — the centroid is computed
+        from that person's audio in this meeting only (labels like 對方3 are per-
+        meeting, so they must be scoped or they'd pull other meetings' 對方3)."""
+        q = ("SELECT meeting_id, track, start_ms, end_ms FROM transcripts "
+             "WHERE meeting_id=? AND speaker=? AND end_ms > start_ms + ?")
+        args = [meeting_id, name, min_ms]
+        if track:
+            q += " AND track=?"
+            args.append(track)
+        q += " ORDER BY (end_ms - start_ms) DESC LIMIT ?"
+        args.append(limit)
+        return self.db.execute(q, args).fetchall()
 
     def speaker_utterances(self, name, limit=500):
         """Every utterance by a speaker ACROSS meetings (newest first)."""

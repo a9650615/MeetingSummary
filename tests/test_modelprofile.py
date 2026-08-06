@@ -7,7 +7,9 @@ def test_16gb_uses_q4_for_efficiency():
     assert rec["live"] == "qwen3-asr-0.6b-q4-k-m"   # .cpp Metal default
     assert "q4" in rec["interim"] and all("q4" in m for m in rec["fallback"])
     assert "belle" not in rec["live"] and "belle" not in rec["accurate"]
-    assert "7B" not in rec["summary"]  # 7B was a big OOM driver
+    # 7B-4bit summary is back (3B mis-attributed action items) — safe now only
+    # because the summary weights are freed after each job, see _release_llm.
+    assert rec["summary"] == "mlx-community/Qwen2.5-7B-Instruct-4bit"
 
 
 def test_smaller_ram_picks_smaller_models():

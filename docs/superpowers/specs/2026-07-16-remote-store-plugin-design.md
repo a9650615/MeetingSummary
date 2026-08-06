@@ -128,6 +128,21 @@ FireRedASR for higher accuracy, non-destructively.
 - Queue: newly ingested meetings are enqueued; the worker processes one meeting
   at a time. Restart-safe (re-enqueue anything without a complete `firered`
   set).
+- **Long-running → resumable + progress (user requirement).** A correction pass
+  is ~20–30 min per hour of audio, so it must survive a stop/restart and show
+  progress:
+  - Corrected lines are staged under `profile="firered_staging"` one row at a
+    time; only when every source sentence is staged does the worker **promote**
+    them to `profile="firered"` in one step. The viewer therefore never shows a
+    half-corrected transcript, and a stop/resume keeps completed rows.
+  - Progress (`{state, done, total}`, state ∈ idle|running|paused|done) and a
+    stop flag live in the store's existing key/value `settings` — durable, no
+    schema change.
+  - Endpoints: `GET /meetings/{mid}/firered/progress`, `POST …/stop`, `POST
+    …/resume` (`?restart=1` redoes from scratch). The detail page polls progress
+    and shows `FireRed 校正 done/total…` / `已暫停` / `完成`.
+  - `pick_transcripts` excludes `firered_staging` from both the firered and the
+    local set, so staging rows are invisible until promoted.
 
 ### ③ Mac-side push plugin (opt-in)
 

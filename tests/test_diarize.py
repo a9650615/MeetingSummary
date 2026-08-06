@@ -399,8 +399,9 @@ def test_reconcile_speakers_merges_same_name_folds_close_placeholder_and_purges_
     assert merge_map.get(1) == {2, 4}          # Jimmy's own row + the close placeholder
     assert 3 not in {i for ids in merge_map.values() for i in ids}   # Ann untouched
     assert 3 not in merge_map                                        # Ann never a merge target either
-    assert plan["purge"] == [5]                # only the never-reinforced, unmatched placeholder
-    assert 6 not in plan["purge"]               # reinforced placeholder survives untouched
+    # global holds only human-named people now: 4 was salvaged into Jimmy (pass 2);
+    # every OTHER leftover placeholder is purged, reinforced or not.
+    assert set(plan["purge"]) == {5, 6}
 
 
 def test_reconcile_merges_two_placeholders_of_same_unknown_person():
@@ -422,8 +423,9 @@ def test_reconcile_merges_two_placeholders_of_same_unknown_person():
     plan = diarize.reconcile_speakers(speakers, merge_threshold=0.75)
     merge_map = {keep: set(drop) for keep, drop in plan["merge"]}
     assert merge_map.get(1) == {2}       # 對方34 folded into higher-count 對方12
-    assert plan["purge"] == []           # nothing was a lone one-shot
-    assert 3 not in {i for ids in merge_map.values() for i in ids}
+    # then every leftover placeholder purged (global = named-only): the merge-keep
+    # 對方12 and the lone 我7 both go.
+    assert set(plan["purge"]) == {1, 3}
 
 
 def test_live_speaker_labeler_continuity_keeps_last_speaker_on_noisy_utterance():
@@ -448,3 +450,50 @@ def test_live_speaker_labeler_continuity_keeps_last_speaker_on_noisy_utterance()
                                       continuity_threshold=0.5)
     assert fn(b"x" * 4000) == "Alice"      # clean -> recognized
     assert fn(b"x" * 4000) == "Alice"      # noisy 0.55 -> continuity keeps Alice, no flicker
+
+
+def _unit(rng, dim=16):
+    v = rng.normal(size=dim); return v / np.linalg.norm(v)
+
+
+def test_two_way_split_separates_two_voices():
+    rng = np.random.default_rng(7)
+    a, b = _unit(rng), _unit(rng)          # two distinct voices
+    embs = [a + 0.05 * _unit(rng) for _ in range(4)] + [b + 0.05 * _unit(rng) for _ in range(4)]
+    labels, sep = diarize.two_way_split(embs, min_side=2)
+    assert labels is not None
+    # the two halves land in different groups
+    assert len(set(labels[:4])) == 1 and len(set(labels[4:])) == 1
+    assert labels[0] != labels[4]
+    assert sep < 0.5                       # groups clearly apart
+
+
+def test_two_way_split_keeps_one_voice_together():
+    rng = np.random.default_rng(3)
+    a = _unit(rng)
+    embs = [a + 0.03 * _unit(rng) for _ in range(8)]   # all the same person
+    labels, sep = diarize.two_way_split(embs, min_side=2)
+    # one cohesive voice -> the two "halves" are still highly similar
+    assert sep > 0.85
+
+
+def test_two_way_split_needs_min_side():
+    rng = np.random.default_rng(5)
+    a, b = _unit(rng), _unit(rng)
+    embs = [a, a, a, b]                     # b is a lone outlier -> not a 2nd person
+    labels, _ = diarize.two_way_split(embs, min_side=2)
+    assert labels is None
+
+
+def test_similar_pairs_skips_two_named_people():
+    import struct
+    from diarize import similar_speaker_pairs
+    Row = lambda i, n, x, y: {"id": i, "name": n, "centroid": struct.pack("2f", x, y)}
+    # two DIFFERENT human-named people, even highly similar, must NOT be suggested —
+    # the user already asserted they differ by naming them differently.
+    rows = [Row(1, "Jimmy", 1.0, 0.0), Row(2, "Frank", 0.99, 0.1),
+            Row(3, "對方5", 0.98, 0.14)]
+    pairs = similar_speaker_pairs(rows, threshold=0.3)
+    names = {frozenset((p["a"], p["b"])) for p in pairs}
+    assert frozenset(("Jimmy", "Frank")) not in names       # two named -> skipped
+    assert frozenset(("Jimmy", "對方5")) in names            # named<->unnamed -> kept

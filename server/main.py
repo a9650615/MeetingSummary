@@ -1,0 +1,79 @@
+"""Standalone remote-store server: read-only viewer + bundle ingest. Runs on the
+VM, x86 Linux, no Apple/ASR deps. FireRed worker wired in a later task."""
+import os
+import tempfile
+import zipfile
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+
+from server import firered_worker
+from store import Store
+from viewer import bundle
+from viewer.routes import mount_viewer
+
+DB_PATH = os.environ.get("STORE_DB", "data/store.db")
+DATA_DIR = os.environ.get("STORE_DATA", "data")
+
+
+def build_server(db_path=None, data_dir=None):
+    store = Store(db_path or DB_PATH)
+    data = data_dir or DATA_DIR
+    os.makedirs(data, exist_ok=True)
+    app = FastAPI()
+    app.state.store = store
+    app.state.data_dir = data
+    if os.environ.get("FIRERED_DISABLED") == "1":
+        app.state.on_ingest = None
+        app.state.firered = None
+    else:
+        worker = firered_worker.FireRedWorker(store, data)
+        worker.start()
+        worker.resume_incomplete()  # re-pick meetings left running/paused by a restart
+        app.state.firered = worker
+        app.state.on_ingest = worker.enqueue
+    mount_viewer(app, store, data)
+
+    @app.get("/health")
+    def health():
+        return {"ok": True}
+
+    @app.get("/meetings/{mid}/firered/progress")
+    def firered_progress(mid: int):
+        return firered_worker.get_progress(store, mid)
+
+    @app.post("/meetings/{mid}/firered/stop")
+    def firered_stop(mid: int):
+        if app.state.firered:
+            app.state.firered.stop(mid)
+        return {"stopped": True}
+
+    @app.post("/meetings/{mid}/firered/resume")
+    def firered_resume(mid: int, restart: int = 0):
+        if not restart and firered_worker.get_progress(store, mid)["state"] == "done":
+            return {"resumed": False, "reason": "already done"}
+        if app.state.firered:
+            app.state.firered.enqueue(mid, restart=bool(restart))
+        return {"resumed": True}
+
+    @app.post("/ingest-bundle")
+    async def ingest_bundle(bundle_file: UploadFile = File(..., alias="bundle")):
+        raw = await bundle_file.read()
+        with tempfile.TemporaryDirectory() as td:
+            zp = os.path.join(td, "in.zip")
+            with open(zp, "wb") as f:
+                f.write(raw)
+            try:
+                bd, tracks = bundle.read_bundle_zip(zp, os.path.join(td, "x"))
+                mid, is_new, retranscribe = bundle.ingest_bundle(store, data, bd, tracks)
+            except (zipfile.BadZipFile, KeyError, ValueError) as e:
+                raise HTTPException(400, f"bad bundle: {e}")
+        # Run FireRed for a new meeting OR a top-up whose transcript text changed;
+        # a metadata/summary/speaker-only top-up must NOT re-run the slow pass.
+        if (is_new or retranscribe) and app.state.on_ingest:
+            app.state.on_ingest(mid)
+        return {"mid": mid, "is_new": is_new, "retranscribe": retranscribe}
+
+    return app
+
+
+app = build_server()

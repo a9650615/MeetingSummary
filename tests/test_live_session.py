@@ -25,7 +25,7 @@ class StubSession:
         self._events = events if events is not None else []
         self._flush_events = flush_events if flush_events is not None else []
 
-    def feed(self, chunk, want_interim):
+    def feed(self, chunk, want_interim, want_diarize=True):
         self.feed_calls.append((chunk, want_interim))
         return self._events
 
@@ -170,7 +170,7 @@ def test_consume_survives_wedged_feed(monkeypatch):
         def __init__(self):
             self.released = threading.Event()
 
-        def feed(self, chunk, want_interim):
+        def feed(self, chunk, want_interim, want_diarize=True):
             self.released.wait(5)  # blocks past the patched timeout; bounded so the
             return []              # leaked pool thread can't outlive the test
 
@@ -218,7 +218,8 @@ def test_consume_skips_asr_when_record_only():
     assert asyncio.run(run()) == []  # PCM saved via pump.feed, but ASR never called
 
 
-def test_consume_trims_backlog_to_max_bytes():
+def test_consume_trims_backlog_to_max_bytes(monkeypatch):
+    monkeypatch.setenv("LIVE_HPF", "0")  # isolate trim logic; HPF would alter bytes
     async def run():
         tracks = {"t": ("mic", "我")}
         pump = live_session.WallClockPump(tracks, {"t": io.BytesIO()}, t0=time.time())
@@ -453,3 +454,96 @@ def test_enable_diarization_promotion_renames_stored_rows_and_calls_on_rename(tm
     sessions["sys"].speaker_fn(b"x")
     assert calls == [("說話者1", "Scott", "system")]     # track-scoped
     assert store.list_transcripts(mid)[0]["speaker"] == "Scott"
+
+
+def test_enable_diarization_uses_lower_live_match_threshold(tmp_path, monkeypatch):
+    # Live must match at a LOWER bar than the global post-meeting speaker_threshold:
+    # short noisy single utterances (worst on the system/對方 track) score well
+    # under 0.62, so reusing the global left every remote speaker unrecognized.
+    import diarize
+    seen = {}
+
+    def fake_labeler(extractor, rows, *, session_threshold, match_threshold,
+                     on_promote=None, continuity_threshold=0.5):
+        seen["match_threshold"] = match_threshold
+        return lambda _a: None
+
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b, sr=16000: b))
+    monkeypatch.setattr(diarize, "live_speaker_labeler", fake_labeler)
+    monkeypatch.delenv("LIVE_DIAR_MATCH", raising=False)
+    monkeypatch.delenv("LIVE_DIAR_SPLIT", raising=False)
+    store = Store(tmp_path / "m.db")
+    store.set_setting("speaker_threshold", "0.62")   # global (post-meeting) bar
+    sessions, tracks = _diar_sessions_tracks()
+    live_session.enable_diarization(sessions, tracks, store)
+    assert seen["match_threshold"] == 0.55           # lower live default
+    assert seen["match_threshold"] < 0.62            # ...and below the global
+
+
+def test_live_match_never_stricter_than_global(tmp_path, monkeypatch):
+    # If a user tightened the global threshold BELOW the live default, live must
+    # not loosen past it (min-cap), else live would be less precise than the
+    # accurate post-meeting pass.
+    import diarize
+    seen = {}
+    monkeypatch.setattr(diarize, "embedding_extractor", lambda *a, **k: (lambda b, sr=16000: b))
+    monkeypatch.setattr(diarize, "live_speaker_labeler",
+                        lambda e, r, *, session_threshold, match_threshold, on_promote=None,
+                        continuity_threshold=0.5: seen.setdefault("m", match_threshold) or (lambda _a: None))
+    monkeypatch.delenv("LIVE_DIAR_MATCH", raising=False)
+    monkeypatch.delenv("LIVE_DIAR_SPLIT", raising=False)
+    store = Store(tmp_path / "m.db")
+    store.set_setting("speaker_threshold", "0.50")
+    sessions, tracks = _diar_sessions_tracks()
+    live_session.enable_diarization(sessions, tracks, store)
+    assert seen["m"] == 0.50
+
+
+# --- live line merging (over-fragmentation fix) -----------------------------
+def _finals(store, mid, evs):
+    emit = live_session.make_store_emit(mid, 0, store)
+
+    async def run():
+        for ev, label in evs:
+            await emit({"kind": "final", **ev}, label)
+    asyncio.run(run())
+    return store.list_transcripts(mid)
+
+
+def test_merge_same_speaker_short_gap(tmp_path):
+    store = Store(tmp_path / "m.db"); mid = store.create_meeting("m", 1.0, "zh-TW")
+    rows = _finals(store, mid, [
+        ({"text": "你好", "start_ms": 0, "end_ms": 1000}, ("system", "說話者1")),
+        ({"text": "今天", "start_ms": 1500, "end_ms": 2500}, ("system", "說話者1")),  # +0.5s
+    ])
+    assert len(rows) == 1                       # merged into one line
+    assert rows[0]["text"] == "你好今天" and rows[0]["end_ms"] == 2500
+
+
+def test_speaker_change_starts_new_line(tmp_path):
+    store = Store(tmp_path / "m.db"); mid = store.create_meeting("m", 1.0, "zh-TW")
+    rows = _finals(store, mid, [
+        ({"text": "你好", "start_ms": 0, "end_ms": 1000}, ("system", "說話者1")),
+        ({"text": "我是", "start_ms": 1200, "end_ms": 2000}, ("system", "說話者2")),
+    ])
+    assert len(rows) == 2                        # different session speaker -> split
+    assert [r["speaker"] for r in rows] == ["說話者1", "說話者2"]
+
+
+def test_long_gap_starts_new_line(tmp_path):
+    store = Store(tmp_path / "m.db"); mid = store.create_meeting("m", 1.0, "zh-TW")
+    rows = _finals(store, mid, [
+        ({"text": "你好", "start_ms": 0, "end_ms": 1000}, ("system", "說話者1")),
+        ({"text": "再來", "start_ms": 6000, "end_ms": 7000}, ("system", "說話者1")),  # +5s > 3s
+    ])
+    assert len(rows) == 2                        # gap too big -> new line
+
+
+def test_merge_caps_line_length(tmp_path):
+    store = Store(tmp_path / "m.db"); mid = store.create_meeting("m", 1.0, "zh-TW")
+    long = "字" * 55
+    rows = _finals(store, mid, [
+        ({"text": long, "start_ms": 0, "end_ms": 1000}, ("mic", "說話者1")),
+        ({"text": "十個字十個字", "start_ms": 1100, "end_ms": 2000}, ("mic", "說話者1")),  # 55+6>60
+    ])
+    assert len(rows) == 2                        # would exceed 60 chars -> new line

@@ -74,6 +74,57 @@ def test_twopass_finalizes_on_silence():
     assert finals[0]["end_ms"] > finals[0]["start_ms"]
 
 
+def _step_clock(step):
+    # monotonic-ish fake clock advancing `step` seconds each call
+    t = [0.0]
+    def c():
+        t[0] += step
+        return t[0]
+    return c
+
+
+def test_finalize_warns_when_behind_realtime(capsys):
+    # Stall diagnosis: when final ASR (+diar) takes longer than the utterance's
+    # own realtime, _finalize logs a 'live SLOW' line splitting asr vs diar.
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "句"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=100,
+                       clock=_step_clock(5.0))  # 5s "compute" per clock delta
+    s.feed(tone(300) + silence(150))            # ~0.3s audio << 5s asr
+    err = capsys.readouterr().err
+    assert "live SLOW" in err and "asr 5.0s" in err
+
+
+def test_finalize_silent_when_realtime(capsys):
+    # Fast path (compute < realtime) logs nothing — no spam on the common case.
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "句"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=100,
+                       clock=_step_clock(0.0))  # 0s compute
+    s.feed(tone(300) + silence(150))
+    assert "live SLOW" not in capsys.readouterr().err
+
+
+def test_finalize_skips_diarization_when_behind():
+    # want_diarize=False (consume sets this under backlog) must NOT call speaker_fn
+    # -> line falls back to side label; post-meeting /diarize relabels later.
+    calls = []
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "句"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=100,
+                       speaker_fn=lambda a: calls.append(1) or "Ray")
+    finals = [e for e in s.feed(tone(300) + silence(150), want_diarize=False)
+              if e["kind"] == "final"]
+    assert finals and "speaker" not in finals[0]   # unlabeled
+    assert calls == []                              # embedding skipped
+
+
+def test_finalize_diarizes_by_default():
+    calls = []
+    s = TwoPassSession(backend=lambda a: [{"start": 0, "end": 1, "text": "句"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=100,
+                       speaker_fn=lambda a: calls.append(1) or "Ray")
+    finals = [e for e in s.feed(tone(300) + silence(150)) if e["kind"] == "final"]
+    assert finals and finals[0].get("speaker") == "Ray" and calls == [1]
+
+
 def test_twopass_drops_silence_hallucination_by_char_rate():
     # A fluent sentence far too long for the brief speech present = a silence
     # hallucination (whisper confabulating over near-silence, the 對方-track report).
@@ -98,6 +149,24 @@ def test_twopass_emits_interim_while_speaking():
                        frame_ms=30, silence_ms=100000, interim_s=0.09)
     kinds = [e["kind"] for e in s.feed(tone(300))]  # speaking, no pause
     assert "interim" in kinds and "final" not in kinds
+
+
+def test_dropped_utterance_clears_a_shown_interim():
+    # The final ASR returns nothing (hallucination gate / silence), so no 'final'
+    # is emitted — the interim already on screen must be cleared explicitly or it
+    # stays frozen there until the next utterance overwrites it.
+    s = TwoPassSession(backend=lambda a: [],  # final: no text -> utterance dropped
+                       interim_backend=lambda a: [{"start": 0, "end": 1, "text": "暫"}],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=0.09)
+    assert any(e["kind"] == "interim" and e["text"] for e in s.feed(tone(300)))
+    evs = s.feed(silence(150))  # pause -> finalize -> dropped
+    assert [(e["kind"], e["text"]) for e in evs] == [("interim", "")]
+
+
+def test_no_clear_event_when_no_interim_was_shown():
+    s = TwoPassSession(backend=lambda a: [],
+                       frame_ms=30, silence_ms=90, min_speech_ms=30, interim_s=100)
+    assert s.feed(tone(300) + silence(150)) == []  # nothing shown, nothing to clear
 
 
 def test_interim_cadence_adapts_to_compute_load():
@@ -251,6 +320,37 @@ def test_adaptive_stays_on_fast_backend():
     win = b"\x00" * 32000
     ab(win); ab(win)
     assert ab.current_model == "a" and ab.pop_notice() is None
+
+
+def test_adaptive_never_downgrades_a_groq_tier():
+    # A network backend's wall time is round-trip latency, not audio length —
+    # RTF is meaningless for it. Even many consecutive "slow" calls (huge RTF)
+    # must never advance idx away from a groq-* tier.
+    ticks = iter([0, 2] * 20)  # warmup + 19 "slow" calls, way past patience
+    slow = lambda b: [{"start": 0, "end": 1, "text": "x"}]
+    fast = lambda b: [{"start": 0, "end": 1, "text": "y"}]
+    ab = AdaptiveBackend([slow, fast], ["groq-whisper-large-v3", "small"],
+                         sample_rate=16000, rtf_budget=0.8, patience=2,
+                         clock=lambda: next(ticks))
+    win = b"\x00" * 32000
+    for _ in range(19):
+        ab(win)
+    assert ab.current_model == "groq-whisper-large-v3"  # never downgraded
+    assert ab.pop_notice() is None
+
+
+def test_adaptive_still_downgrades_non_groq_regression_guard():
+    # Same slow/patience shape as the groq-exemption test above, but with a
+    # plain local model id — must still downgrade normally (the exemption is
+    # string-prefix scoped, not a general disable of the RTF judging).
+    ticks = iter([0, 2, 0, 2, 0, 2])  # warmup + 2 slow -> downgrade
+    slow = lambda b: [{"start": 0, "end": 1, "text": "x"}]
+    fast = lambda b: [{"start": 0, "end": 1, "text": "y"}]
+    ab = AdaptiveBackend([slow, fast], ["turbo", "small"], sample_rate=16000,
+                         rtf_budget=0.8, patience=2, clock=lambda: next(ticks))
+    win = b"\x00" * 32000
+    ab(win); ab(win); ab(win)
+    assert ab.current_model == "small"
 
 
 def test_preprocess_removes_dc_and_normalizes():

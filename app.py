@@ -27,7 +27,42 @@ import live_session  # shared pipeline plumbing: /ws/live (browser) + /ws/native
 from summarize import summarize
 
 from webassets import (  # static CSS/JS/PWA assets (presentation, no logic)
-    _STYLE, _THEME_JS, _png_solid, _MANIFEST, _SW_JS, _DETECT_JS, _PROG_JS, _REC_JS)
+    _STYLE, _THEME_JS, _png_solid, _MANIFEST, _SW_JS, _DETECT_JS, _PROG_JS)
+
+
+def _ensure_tool_path():
+    """A .app launched from Finder/launchd inherits a bare PATH (/usr/bin:/bin),
+    so bare-name `ffmpeg` subprocess calls raise FileNotFoundError even though it
+    is installed — the "音檔上傳沒成功 / [Errno 2] ffmpeg" bug. Prepend the common
+    user/homebrew bin dirs so every `ffmpeg`/`speech` shell-out resolves,
+    regardless of how the app was started."""
+    extra = [os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/local/bin"]
+    cur = os.environ.get("PATH", "").split(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join(
+        [p for p in extra if p not in cur] + cur)
+
+
+def _load_dotenv(path=None):
+    """Read .env (repo root, gitignored) into os.environ for local secrets
+    (e.g. GROQ_API_KEY) — never overrides a value already set externally."""
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value.strip().strip("'\"")
+
+
+_ensure_tool_path()
+_load_dotenv()
+
 
 def _md_html(text):
     """Minimal, safe Markdown -> HTML (offline, no dep) for changelog + summaries.
@@ -108,7 +143,6 @@ def _shell(title, body, script="", back=False):
         + (f"<script>{script}</script>" if script else "")
         + f"<script>{_DETECT_JS}</script>"
         + f"<script>{_PROG_JS}</script>"
-        + f"<script>{_REC_JS}</script>"
         + "</body></html>"
     )
 
@@ -249,6 +283,11 @@ def _speakers_page():
             "<span class=hint id=reconcilemsg></span></div>"
             "<p class=hint style='margin:.4em 0 0'>自動合併明顯同一人、清除一次性雜訊。"
             "剩下無法確定的會列在下方「可能是同一人」讓你判斷。</p></div>"
+            "<div class=card id=splitcard style='display:none'>"
+            "<h2 style='margin-top:0;font-size:15px'>可能是不同的人（一個名字兩個聲音）</h2>"
+            "<p class=hint style='margin:0 0 8px'>同一個名字底下疑似混到兩個人。按「檢查」會抽幾句最長的語音重新比對，"
+            "兩群各給一段試聽，你聽完確認再拆。（拆分只影響之後的自動辨識；過去逐字稿請用會議內「重新辨識」修正）</p>"
+            "<div id=splits></div></div>"
             "<div class=card id=sugcard style='display:none'>"
             "<h2 style='margin-top:0;font-size:15px'>可能是同一人</h2>"
             "<p class=hint style='margin:0 0 8px'>系統無法確定、需你判斷的配對（明顯的已由「一鍵重新比對」處理）。</p>"
@@ -298,7 +337,7 @@ async function load(){
     await fetch('/speakers/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:sel.dataset.keep,drop})});load();});
   t.querySelectorAll('[data-act=view]').forEach(b=>b.onclick=()=>view(b.dataset.name));
   t.querySelectorAll('[data-act=play]').forEach(b=>b.onclick=()=>play(b.dataset.name));
-  loadSugs();
+  loadSugs();loadSplits();
 }
 async function loadSugs(){
   const j=await(await fetch('/speakers/suggestions')).json();
@@ -317,6 +356,42 @@ async function loadSugs(){
     await fetch('/speakers/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:b.dataset.keep,drop:b.dataset.drop})});load();});
   document.querySelectorAll('#sugs [data-no-a]').forEach(b=>b.onclick=async()=>{
     await fetch('/speakers/nonmatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:b.dataset.noA,drop:b.dataset.noB})});loadSugs();});
+}
+function playClip(rep){try{if(_au)_au.pause();}catch(e){}
+  _au=new Audio(`/speakers/clip.wav?mid=${rep.meeting_id}&track=${encodeURIComponent(rep.track)}&a=${rep.start_ms}&b=${rep.end_ms}`);
+  _au.play().catch(()=>alert('沒有可試聽的音訊片段'));}
+async function loadSplits(){
+  const j=await(await fetch('/speakers/split-candidates')).json();
+  const cs=j.candidates||[];
+  document.getElementById('splitcard').style.display=cs.length?'block':'none';
+  document.getElementById('splits').innerHTML=cs.map(c=>
+    `<div class=setrow style="gap:6px;margin:4px 0" data-name="${esc(c.name)}"><span>
+     <b>${esc(c.name)}</b> <span class="muted small">${c.groups} 群聲紋 (${c.sizes.join('/')})</span></span>
+     <span class=splitres style="display:flex;gap:6px;align-items:center">
+     <button class=btn data-check="${esc(c.name)}">🔍 檢查是否為兩人</button></span></div>`).join('');
+  document.querySelectorAll('#splits [data-check]').forEach(b=>b.onclick=()=>checkSplit(b.dataset.check,b));
+}
+async function checkSplit(name,btn){
+  const box=btn.closest('.splitres');box.innerHTML='<span class=hint>抽樣比對中…（重算幾句語音）</span>';
+  const r=await(await fetch('/speakers/split-check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})})).json();
+  if(!r.enough){box.innerHTML='<span class=hint>可試聽的語音太少，無法判斷</span>';return;}
+  if(!r.split){box.innerHTML=`<span class=hint>聽起來是同一個人（相似度 ${r.sep}）</span>`;return;}
+  const g=r.groups;
+  box.innerHTML=`<span class="muted small">兩群差異大 (相似度 ${r.sep})</span>
+    <button class=btn data-c=0 title="試聽第一群">🔊 群1(${g[0].size})</button>
+    <button class=btn data-c=1 title="試聽第二群">🔊 群2(${g[1].size})</button>
+    <button class=btn data-do="${esc(name)}">拆開為兩人…</button>`;
+  box.querySelector('[data-c="0"]').onclick=()=>playClip(g[0].rep);
+  box.querySelector('[data-c="1"]').onclick=()=>playClip(g[1].rep);
+  box.querySelector('[data-do]').onclick=async()=>{
+    const nn=prompt(`把「${name}」拆成兩個人。較多發言的那群保留「${name}」，另一群要叫什麼名字？`);
+    if(nn==null||!nn.trim())return;
+    box.innerHTML='<span class=hint>拆分中…</span>';
+    const res=await(await fetch('/speakers/split',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep:name,drop:nn.trim()})})).json();
+    if(!res.ok){box.innerHTML=`<span class=hint>${esc(res.error||'拆分失敗')}</span>`;return;}
+    alert(`已拆分：保留「${res.kept}」，新增「${res.new}」`+(res.backup?`\\n已備份，如需還原：${res.backup}`:''));
+    load();
+  };
 }
 async function view(name){
   const j=await(await fetch(`/speakers/${encodeURIComponent(name)}/utterances`)).json();
@@ -339,7 +414,7 @@ document.getElementById('reconcile').onclick=async()=>{
   const m=document.getElementById('reconcilemsg');m.textContent='比對中…';
   const r=await(await fetch('/speakers/reconcile',{method:'POST'})).json();
   m.textContent=`已合併 ${r.merged} 筆、清除 ${r.purged} 筆雜訊`+(r.backup?`（已備份，如需還原：${r.backup}）`:'');
-  load();
+  load();loadSplits();
 };
 loadThr();load();
 """
@@ -384,8 +459,7 @@ def _models_page():
         "<select id=livemodel style='width:100%;padding:.5em;border-radius:8px;"
         "border:1px solid var(--line);background:var(--surface2);color:inherit'>"
         + ("<optgroup label='🧠 NPU · ANE 省電'>"
-           "<option value='ane-qwen3-0.6b'>Qwen3-ASR 0.6B（省電·M系列）</option>"
-           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B（混合·快）</option>"
+           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B（省電·快）</option>"
            "</optgroup>" if _ane_available() else "") +
         "<optgroup label='🔧 .cpp · Metal'>"
         "<option value='qwen3-asr-0.6b-q4-k-m'>Qwen3-ASR 0.6B（預設·快）</option>"
@@ -401,6 +475,10 @@ def _models_page():
         "</optgroup>"
         "<optgroup label='🐢 transformers · 慢'>"
         "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B</option>"
+        "</optgroup>"
+        "<optgroup label='☁️ Groq API · 遠端'>"
+        "<option value='groq-whisper-large-v3-turbo'>Groq whisper turbo(快·遠端)</option>"
+        "<option value='groq-whisper-large-v3'>Groq whisper large-v3(最準·遠端)</option>"
         "</optgroup>"
         "</select>"
         "<p class=hint style='margin:.6em 0 0' id=livemodelmsg>原生浮動面板與網頁錄音都會用這個模型（下次開始錄音起生效）。</p></div>"
@@ -440,11 +518,15 @@ def _models_page():
             "先到下方「加速 runtime」一鍵安裝 <code>speech</code>，裝好後這裡會出現開關。</p></div>")
            if _apple_silicon() else "")
         + ("<div class=card style='margin-top:12px'>"
-           "<label class=chk><input type=checkbox id=floatpanel_opt> "
-           "🪟 錄音時自動開啟原生懸浮控制面板</label>"
-           "<p class=hint style='margin:.6em 0 0'>開始錄音(含手動／快速錄音)時，自動開啟可置頂於其他 App 之上的"
-           "原生小窗(狀態＋計時＋停止)。需先到下方「加速 runtime」安裝 <code>floatpanel</code>。</p></div>"
+           "<p class=hint style='margin:0'>🪟 懸浮面板請從 App 圖示或「主控台」開啟。"
+           "由伺服器代開會讓 macOS 把螢幕／系統音訊錄製權限記在 Python 上而不是面板身上，"
+           "結果就是錄到一片靜音，所以這個自動開啟選項已移除。</p></div>"
            if _apple_silicon() else "")
+        + ("<div class=card style='margin-top:12px'>"
+           "<label class=chk><input type=checkbox id=remote_opt> "
+           "☁️ 上傳到 server（遠端儲存）：於各會議詳情頁顯示「上傳到 server」，把逐字稿／摘要／音檔推到共用伺服器。</label>"
+           "<p class=hint style='margin:.6em 0 0'>預設關閉；一般版本無此功能。開啟後每場會議詳情頁會出現上傳鈕。</p></div>"
+           if globals().get("REMOTE_PLUGIN") else "")
         + ("<div class=card style='margin-top:12px'>"
            "<label style='font-weight:600'>🎙️ 錄音預設（免每次重選）</label>"
            "<div class=row style='margin-top:8px'>"
@@ -453,11 +535,25 @@ def _models_page():
            "<option value=system>系統音(對方)</option>"
            "<option value=both>兩者混合</option>"
            "<option value=dual>雙軌(我/對方分離)</option>"
+           "</select></label>"
+           "<label style='margin-left:12px'>辨識語系 <select id=live_language_opt>"
+           "<option value=''>自動偵測</option>"
+           "<option value=zh>中文</option>"
+           "<option value=en>English</option>"
+           "<option value=ja>日本語</option>"
+           "<option value=ko>한국어</option>"
+           "<option value=yue>粵語</option>"
+           "</select></label>"
+           "<label style='margin-left:12px'>錄音模式 <select id=live_mode_opt>"
+           "<option value=both>錄音＋即時辨識</option>"
+           "<option value=record>純錄音（省電，不即時辨識）</option>"
+           "<option value=transcribe>純字幕（不留錄音檔）</option>"
            "</select></label></div>"
            "<p class=hint style='margin:.6em 0 0'>/live 錄音頁會記住這裡的預設；也可在錄音頁直接改，會自動存回。"
            "系統音(對方)/兩者/雙軌會用瀏覽器 getDisplayMedia 分享分頁或畫面的音訊 — 免安裝任何原生元件。"
            "另外，浮動控制面板（下方安裝 <code>floatpanel</code>）錄音時是完全獨立的原生擷取，"
-           "不受這裡的設定影響。</p></div>")
+           "不受這裡的設定影響。"
+           "<br>辨識語系：固定講單一語言時選定可避免自動偵測選錯（尤其浮動面板／系統音）；混合語言或不確定就留「自動偵測」。此設定同時套用網頁錄音與浮動面板。</p></div>")
         + ("<div class=card style='margin-top:12px'>"
            "<label class=chk><input type=checkbox id=correct_opt> "
            "✏️ 摘要前保守校正逐字稿</label>"
@@ -562,9 +658,18 @@ def _models_page():
     (function(){const f=document.getElementById('floatpanel_opt');if(!f)return;
       fetch('/settings/float_panel').then(r=>r.json()).then(j=>f.checked=j.value==='1');
       f.onchange=()=>fetch('/settings/float_panel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:f.checked?'1':'0'})});})();
+    (function(){const r=document.getElementById('remote_opt');if(!r)return;
+      fetch('/settings/remote_store').then(x=>x.json()).then(j=>r.checked=j.value==='1');
+      r.onchange=()=>fetch('/settings/remote_store',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:r.checked?'1':'0'})});})();
     (function(){const s=document.getElementById('live_source_opt');if(!s)return;
       fetch('/settings/live_source').then(r=>r.json()).then(j=>{if(j.value)s.value=j.value;});
       s.onchange=()=>fetch('/settings/live_source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
+    (function(){const s=document.getElementById('live_language_opt');if(!s)return;
+      fetch('/settings/live_language').then(r=>r.json()).then(j=>{s.value=j.value||'';});
+      s.onchange=()=>fetch('/settings/live_language',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
+    (function(){const s=document.getElementById('live_mode_opt');if(!s)return;
+      fetch('/settings/live_mode').then(r=>r.json()).then(j=>{s.value=j.value||'both';});
+      s.onchange=()=>fetch('/settings/live_mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:s.value})});})();
     (function(){const s=document.getElementById('livemodel');if(!s)return;
       fetch('/models').then(r=>r.json()).then(j=>{const v=j.live_requested||j.live;if(v)s.value=v;});
       s.onchange=async()=>{const m=document.getElementById('livemodelmsg');m.textContent=' 套用中…';
@@ -605,6 +710,7 @@ _LIVE_BODY = """
 <div class=card>
   <div class=live-actionrow>
     <button class="btn primary livebig" id=start>● 開始錄音</button>
+    <button class="btn livebig" id=pause style="display:none">⏸ 暫停</button>
     <button class="btn danger livebig" id=stop disabled style="display:none">■ 停止錄音</button>
     <span class=live-status id=recstatus style="display:none">
       <span class=live-dot></span>
@@ -661,6 +767,10 @@ _LIVE_BODY = """
           <optgroup label="🐢 transformers · 慢">
           <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR 0.6B</option>
           </optgroup>
+          <optgroup label="☁️ Groq API · 遠端">
+          <option value="groq-whisper-large-v3-turbo">Groq whisper turbo(快·遠端)</option>
+          <option value="groq-whisper-large-v3">Groq whisper large-v3(最準·遠端)</option>
+          </optgroup>
         </select></label>
     </div>
     <div class=row style="margin-top:12px">
@@ -705,6 +815,7 @@ let ws, ctx, gain, streams=[], nodes=[], mid, session=null;
 const T=document.getElementById('transcript'), S=document.getElementById('status');
 const C=document.getElementById('caption'), L=document.getElementById('live');
 const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
+(function(){const pb=document.getElementById('pause'); if(pb) pb.onclick=()=>togglePause();})();
 const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
 const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
 function colored(speaker){ return COLORS[speaker]||'#444'; }
@@ -747,7 +858,25 @@ function applyRename(from, to, track){
 // Recording state feedback: swap start/stop, run an mm:ss timer + pulsing dot.
 let recTimer=null, recStart=0;
 function fmtElapsed(s){s=Math.floor(s);return String(s/60|0).padStart(2,'0')+':'+String(s%60).padStart(2,'0');}
+// ⏸ 暫停/繼續: server-side (POST /live/pause) so it works for an attached
+// floatpanel session too, where this page has no websocket of its own. The pump
+// drops audio while paused and elides the gap, so nothing is saved and the timer
+// is the only thing that keeps counting.
+let paused=false;
+function pauseUiSync(){
+  const b=document.getElementById('pause'); if(!b) return;
+  b.textContent = paused ? '▶ 繼續' : '⏸ 暫停';
+  const rd=document.getElementById('recdot'); if(rd) rd.style.opacity = paused ? '.35' : '';
+}
+function togglePause(){
+  const next=!paused;
+  fetch('/live/pause?on='+next,{method:'POST'})
+    .then(r=>r.json()).then(()=>{ paused=next; pauseUiSync(); })
+    .catch(()=>{});
+}
 function recUiStart(){
+  paused=false; pauseUiSync();
+  const pb=document.getElementById('pause'); if(pb) pb.style.display='';
   startBtn.style.display='none'; stopBtn.style.display='';
   const rs=document.getElementById('recstatus'); if(rs) rs.style.display='inline-flex';
   const ml=document.getElementById('miclevel'); if(ml) ml.style.display='';
@@ -757,6 +886,8 @@ function recUiStart(){
 }
 function recUiStop(){
   clearInterval(recTimer); recTimer=null;
+  paused=false;
+  const pb=document.getElementById('pause'); if(pb) pb.style.display='none';
   startBtn.style.display=''; stopBtn.style.display='none';
   const rs=document.getElementById('recstatus'); if(rs) rs.style.display='none';
   const ml=document.getElementById('miclevel'); if(ml) ml.style.display='none';
@@ -791,6 +922,8 @@ function pollAttached(){
   fetch('/live/state').then(r=>r.json()).then(st=>{
     if(!attached) return;             // exited (e.g. 停止 clicked) while this was in flight
     if(!st.recording || st.mid!==mid){ exitAttached(); return; }
+    // the session may have been paused elsewhere (floatpanel / another tab)
+    if(!!st.paused !== paused){ paused=!!st.paused; pauseUiSync(); }
     if(st.caption) C.textContent = st.caption;
     attachTimer=setTimeout(pollAttached, 2000);
   }).catch(()=>{ if(attached) attachTimer=setTimeout(pollAttached, 2000); });
@@ -828,15 +961,21 @@ if(notesEl) notesEl.addEventListener('input',()=>{clearTimeout(noteTimer);noteTi
 
 function showModels(m){
   curModel.textContent = '(目前 '+(m.live||'-').split('/').pop()+')';
-  if(m.live_requested) modelSel.value = m.live_requested;
+  if(m.live_requested){ modelSel.value = m.live_requested; modelSel.dataset.applied = m.live_requested; }
   document.getElementById('accmodel').textContent = (m.accurate||'-').split('/').pop();
 }
 fetch('/models').then(r=>r.json()).then(showModels).catch(()=>{});
 fetch('/live/prewarm',{method:'POST'}).catch(()=>{});  // warm ANE helper before first record
 modelSel.onchange = () => {
+  const prev = modelSel.dataset.applied || modelSel.value;
   fetch('/models',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({live:modelSel.value})})
-    .then(r=>r.json()).then(()=>fetch('/models').then(r=>r.json()).then(showModels));
+    .then(r=>{
+      if(!r.ok) return r.text().then(t=>{throw new Error(t||'設定失敗');});
+      return r.json();
+    })
+    .then(()=>fetch('/models').then(r=>r.json()).then(showModels))
+    .catch(()=>{curModel.textContent='⚠️ 設定失敗';modelSel.value=prev;});
 };
 // 純錄音 hot-toggle: flip mid-recording (e.g. when the machine overheats) without
 // stop/restart — sends a control message to the live socket.
@@ -1043,6 +1182,9 @@ startBtn.onclick = async () => {
       if(notesEl&&notesEl.value) saveNotes(); }  // flush notes typed before record
     else if(m.type==='interim'){
       const sp=collapseSpeaker(m.speaker||'', m.track);
+      // Empty text = "drop the tentative line" (the utterance was discarded, so no
+      // final is coming). Clear both, don't render a bare '… ' with no words.
+      if(!m.text){ L.textContent=''; return; }
       C.textContent = m.text;                       // caption: words only
       L.textContent = '… '+(sp?sp+': ':'')+m.text;  // grey in-progress, above history
     }
@@ -1150,6 +1292,11 @@ class SpeakerRenameIn(BaseModel):
     old: str
     new: str
     track: str | None = None   # scopes /meetings/{mid}/speaker; ignored by the global rename
+
+
+class LineSpeakerIn(BaseModel):
+    speaker: str               # reassign ONE line (抽離 a mislabeled line)
+    track: str | None = None   # the line's track, for enroll scope
 
 
 class MergeIn(BaseModel):
@@ -1289,6 +1436,10 @@ def _export_text(meeting, transcripts, summaries):
 
 
 _TRACKS = ("system", "mic", "mixed")
+
+# Set True by create_app() when plugins/remote_store/ is present and imports
+# cleanly; the base build (folder absent) leaves this False forever.
+REMOTE_PLUGIN = False
 
 
 def _seg_track_file(seg_dir, track):
@@ -1519,7 +1670,7 @@ _SUPPORTED = [
     {"id": "mlx-community/whisper-base-mlx-q4", "label": "whisper base-q4", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
     {"id": "mlx-community/whisper-tiny-mlx-q4", "label": "whisper tiny-q4", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
     {"id": "mlx-community/whisper-large-v3-mlx", "label": "whisper large-v3", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
-    {"id": "mlx-community/Qwen2.5-3B-Instruct-4bit", "label": "Qwen2.5-3B（摘要）", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
+    {"id": "mlx-community/Qwen2.5-7B-Instruct-4bit", "label": "Qwen2.5-7B（摘要）", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
     {"id": "mlx-community/Qwen3-ASR-1.7B-8bit", "label": "Qwen3-ASR 1.7B（準·快）", "kind": "hf", "group": "⚡ MLX · Metal/GPU"},
     {"id": "qwen3-asr-0.6b-q4-k-m", "label": "Qwen3-ASR 0.6B（femelo·快）", "kind": "femelo", "group": "🔧 .cpp · Metal"},
     {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR 1.7B（chatllm·慢·備用）", "kind": "chatllm", "group": "🔧 .cpp · Metal"},
@@ -1676,18 +1827,16 @@ def _persistent_names(store, embs, prefix, threshold=0.62):
             if best_row_for.get(nm) is not None:
                 _nudge(best_row_for[nm], emb)
             continue
-        # 2) fall back to raw rows (catches unnamed placeholders to reinforce).
+        # 2) fall back to raw rows — but ONLY match named voiceprints; never enroll.
         mid, _sim = diar.match_speaker(e, raw_known, threshold)
-        if mid is not None:
+        if mid is not None and not diar._is_placeholder(rows[mid]["name"]):
             _nudge(mid, emb)
             names[spk] = rows[mid]["name"]
-        else:
-            sid = store.add_speaker(prefix, _unit(emb).astype(np.float32).tobytes())
-            nmp = f"{prefix}{sid}"  # globally-unique placeholder until the user renames
-            store.set_speaker_name(sid, nmp)
-            names[spk] = nmp
-            raw_known.append((sid, e))
-            rows[sid] = {"id": sid, "name": nmp, "centroid": _unit(emb).tobytes(), "count": 1}
+        # else: unrecognized voice -> DO NOT write a global voiceprint. Leave spk out
+        # of `names` so assign_speakers auto-labels it 對方N (numbered per meeting).
+        # A voiceprint enters the global 語者庫 only when a human ASSIGNS a real name
+        # (see /meetings/{mid}/speaker -> _enroll_meeting_speaker). This kills the
+        # placeholder flood — every unmatched cluster used to add a 對方N global row.
     return names
 
 
@@ -1738,6 +1887,187 @@ def _apply_speaker_reconcile(store, plan):
     return {"merged": merged, "purged": len(plan["purge"])}
 
 
+# --- global voiceprint SPLIT: is one named person actually two? ---
+# Stored centroids can't decide this (same-person fragments sit at cosine 0.26-0.47,
+# overlapping the different-person range), so we sample a bit of AUDIO and re-embed
+# it fresh. Cost is kept small on purpose: only a name's longest clips, capped in
+# count and in how many meeting tracks we decode.
+_SPLIT_K = 8              # utterances embedded per name (longest first = cleaner)
+_SPLIT_MAX_MEETINGS = 3  # cap decoded tracks per check so audio cost stays bounded
+_SPLIT_MIN_MS = 1000
+
+
+def _sample_speaker_embeddings(store, name, ext, sample_rate=16000):
+    """Embed up to _SPLIT_K of a name's longest utterances (bounded to
+    _SPLIT_MAX_MEETINGS distinct meetings). Returns [(span, emb_np)] where span =
+    {meeting_id, track, start_ms, end_ms}. Long clips only + capped count keep the
+    re-embedding cheap; assembled tracks are cached across the sample."""
+    import numpy as np  # noqa: PLC0415
+    spans = store.speaker_long_spans(name, min_ms=_SPLIT_MIN_MS, limit=_SPLIT_K * 4)
+    cache, meetings, out = {}, [], []
+    for s in spans:
+        if s["meeting_id"] not in meetings:
+            if len(meetings) >= _SPLIT_MAX_MEETINGS:
+                continue
+            meetings.append(s["meeting_id"])
+        key = (s["meeting_id"], s["track"])
+        if key not in cache:
+            cache[key] = _assemble_track(store, s["meeting_id"], s["track"], sample_rate)
+        pcm = cache[key]
+        if not pcm:
+            continue
+        a = int(s["start_ms"] / 1000 * sample_rate) * 2
+        b = int(s["end_ms"] / 1000 * sample_rate) * 2
+        clip = pcm[a:b]
+        if len(clip) < sample_rate:   # < 0.5s -> too short to embed cleanly
+            continue
+        out.append(({"meeting_id": s["meeting_id"], "track": s["track"],
+                     "start_ms": s["start_ms"], "end_ms": s["end_ms"]},
+                    np.asarray(ext(clip), dtype=np.float32)))
+        if len(out) >= _SPLIT_K:
+            break
+    return out
+
+
+def _speaker_split_check(store, name, *, sep_threshold=0.5):
+    """Sample a name's audio and decide whether it's two voices. Returns sep, the
+    verdict, and a representative clip span per group so the user can 試聽 and be
+    the final judge (short-utterance embeddings are noisy — the ear beats the
+    threshold). Read-only."""
+    import diarize as diar  # noqa: PLC0415
+    ext = diar.embedding_extractor()
+    samples = _sample_speaker_embeddings(store, name, ext)
+    if len(samples) < 4:
+        return {"name": name, "enough": False}
+    labels, sep = diar.two_way_split([e for _, e in samples], min_side=2)
+    if labels is None:
+        return {"name": name, "enough": True, "split": False, "sep": round(sep, 3)}
+    groups = {0: [], 1: []}
+    for (span, _), lab in zip(samples, labels):
+        groups[lab].append(span)
+
+    def rep(g):
+        return max(g, key=lambda x: x["end_ms"] - x["start_ms"])
+    return {"name": name, "enough": True, "split": sep <= sep_threshold,
+            "sep": round(sep, 3),
+            "groups": [{"size": len(groups[0]), "rep": rep(groups[0])},
+                       {"size": len(groups[1]), "rep": rep(groups[1])}]}
+
+
+def _apply_speaker_split(store, name, new_name):
+    """Split a name's voiceprint in two: re-sample, cluster, and REPLACE its
+    (polluted) stored centroids with two clean ones so future recognition tells
+    the people apart. Snapshots the DB first. Transcripts are NOT relabelled — run
+    detail 重新辨識 for that. The larger group keeps `name`; the other gets
+    `new_name`. Returns a summary dict."""
+    import numpy as np  # noqa: PLC0415
+    import diarize as diar  # noqa: PLC0415
+    new_name = (new_name or "").strip()
+    if not new_name or new_name == name:
+        return {"ok": False, "error": "請輸入另一個名字"}
+    ext = diar.embedding_extractor()
+    samples = _sample_speaker_embeddings(store, name, ext)
+    if len(samples) < 4:
+        return {"ok": False, "error": "樣本不足，無法拆分"}
+    embs = [e for _, e in samples]
+    labels, sep = diar.two_way_split(embs, min_side=2)
+    if labels is None:
+        return {"ok": False, "error": "聽起來是同一個人，未拆分"}
+    backup = _backup_db(store)
+
+    def centroid(idx):
+        v = np.mean([embs[i] for i in range(len(embs)) if labels[i] == idx], axis=0)
+        return (v / (np.linalg.norm(v) + 1e-9)).astype(np.float32).tobytes()
+    n0 = sum(1 for lab in labels if lab == 0)
+    big, small = (0, 1) if n0 >= len(labels) - n0 else (1, 0)
+    for r in store.list_speakers():   # drop the polluted rows for this name
+        if r["name"] == name:
+            store.delete_speaker(r["id"])
+    store.add_speaker(name, centroid(big))
+    store.add_speaker(new_name, centroid(small))
+    return {"ok": True, "sep": round(sep, 3), "kept": name, "new": new_name,
+            "backup": backup}
+
+
+def _enroll_meeting_speaker(store, mid, track, name):
+    """Assignment enrolls AND learns-from-correction: compute `name`'s voiceprint from
+    their audio in THIS meeting, then either enroll it (name new to the 語者庫) or
+    REINFORCE the existing voiceprint (count-weighted nudge) so a manual 命名/抽離
+    teaches the system — future meetings recognize this voice as `name`, avoiding the
+    mistake you just fixed. Nudge (not a new row) keeps the库 un-fragmented. Best-effort;
+    returns True if it enrolled or reinforced."""
+    import numpy as np  # noqa: PLC0415
+    import diarize as diar  # noqa: PLC0415
+
+    def _unit(x):
+        return x / (np.linalg.norm(x) + 1e-9)
+    ext = diar.embedding_extractor()
+    cache, embs = {}, []
+    for s in store.meeting_speaker_spans(mid, name, track=track):
+        key = (s["meeting_id"], s["track"])
+        if key not in cache:
+            cache[key] = _assemble_track(store, s["meeting_id"], s["track"])
+        pcm = cache[key]
+        if not pcm:
+            continue
+        a = int(s["start_ms"] / 1000 * 16000) * 2
+        b = int(s["end_ms"] / 1000 * 16000) * 2
+        clip = pcm[a:b]
+        if len(clip) < 16000:   # < 0.5s
+            continue
+        embs.append(_unit(np.asarray(ext(clip), dtype=np.float32)))
+    if not embs:
+        return False
+    add = np.mean(embs, axis=0) * len(embs)   # this meeting's contribution, weighted by #clips
+    existing = [r for r in store.list_speakers() if r["name"] == name and r["centroid"]]
+    if existing:  # LEARN: count-weighted nudge the strongest row toward the corrected audio
+        r = max(existing, key=lambda x: x["count"] or 1)
+        cnt = r["count"] or 1
+        cen = np.frombuffer(r["centroid"], dtype=np.float32).astype(np.float64) * cnt + add
+        store.update_speaker_centroid(r["id"], _unit(cen).astype(np.float32).tobytes(),
+                                      cnt + len(embs))
+    else:         # first time this name is seen -> enroll
+        store.add_speaker(name, _unit(add).astype(np.float32).tobytes())
+    return True
+
+
+def _unlearn_speaker_clip(store, mid, track, name, start_ms, end_ms):
+    """Inverse of _enroll_meeting_speaker's reinforce, for ONE clip: subtract that
+    clip's contribution from `name`'s global voiceprint (count-weighted), so a 抽離
+    that MOVES a mis-attributed line off `name` also removes what that line taught
+    `name` — a true move, not just a copy onto the correct person. Only touches a
+    REAL named voiceprint that already exists; guarded so it never drives a row's
+    count below 1 or deletes it (conservative — leave a thin voiceprint rather than
+    wipe one). Best-effort; returns True if it subtracted."""
+    import numpy as np  # noqa: PLC0415
+    import diarize as diar  # noqa: PLC0415
+    if not name or diar._is_placeholder(name):
+        return False
+    existing = [r for r in store.list_speakers() if r["name"] == name and r["centroid"]]
+    if not existing:
+        return False
+    pcm = _assemble_track(store, mid, track)
+    if not pcm:
+        return False
+    a = int(start_ms / 1000 * 16000) * 2
+    b = int(end_ms / 1000 * 16000) * 2
+    clip = pcm[a:b]
+    if len(clip) < 16000:   # < 0.5s — too short to have meaningfully taught anything
+        return False
+    ext = diar.embedding_extractor()
+    e = np.asarray(ext(clip), dtype=np.float32)
+    e = e / (np.linalg.norm(e) + 1e-9)
+    r = max(existing, key=lambda x: x["count"] or 1)   # mirror reinforce: the strongest row
+    cnt = r["count"] or 1
+    if cnt <= 1:            # don't wipe the last remaining sample — leave it as-is
+        return False
+    cen = np.frombuffer(r["centroid"], dtype=np.float32).astype(np.float64) * cnt - e
+    new_cnt = cnt - 1
+    cen = cen / (np.linalg.norm(cen) + 1e-9)
+    store.update_speaker_centroid(r["id"], cen.astype(np.float32).tobytes(), new_cnt)
+    return True
+
+
 def _is_default_title(t):
     """A title the user hasn't meaningfully set -> safe to auto-replace on summary."""
     t = (t or "").strip()
@@ -1757,11 +2087,51 @@ def _auto_title(summary_text, backend):
         return None
 
 
-def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
+_PAUSED_TEXT = "⏸ 錄音中，暫停辨識…"
+# A batch window this quiet, with the VAD also finding nothing, is the silence
+# padding on disk rather than audio — skip it instead of asking the model to
+# transcribe it. LIVE_HPF=0 turns the high-pass off for both live and batch.
+_SILENT_RMS = 30
+_HPF_ON = os.environ.get("LIVE_HPF", "1") != "0"
+
+
+def wait_while_live(live_busy, jobs=None, mid=None, poll_s=1.0):
+    """Live-first scheduling: block while a recording is in progress.
+
+    Batch and live recognition drive the SAME Neural Engine from two unrelated
+    processes — backends.ane_speech_backend spawns its own `speech
+    transcribe-batch` per call while ane_live_backend keeps a persistent helper,
+    and nothing arbitrates between them. A re-transcribe running during a meeting
+    therefore steals ANE from the live captions (the RTF blowups in the log).
+    Live wins; the batch job resumes when the recording ends.
+
+    Cooperative by design — only called at points where all prior work is already
+    durable in the store, so pausing never loses any. Returns True if it waited."""
+    if live_busy is None or not live_busy():
+        return False
+    while live_busy():
+        j = jobs.get(mid) if jobs is not None and mid is not None else None
+        if j is not None and j.get("state") == "running":
+            j["text"] = _PAUSED_TEXT
+        time.sleep(poll_s)
+    return True
+
+
+def iter_transcribe(store, mid, backend, window_s=29, sample_rate=16000,
+                    live_busy=None):
     """Generator: re-transcribe a meeting window-by-window, yielding progress
     events ({type:start,total} / {type:progress,done,total,text} / {type:done,n})
     and storing each result as it lands. Windowing gives granular progress even
-    for a single long file; each window's text streams to the client live."""
+    for a single long file; each window's text streams to the client live.
+
+    window_s is 29, not 30, to match the CoreML encoder's fixed 30s shape: a 30s
+    window made the ANE backend re-slice into 29s + a 1s orphan clip that was then
+    decoded as its own utterance — a hallucination source once per window.
+
+    Each window gets the SAME treatment live gives its audio: high-pass filtered,
+    skipped outright when the VAD finds no real speech, and text dropped when it is
+    too long for the speech present. Without those, the batch path transcribed the
+    wall-clock silence padding on disk and invented sentences for it."""
     base = store.get_meeting(mid)["created_at"]
     win_bytes = int(window_s * sample_rate) * 2
     units = []  # (track, pcm_path, base_off_ms, byte_start, byte_len)
@@ -1799,20 +2169,59 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
             _clean[path] = backends.denoise_file(path, raw_pcm=True)
         return _clean[path]
 
+    import live  # noqa: PLC0415  (module-top would pull MLX into every import of app)
+    # One high-pass per source file, carried across that file's windows, so the
+    # filter state is continuous exactly like live's per-track instance.
+    _hpf = {}
+
+    def _batch_hpf(path, raw):
+        if not _HPF_ON:
+            return raw
+        f = _hpf.get(path)
+        if f is None:
+            try:
+                f = live.HighPass()
+            except Exception:  # noqa: BLE001  scipy missing -> unfiltered, as before
+                f = False
+            _hpf[path] = f
+        return f(raw) if f else raw
+
     try:
       for i, (track, p, seg_off, bs, bl) in enumerate(units):
+        # Yield the ANE to a live recording between windows: every earlier window
+        # is already stored, and the window temp below isn't written yet, so this
+        # is the one clean checkpoint. Worst-case overlap is the window in flight.
+        if live_busy is not None and live_busy():
+            yield {"type": "paused", "done": i, "total": len(units)}
+            wait_while_live(live_busy)
+            yield {"type": "resumed", "done": i, "total": len(units)}
         win_off_ms = seg_off + int(bs / 2 / sample_rate * 1000)
         win_dur_ms = int(bl / 2 / sample_rate * 1000)   # so untimed backends spread within the window
         tmp = f"{os.path.dirname(p)}/_win.pcm"
         with open(_src(p), "rb") as f:
             f.seek(bs)
-            with open(tmp, "wb") as w:
-                w.write(f.read(bl))
+            raw = f.read(bl)
+        raw = _batch_hpf(p, raw)       # same de-rumble live applies to its ASR input
+        speech_s = live.speech_seconds(raw)
+        if speech_s <= 0 and live._rms(raw) < _SILENT_RMS:
+            # Digital silence — the wall-clock padding WallClockPump writes to disk,
+            # which on an idle 對方 track is most of the file. Live never sends this
+            # to the model; the batch path did, and got invented sentences back.
+            # Deliberately conservative (VAD says nothing AND the window is近乎無聲):
+            # dropping a whole 29s window on a VAD misfire would lose real speech,
+            # which is worse than a hallucination. Everything else is caught
+            # per-utterance by is_overlong_for_speech below.
+            yield {"type": "progress", "done": i + 1, "total": len(units), "text": ""}
+            continue
+        with open(tmp, "wb") as w:
+            w.write(raw)
         texts = []
         speaker = _TRACK_LABEL.get(track, track)  # mic->我, system->對方
         try:
             for t in asr.transcribe(tmp, profile="accurate", track=track,
                                     backend=backend, clip_ms=win_dur_ms):
+                if live.is_overlong_for_speech(t["text"], speech_s):
+                    continue  # more words than the speech present can hold
                 store.add_transcript(mid, "accurate", track,
                                      t["start_ms"] + win_off_ms,
                                      t["end_ms"] + win_off_ms, speaker, t["text"])
@@ -1834,20 +2243,34 @@ def iter_transcribe(store, mid, backend, window_s=30, sample_rate=16000):
                 pass
 
 
-def _run_transcribe_job(store, mid, backend, jobs):
+def _run_transcribe_job(store, mid, backend, jobs, live_busy=None, name_spans=None):
     """Run iter_transcribe to completion, recording progress in jobs[mid] so a
     page can poll it (survives client refresh). Transcripts are stored as they
     land, so even a server restart keeps partial work."""
     jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": ""}
     try:
-        for ev in iter_transcribe(store, mid, backend):
+        n_tx, total = 0, 0
+        for ev in iter_transcribe(store, mid, backend, live_busy=live_busy):
             if ev["type"] == "start":
-                jobs[mid]["total"] = ev["total"]
+                jobs[mid]["total"] = total = ev["total"]
             elif ev["type"] == "progress":
                 jobs[mid].update(done=ev["done"], total=ev["total"], text=ev["text"])
+            elif ev["type"] == "paused":  # live recording started — yielding the ANE
+                jobs[mid].update(done=ev["done"], total=ev["total"], text=_PAUSED_TEXT)
+            elif ev["type"] == "resumed":
+                jobs[mid].update(done=ev["done"], total=ev["total"], text="繼續辨識…")
             elif ev["type"] == "done":
-                jobs[mid] = {"state": "done", "done": ev["transcripts"],
-                             "total": jobs[mid].get("total", 0)}
+                n_tx = ev["transcripts"]
+        # Speaker-aware line breaking: diarize after transcription so a different
+        # person speaking starts a new line (batch _sentence_split alone only cuts
+        # on punctuation — unlike live's per-turn lines). Same pass the upload uses.
+        _diarize_meeting(store, mid, jobs)
+        # Put back the names live had already recognized, for any line the
+        # post-meeting pass left on a bare side label.
+        if name_spans:
+            jobs[mid].update(text="套回已辨識的說話者…")
+            apply_name_spans(store, mid, name_spans)
+        jobs[mid] = {"state": "done", "done": n_tx, "total": total}
     except Exception as e:
         jobs[mid] = {"state": "error", "msg": str(e)}
 
@@ -1921,7 +2344,8 @@ def _run_diarize_job(store, mid, body, jobs):
         jobs[mid] = {"state": "error", "msg": str(e)}
 
 
-def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs):
+def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs,
+                     live_busy=None):
     """Background summary generation (the LLM call is seconds-to-minutes). No
     token-stream progress, so it's indeterminate — jobs[mid] stays running with
     no total until done, then carries the text/title so the page renders inline
@@ -1932,6 +2356,10 @@ def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs):
         if meeting is None:
             jobs[mid] = {"state": "error", "msg": "meeting not found"}
             return
+        # Pre-call gate only: summarize() is one blocking LLM call with no
+        # checkpoint, so it can't yield once started — wait it out up front.
+        if wait_while_live(live_busy, jobs, mid):
+            jobs[mid]["text"] = "產生摘要中…"
         text = _summary_input(store, mid, meeting, summary_backend)
         out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend,
                         notes=(meeting["notes"] or ""))
@@ -1945,17 +2373,36 @@ def _run_summary_job(store, mid, kind, summary_backend, summary_model, jobs):
         jobs[mid] = {"state": "done", "text": out, "kind": kind, "title": title}
     except Exception as e:
         jobs[mid] = {"state": "error", "msg": str(e)}
+    finally:
+        _release_llm(summary_backend)
+
+
+def _release_llm(summary_backend):
+    """Drop the summary LLM's weights once the job is over. The 7B-4bit summarizer
+    peaks around 5.5GB — leaving it resident for the process lifetime on a 16GB
+    machine is what drove the original OOM that demoted the summary model to 3B.
+    Freeing between jobs costs one reload (~10s, weights come back from page
+    cache) and only on the next summary, which is minutes-to-days later."""
+    release = getattr(summary_backend, "release", None)
+    if release:
+        release()
 
 
 def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
-                    summary_model, kind, title, jobs):
+                    summary_model, kind, title, jobs, live_busy=None):
     """Background upload pipeline (mirrors run_pipeline, off the request thread):
     transcribe the uploaded file -> summarize -> auto-title -> finalize, writing
     coarse progress into jobs[mid] (same shape the detail page already polls, so
     refresh resumes). Transcribes the original file directly (mlx-whisper loads
     m4a/wav/mp3) so it does NOT depend on the best-effort ffmpeg PCM decode."""
+    # Three visible phases (the page polls jobs[mid] throughout — never set
+    # state=done until the very end, or it reloads mid-pipeline):
+    #   1. 辨識 (accurate backend, NOT ANE) 2. 聲紋分群 3. 摘要
     jobs[mid] = {"state": "running", "done": 0, "total": 0, "text": "辨識中…"}
     try:
+        # Whole-file phases, no per-window checkpoint — gate before each one.
+        if wait_while_live(live_busy, jobs, mid):
+            jobs[mid]["text"] = "辨識中…"
         tx_path = audio_path  # denoise the ASR input only; playback uses the original
         if store.get_setting("denoise", "0") == "1" and _ane_available():
             jobs[mid]["text"] = "降噪中…"
@@ -1965,11 +2412,22 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
         for s in segs:
             store.add_transcript(mid, s["profile"], s["track"], s["start_ms"],
                                  s["end_ms"], s["track"], s["text"])
-        jobs[mid].update(done=len(segs), total=len(segs), text="產生摘要中…")
+        jobs[mid].update(done=len(segs), total=len(segs), text="辨識完成，準備聲紋分群…")
+
+        # Save playback pcm + segment NOW (not at the end) so diarization has audio.
+        _save_upload_pcm(audio_path, mid, store)
+        # Phase 2: voiceprint diarization — split speakers + recognize known voices
+        # across meetings, so the transcript (and thus the summary) carries names.
+        _diarize_meeting(store, mid, jobs, tracks=["mic"])  # upload is a single mic track
+
         meeting = store.get_meeting(mid)
         if meeting is None:  # deleted mid-job (race with DELETE /meetings/{mid})
             jobs[mid] = {"state": "error", "msg": "meeting was deleted"}
             return
+        # Phase 3: summary — _summary_input already folds in speaker labels + the
+        # voiceprint roster, so recognized speakers flow into the meeting record.
+        wait_while_live(live_busy, jobs, mid)
+        jobs[mid].update(text="產生摘要中…")
         text = _summary_input(store, mid, meeting, summary_backend)
         out = summarize(text, kind=kind, lang=meeting["lang"], backend=summary_backend,
                         notes=(meeting["notes"] or ""))
@@ -1978,11 +2436,131 @@ def _run_upload_job(store, mid, audio_path, asr_backend, summary_backend,
             nt = _auto_title(out, summary_backend)
             if nt:
                 store.update_title(mid, nt)
-        _save_upload_pcm(audio_path, mid, store)  # best-effort, for playback only
         store.finalize_meeting(mid)
         jobs[mid] = {"state": "done", "done": len(segs), "total": len(segs)}
     except Exception as e:
         jobs[mid] = {"state": "error", "msg": str(e)}
+    finally:
+        _release_llm(summary_backend)
+
+
+_SIDE_LABELS = {"我", "對方", "混合"}
+
+
+def _real_speaker_name(speaker):
+    """The speaker string if it identifies a PERSON, else None. Side labels (我/
+    對方/混合) and auto cluster labels (說話者3, 對方2) name a channel or a
+    session-local cluster, not someone we recognized."""
+    import live_session  # noqa: PLC0415
+    s = (speaker or "").strip()
+    if not s or s in _SIDE_LABELS or live_session._PLACEHOLDER.match(s):
+        return None
+    return s
+
+
+def live_name_spans(store, mid):
+    """Snapshot the (start, end, track, name) of every LIVE row that carries a
+    recognized person's name. Re-transcribe wipes the transcript, and live's
+    labelling is the better of the two — it embeds one VAD-trimmed utterance of a
+    single track at a 0.55 match bar, where the post-meeting pass embeds a 12s
+    aggregate at 0.62 — so the names are captured here and re-applied afterwards
+    instead of being thrown away."""
+    return [(r["start_ms"], r["end_ms"] if r["end_ms"] is not None else r["start_ms"],
+             r["track"], nm)
+            for r in store.list_transcripts(mid)
+            if r["profile"] == "live" and (nm := _real_speaker_name(r["speaker"]))]
+
+
+def apply_name_spans(store, mid, spans):
+    """Re-apply carried-over live names to the rebuilt transcript by time overlap,
+    per track. Only fills rows that don't already have a real name, so a
+    post-meeting pass that DID recognize someone keeps its answer."""
+    if not spans:
+        return 0
+    n = 0
+    for r in store.list_transcripts(mid):
+        if _real_speaker_name(r["speaker"]):
+            continue
+        end = r["end_ms"] if r["end_ms"] is not None else r["start_ms"]
+        best, best_ov = None, 0
+        for s, e, trk, nm in spans:
+            if trk != r["track"]:
+                continue
+            ov = min(e, end) - max(s, r["start_ms"])
+            if ov > best_ov:
+                best, best_ov = nm, ov
+        if best:
+            store.update_speaker(r["id"], best)
+            n += 1
+    return n
+
+
+def _diarize_meeting(store, mid, jobs, tracks=None):
+    """Diarize a meeting in place so the transcript breaks at speaker turns (like
+    live) instead of only at punctuation: for each track, split speakers, recognize
+    cross-meeting voiceprints, and write names + per-speaker line splits onto the
+    transcript. Runs after batch transcription (upload + re-transcribe) so a
+    different person speaking always starts a new line. Updates jobs[mid]['text']
+    for visible progress but never sets state=done (the caller owns terminal state).
+    Best-effort: a diarize failure leaves the plain transcript intact."""
+    import diarize as diar  # noqa: PLC0415
+    if tracks is None:
+        # Use the tracks the TRANSCRIPT actually carries. _meeting_tracks collapses
+        # mic+system into a synthetic "mixed" that no row is ever tagged with, so
+        # the `r["track"] == track` filter below matched nothing and the whole pass
+        # silently relabelled zero rows after burning minutes of CPU — the reason
+        # re-transcribe came back with only 我/對方. Per-track is also the better
+        # input: "mixed" sums both sides onto one channel, which is the worst case
+        # for embeddings. Live diarizes each track independently for the same reason.
+        tracks = sorted({r["track"] for r in store.list_transcripts(mid)})
+        if not tracks:
+            tracks = _meeting_tracks(store, mid)
+    enroll = store.get_setting("persist_speakers", "1") == "1"
+    for ti, track in enumerate(tracks):
+        pcm = _assemble_track(store, mid, track)
+        if pcm is None:
+            continue
+        os.makedirs(f"data/{mid}", exist_ok=True)
+        tmp = f"data/{mid}/_diar_{track}.pcm"
+        with open(tmp, "wb") as f:
+            f.write(pcm)
+        label = _TRACK_LABEL.get(track, track)
+        pre = f"[{ti + 1}/{len(tracks)}] " if len(tracks) > 1 else ""
+        try:
+            jobs[mid].update(done=0, total=0, text=f"{pre}{label} 聲紋分群中…")
+
+            def on_prog(done, total, _p=pre, _l=label):
+                jobs[mid].update(done=done, total=total, text=f"{_p}{_l} 聲紋分群中…")
+
+            segments, embs = diar.diarize_with_progress(
+                tmp, num_speakers=-1, enroll=enroll, on_progress=on_prog,
+                on_phase=lambda ph, _p=pre, _l=label: jobs[mid].update(text=f"{_p}{_l} 建立聲紋…"))
+            # Fold clusters too thin to be evidence of a person into whoever they
+            # sound like, BEFORE naming — an embedding built from ~2s of backchannel
+            # can't clear the naming bar against anyone, so each such cluster used to
+            # survive as its own 對方N (a real 8-person meeting came back with 24).
+            segments, embs, thin = diar.merge_tiny_clusters(segments, embs)
+            names = _persistent_names(store, embs, label) if embs else None
+            rows = [dict(r) for r in store.list_transcripts(mid) if r["track"] == track]
+            assigned = diar.assign_speakers(rows, segments, prefix=label,
+                                            names=names, split=True,
+                                            unnumbered=thin["weak"])
+            splits = {}
+            for r in assigned:
+                if r.get("split"):
+                    splits.setdefault(r["src_id"], []).append(r)
+                else:
+                    store.update_speaker(r["id"], r["speaker"])
+            for src_id, pieces in splits.items():  # 1 multi-speaker line -> N lines
+                store.delete_transcript(src_id)
+                for p in pieces:
+                    store.add_transcript(mid, p["profile"], p["track"], p["start_ms"],
+                                         p["end_ms"], p["speaker"], p["text"])
+        except Exception as e:
+            print(f"diarize failed (mid={mid}, track={track}): {e}", file=sys.stderr)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
 
 def _save_upload_pcm(src_path, mid, store):
@@ -2019,7 +2597,7 @@ _TRACK_LABEL = {"system": "對方", "mic": "我", "mixed": "混合"}
 
 
 def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
-                 recognized=(), ane_on=False):
+                 recognized=(), ane_on=False, remote_enabled=False):
     try:
         m_notes = meeting["notes"] or ""
     except (KeyError, IndexError):  # older row / test stub without the column
@@ -2029,7 +2607,8 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         s = (ms or 0) // 1000
         return f"{s // 60:d}:{s % 60:02d}"
     rows = "".join(
-        f"<tr data-track='{html.escape(str(r['track']))}' data-ts='{(r['start_ms'] or 0)/1000:.2f}'>"
+        f"<tr data-track='{html.escape(str(r['track']))}' data-ts='{(r['start_ms'] or 0)/1000:.2f}'"
+        f" data-id='{r.get('id', '')}'>"
         f"<td class=ts>{ts_str(r['start_ms'])}</td>"
         f"<td class=who data-spk='{html.escape(str(r.get('speaker_raw', r['speaker'])))}' "
         f"title='點擊改名'>{html.escape(str(r['speaker']))}</td>"
@@ -2048,6 +2627,11 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
                   "<p class=hint style='margin:.5em 0 0'>點逐字稿任一行可跳到該段落播放。"
                   "捲動時播放器固定在頂部。</p></div>") if audio_tracks else ""
     badge = "done" if meeting["status"] == "finalized" else "live"
+    remote_btn = ""
+    if remote_enabled:
+        remote_btn = (f"<button class=btn id=rpush onclick=\"fetch('/remote/push/{mid}',{{method:'POST'}})"
+                      f".then(r=>r.json()).then(j=>alert(j.ok?'已上傳到 server':('上傳失敗：'+(j.reason||j.detail||('HTTP '+(j.status||'?'))))))"
+                      f".catch(()=>alert('上傳失敗（連線錯誤）'))\">上傳到 server</button>")
     body = (
         f"<h1><span id=mtitle>{html.escape(meeting['title'])}</span> "
         f"<button class=btn id=edittitle title='改標題' style='padding:.25em .5em;font-size:13px'>✏️</button> "
@@ -2070,6 +2654,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<details class=menu><summary class=btn>⋯ 更多</summary><div class=menupop>"
         "<button class=btn id=dia>多人分群</button>"
         f"<a class=btn href='/meetings/{mid}/export'>匯出 Markdown</a>"
+        f"{remote_btn}"
         "<button class=btn id=cpsum>複製摘要</button>"
         "<button class=btn id=cptx>複製逐字稿</button>"
         "<button class=btn id=fin>完成會議</button>"
@@ -2084,8 +2669,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<div class=row style='margin-bottom:10px'>"
         "<select id=remodel>"
         + ("<optgroup label='🧠 NPU · ANE 省電'>"
-           "<option value='ane-qwen3-0.6b'>Qwen3-ASR 0.6B(省電·M系列)</option>"
-           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B(混合·快)</option>"
+           "<option value='ane-qwen3-0.6b-hybrid'>Qwen3-ASR 0.6B(省電·快)</option>"
            "</optgroup>" if ane_on else "") +
         "<optgroup label='⚡ MLX · Metal/GPU'>"
         "<option value='mlx-community/whisper-large-v3-turbo-q4'>whisper turbo-q4(準·省)</option>"
@@ -2103,6 +2687,10 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<optgroup label='🐢 transformers · 慢'>"
         "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B</option>"
         "<option value='Qwen/Qwen3-ASR-1.7B'>Qwen3-ASR 1.7B(很慢)</option>"
+        "</optgroup>"
+        "<optgroup label='☁️ Groq API · 遠端'>"
+        "<option value='groq-whisper-large-v3-turbo'>Groq whisper turbo(快·遠端)</option>"
+        "<option value='groq-whisper-large-v3'>Groq whisper large-v3(最準·遠端)</option>"
         "</optgroup>"
         "</select>"
         "<select id=relang>"
@@ -2216,18 +2804,30 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         # disp = the friendly collapsed label shown/edited (對方/我/混合 or a
         # promoted name) — they differ for un-promoted live cluster labels.
         "const raw=td.dataset.spk;const disp=td.textContent;let cancelled=false;"
+        "const tr=td.closest('tr');"
         "const inp=document.createElement('input');inp.value=disp;inp.setAttribute('list','spkdl');"
         "inp.autocomplete='off';inp.style.cssText='font:inherit;width:7em';"
-        "td.textContent='';td.appendChild(inp);inp.focus();inp.select();"
+        # 只改此行 = 抽離：把辨識錯的單行改成正確的人，其他行不動。mousedown
+        # preventDefault 讓勾選時輸入框不失焦(不會提前送出)。
+        "const lab=document.createElement('label');lab.style.cssText='font-size:11px;color:#888;display:block;margin-top:2px;cursor:pointer';"
+        "const cb=document.createElement('input');cb.type='checkbox';cb.style.marginRight='3px';"
+        "cb.addEventListener('mousedown',ev=>ev.preventDefault());"
+        "lab.appendChild(cb);lab.appendChild(document.createTextNode('只改此行(抽離)'));"
+        "td.textContent='';td.appendChild(inp);td.appendChild(lab);inp.focus();inp.select();"
         "const commit=async()=>{const nw=inp.value.trim();"
         "if(cancelled||!nw||nw===disp){td.textContent=disp;return;}"
+        "const trk=tr.dataset.track;let r;"
+        "if(cb.checked){"   # 抽離單行：只改這一列
+        f"r=await fetch(`/meetings/{mid}/transcript/${{tr.dataset.id}}/speaker`,{{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:nw,track:trk})});"
+        "}else{"
         # nw is an existing person -> this rename MERGES the two and can't be
         # split back. Confirm before the fat-finger commits (server also snapshots).
         "if(window._spk&&window._spk.has(nw)){"
         "if(!confirm('「'+nw+'」已經是另一位人員。改名會把目前這位合併進「'+nw+'」，之後無法再分離。確定要合併？')){td.textContent=disp;return;}}"
-        "const trk=td.closest('tr').dataset.track;"
-        f"const r=await fetch('/meetings/{mid}/speaker',{{method:'POST',"
+        f"r=await fetch('/meetings/{mid}/speaker',{{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify({old:raw,new:nw,track:trk})});"
+        "}"
         "if(r.ok)location.reload();else td.textContent=disp;};"
         "inp.onkeydown=(ev)=>{if(ev.key==='Enter')inp.blur();"
         "else if(ev.key==='Escape'){cancelled=true;inp.blur();}};inp.onblur=commit;};});"
@@ -2297,8 +2897,17 @@ def create_app(store, *, summary_backend, asr_backend=None,
     # Idle auto-release: free loaded models after N seconds with no activity and no
     # live connection. Loaded weights lazy-reload on next use.
     idle = {"last": time.time(), "live": 0}
+    # Live-first scheduling (see wait_while_live): batch jobs run on plain threads
+    # and can't see this closure, so they take the predicate as an argument.
+    # Counts BOTH sources — /ws/live and the floatpanel's /ws/native-capture.
+    def live_busy():
+        return idle["live"] > 0
     live_active = {}  # mid -> open live connections; surfaced in /jobs (global popout)
     live_stop = set()  # mids the float control panel asked to stop (server-side)
+    live_paused = set()  # mids paused via /live/pause — the pump drops audio while
+    # a mid is in here (WallClockPump(paused=...)). Server-side like live_stop, so
+    # it works for BOTH the browser socket and the floatpanel relay, which has no
+    # control channel of its own.
     native_sessions = {}  # mid -> {"proc": None, "task": asyncio.Task, "notice": str|None}
     # for a /ws/native-capture (floatpanel relay) session — task kept alive here (else GC'd)
     _panel = {"p": None, "show_seq": 0}  # subprocess (singleton) + show-request counter
@@ -2419,6 +3028,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         return {"recording": bool(mids), "mid": mid, "count": len(mids),
                 "title": title, "caption": caption, "captions": captions, "notice": notice,
                 "started_at": started_at, "show_seq": _panel["show_seq"],
+                "paused": mid is not None and mid in live_paused,
                 "rev": _live_rev.get(mid, 0)}
 
     @app.get("/native/capability")
@@ -2485,10 +3095,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
             mid = store.create_meeting(title, t0, "zh-TW")
             conn_offset_ms = 0
         await ws.send_json({"type": "meeting", "id": mid})
-        audio_dir = f"data/{mid}-{int(t0)}"
-        os.makedirs(audio_dir, exist_ok=True)
-        store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
-                          started_at=t0, duration_s=0, origin="recorded")
+        # Session mode (see _SETTINGS['live_mode']). The floatpanel sends no mode
+        # of its own, so it inherits the saved setting — same trick live_language
+        # uses to reach the panel without a Swift change.
+        mode = ws.query_params.get("mode") or store.get_setting("live_mode", "both")
         if source == "mic":
             tracks = {recorder.TRACK_MIC: ("mic", "我")}
         elif source == "system":
@@ -2496,8 +3106,18 @@ def create_app(store, *, summary_backend, asr_backend=None,
         else:
             tracks = {recorder.TRACK_MIC: ("mic", "我"),
                       recorder.TRACK_SYSTEM: ("system", "對方")}
-        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb") for tag, lbl in tracks.items()}
-        live_manager.set_language(None)
+        if mode == "transcribe":
+            # 純字幕: no recording kept. Skip the segment row too — an empty audio
+            # dir is otherwise indistinguishable from a recording that failed.
+            audio_files = {tag: live_session.NullSink() for tag in tracks}
+        else:
+            audio_dir = f"data/{mid}-{int(t0)}"
+            os.makedirs(audio_dir, exist_ok=True)
+            store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
+                              started_at=t0, duration_s=0, origin="recorded")
+            audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
+                           for tag, lbl in tracks.items()}
+        live_manager.set_language(store.get_setting("live_language", "") or None)
         sessions = live_session.build_track_sessions(
             tracks, live_manager=live_manager, live_interim_backend=live_interim_backend,
             silence_ms=live_silence_ms, min_speech_ms=live_min_speech_ms,
@@ -2506,10 +3126,23 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if diarize:
             def _bump_rev(_old, _new, _track=None, _mid=mid):
                 _live_rev[_mid] = _live_rev.get(_mid, 0) + 1
-            live_session.enable_diarization(sessions, tracks, store, mid=mid,
-                                            on_rename=_bump_rev)
+            # Background the diarization model load (~3.6s CoreML cold on first
+            # session) so it does NOT block the start handshake / the disk-writer
+            # below — recording begins immediately. speaker_fn attaches when ready;
+            # utterances finalized before then fall back to the side label (same as
+            # diar-off, relabeled by the post-meeting pass). Also keeps the sync
+            # load off the event loop.
+            async def _init_diar():
+                try:
+                    await run_in_threadpool(live_session.enable_diarization,
+                                            sessions, tracks, store, mid, _bump_rev)
+                except Exception as e:  # noqa: BLE001
+                    print(f"live diar init failed (continuing): {e}", file=sys.stderr)
+            asyncio.create_task(_init_diar())
 
-        pump = live_session.WallClockPump(tracks, audio_files, t0)
+        live_paused.discard(mid)  # a resumed meeting must not inherit a stale pause
+        pump = live_session.WallClockPump(tracks, audio_files, t0,
+                                          paused=lambda: mid in live_paused)
         idle["live"] += 1
         live_active[mid] = 1
         native_sessions[mid] = {"proc": None, "task": None, "notice": None}
@@ -2558,7 +3191,20 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # flush/cleanup ran inline here its `await`s would be cancelled mid-way and
         # live_active would never clear. Detached, it survives the disconnect and
         # finalizes cleanly; the handler only relays frames + signals stop.
-        _push_inflight = {"n": 0}
+        # Ordered, non-blocking push: ONE drain task owns the socket, so events
+        # arrive in the order they were produced. The old fire-and-forget
+        # create_task-per-event let an interim scheduled before a final land AFTER
+        # it (each send suspends independently) — the tentative line reappeared
+        # with stale words under the committed one.
+        _push_q = asyncio.Queue(maxsize=32)
+
+        async def _push_drain():
+            while True:
+                payload = await _push_q.get()
+                try:
+                    await ws.send_json(payload)
+                except Exception:  # noqa: BLE001  socket gone — keep draining
+                    pass
 
         async def _push(payload):
             # Stream interim/final to the floatpanel for a live caption. MUST NOT
@@ -2566,41 +3212,38 @@ def create_app(store, *, summary_backend, asr_backend=None,
             # ALL transcription whenever the socket is slow/half-open (backpressure)
             # — the "captions stop mid-recording, then a big batch dumps at once"
             # bug (consume wedged on the send while audio piles in the pump). So
-            # fire-and-forget: schedule the send and return immediately. Bounded so
-            # a truly wedged socket can't pile tasks forever — drop when saturated
-            # (finals are still persisted; the panel's transcript poll backfills).
-            if _push_inflight["n"] > 32:
-                return
-            _push_inflight["n"] += 1
-
-            async def _send():
-                try:
-                    await ws.send_json(payload)
-                except Exception:  # noqa: BLE001
-                    pass
-                finally:
-                    _push_inflight["n"] -= 1
-
-            asyncio.create_task(_send())
+            # enqueue and return immediately. Bounded so a truly wedged socket
+            # can't pile events forever — drop when saturated (finals are still
+            # persisted; the panel's transcript poll backfills).
+            try:
+                _push_q.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass
 
         async def _run():
+            drain = asyncio.create_task(_push_drain())
             try:
                 await live_session.consume(
-                    pump, sessions, tracks, rec_on=lambda: False,
+                    pump, sessions, tracks, rec_on=lambda: mode == "record",
                     emit=live_session.make_store_emit(mid, conn_offset_ms, store,
                                                       push=_push),
                     should_stop=_should_stop,
                     interim_lag_bytes=int(2 * live_interim_s * 16000) * 2,
                     pop_notice=_pop_notice)
             finally:
-                pump.pad_to(time.time())
-                await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
-                for f in audio_files.values():
-                    f.close()
+                drain.cancel()
+                pump.pad_to(time.time())  # writes remaining silence to disk (before close)
+                # Clear the recording state FIRST so /live/state (the panel's dot)
+                # flips to idle immediately; persist the trailing utterance after —
+                # a slow final ASR no longer holds the UI in "recording".
                 idle["live"] = max(0, idle["live"] - 1)
                 live_active.pop(mid, None)
                 native_sessions.pop(mid, None)
+                live_paused.discard(mid)
                 _touch()
+                for f in audio_files.values():
+                    f.close()
+                await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
 
         native_sessions[mid]["task"] = asyncio.create_task(_run())
         try:
@@ -2678,6 +3321,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
             n += 1
         return {"stopping": n}
 
+    @app.post("/live/pause")
+    def live_pause(on: bool = True):
+        # Pause/resume every active live session WITHOUT ending it: the pump drops
+        # incoming audio while paused and slides its clock forward on resume, so
+        # the paused span is simply absent from the recording rather than saved as
+        # silence. Server-side (like /live/stop) so it covers the floatpanel relay
+        # too. The meeting, the ASR sessions and the open files all stay put.
+        n = 0
+        for m in list(live_active):
+            live_paused.add(m) if on else live_paused.discard(m)
+            n += 1
+        return {"paused": on, "sessions": n}
+
     @app.post("/floatpanel/open")
     def floatpanel_open():
         # Show the native floating panel. Two cases, both handled: (1) not
@@ -2699,12 +3355,16 @@ def create_app(store, *, summary_backend, asr_backend=None,
             import subprocess
             import time as _t
             _t.sleep(0.3)  # let the HTTP response flush first
-            # SIGKILL the supervisor FIRST so it can't restart the server mid-teardown.
-            for pat in ("supervise.sh", "meeting_watch.py", "bootstrap.py"):
-                subprocess.run(["pkill", "-9", "-f", pat], capture_output=True)
-            port = os.environ.get("MEETING_PORT", "8765")
-            subprocess.run(f"lsof -ti tcp:{port} | xargs kill -9", shell=True,
-                           capture_output=True)  # frees port (kills any server incl self)
+            # Delegate to ms_stop_all (lifecycle.sh) — the ONE kill list, shared
+            # with stop.sh and restart.sh. The hand-rolled copy here killed the
+            # supervisor, watcher and bootstrap but not the floatpanel, so the
+            # panel saw the backend die and relaunched the whole tree ~7.5s later:
+            # "quit" never actually quit. ms_stop_all kills the panel first and
+            # drops a quit sentinel the panel checks before any relaunch.
+            here = os.path.dirname(os.path.abspath(__file__))
+            subprocess.run(["/bin/bash", "-c",
+                            f'source "{here}/lifecycle.sh" && ms_stop_all'],
+                           capture_output=True)
             os._exit(0)
         import threading as _th
         _th.Thread(target=_kill, daemon=True).start()
@@ -2729,7 +3389,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.get("/live", response_class=HTMLResponse)
     def live_page():
         # Live ANE (省電): show only on Apple Silicon with the prebuilt helper + the
-        # toggle on. Selecting it -> /models -> make_live_backend('ane-live') -> the
+        # toggle on. Selecting it -> /models -> make_backend('ane-live') -> the
         # persistent Neural-Engine helper (off the GPU).
         import backends as _b
         if (_apple_silicon() and _b.ane_helper_bin() is not None
@@ -2755,9 +3415,12 @@ def create_app(store, *, summary_backend, asr_backend=None,
         known = {s["name"]: s for s in store.speakers_with_stats()}
         recognized = sorted(n for n in here if known.get(n, {}).get("meetings", 0) > 1)
         ane_on = _ane_available() and store.get_setting("ane", "0") == "1"
+        remote_enabled = (globals().get("REMOTE_PLUGIN")
+                          and store.get_setting("remote_store", "0") == "1")
         return _detail_page(mid, dict(meeting), transcripts,
                             _rows(store.list_summaries(mid)), audio_tracks,
-                            tags=store.tags_for(mid), recognized=recognized, ane_on=ane_on)
+                            tags=store.tags_for(mid), recognized=recognized, ane_on=ane_on,
+                            remote_enabled=remote_enabled)
 
     @app.get("/meetings/{mid}/audio/{track}.wav")
     def meeting_audio(mid: int, track: str):
@@ -2780,7 +3443,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def set_models(body: ModelIn):
         if live_manager is None:
             raise HTTPException(503, "no live model manager")
-        live_manager.set_model(body.live)  # hot reload — no restart
+        try:
+            live_manager.set_model(body.live)  # hot reload — no restart
+        except Exception as e:
+            raise HTTPException(400, str(e))
         if on_model_change:
             on_model_change(body.live)
         if backends.route(body.live) == "ane":  # pre-warm the helper (~13s load) off-thread
@@ -3005,8 +3671,14 @@ def create_app(store, *, summary_backend, asr_backend=None,
         conn_offset_ms = max(0, int((t0 - store.get_meeting(mid)["created_at"]) * 1000))
         live_active[mid] = live_active.get(mid, 0) + 1  # show in the global popout
         await ws.send_json({"type": "meeting", "id": mid})
-        if store.get_setting("float_panel", "0") == "1":  # auto-open native panel
-            _open_panel()
+        # NOTE: deliberately does NOT auto-open the native panel, despite the
+        # float_panel setting. Spawning it from python makes macOS attribute the
+        # panel's Screen & System Audio Recording request to the PYTHON process,
+        # not to the panel's own signed identity — the grant then never applies and
+        # the Core Audio tap silently records digital silence. That is exactly the
+        # invariant _open_panel's own comment states ("python never launches the
+        # panel itself"), and this line was violating it. Open the panel from the
+        # app icon / the 🪟 button, both of which go through launchd.
 
         # Per-track. Dual = separate tagged streams (0=mic/我, 1=system/對方);
         # otherwise one track. Frame in dual mode = [1 byte tag] + PCM.
@@ -3020,7 +3692,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
         q = ws.query_params
         sil = max(200, min(3000, int(q.get("silence_ms") or live_silence_ms)))
         maxu = max(5.0, min(40.0, float(q.get("max_utt_s") or live_max_utt_s)))
-        live_manager.set_language(q.get("lang") or None)  # ""/absent -> auto-detect
+        # explicit ?lang wins; else the saved 辨識語系 default; else auto-detect
+        live_manager.set_language(
+            q.get("lang") or store.get_setting("live_language", "") or None)
 
         sessions = live_session.build_track_sessions(
             tracks, live_manager=live_manager, live_interim_backend=live_interim_backend,
@@ -3033,12 +3707,21 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # after merges, so a plain data/<mid> could collide with a leftover dir and
         # append onto stale audio. _assemble_track stitches segments by time offset,
         # so a resumed session's new dir is just another ordered segment.
-        audio_dir = f"data/{mid}-{int(t0)}"
-        os.makedirs(audio_dir, exist_ok=True)
-        store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
-                          started_at=t0, duration_s=0, origin="recorded")
-        audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
-                       for tag, lbl in tracks.items()}
+        # 純字幕 (mode=transcribe): keep no recording at all — null sinks instead of
+        # files, and no segment row (an empty audio dir would look like a failed
+        # recording). Everything else, including the wall-clock padding the
+        # timestamps depend on, is unchanged.
+        live_mode = (ws.query_params.get("mode")
+                     or store.get_setting("live_mode", "both"))
+        if live_mode == "transcribe":
+            audio_files = {tag: live_session.NullSink() for tag in tracks}
+        else:
+            audio_dir = f"data/{mid}-{int(t0)}"
+            os.makedirs(audio_dir, exist_ok=True)
+            store.add_segment(mid, idx=len(store.list_segments(mid)), dir_path=audio_dir,
+                              started_at=t0, duration_s=0, origin="recorded")
+            audio_files = {tag: open(f"{audio_dir}/{lbl[0]}.pcm", "wb")
+                           for tag, lbl in tracks.items()}
 
         # Live multi-speaker (?diarize=1): per-track online voiceprint clustering on
         # each finalized utterance, PLUS recognition of voices the user already named
@@ -3055,8 +3738,16 @@ def create_app(store, *, summary_backend, asr_backend=None,
             # splitter labels each piece itself (owns the labeler), so a
             # single-speaker utterance returns one piece = the normal case, and a
             # multi-speaker one is split per turn. No separate speaker_fn needed.
-            live_session.enable_diarization(sessions, tracks, store, mid=mid,
-                                            on_rename=_push_rename)
+            # Backgrounded (~3.6s CoreML cold load) so it neither blocks the start
+            # nor stalls the event loop; attaches when ready, side-label fallback
+            # until then.
+            async def _init_diar():
+                try:
+                    await run_in_threadpool(live_session.enable_diarization,
+                                            sessions, tracks, store, mid, _push_rename)
+                except Exception as e:  # noqa: BLE001
+                    print(f"live diar init failed (continuing): {e}", file=sys.stderr)
+            asyncio.create_task(_init_diar())
 
         async def _emit(ev, label):
             track, speaker = label
@@ -3085,12 +3776,15 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # lengths line up. Shared with the /ws/native-capture pipeline.
         # ponytail: no lag-drop — it broke the invariant; small-q4 keeps up. Add a
         # smarter back-pressure cap only if a slow model makes the buffer balloon.
-        pump = live_session.WallClockPump(tracks, audio_files, t0)
+        live_paused.discard(mid)  # a resumed meeting must not inherit a stale pause
+        pump = live_session.WallClockPump(tracks, audio_files, t0,
+                                          paused=lambda: mid in live_paused)
         closed = False
         # 純錄音 (record-only): capture + save PCM but run NO ASR — zero inference,
         # zero heat (for "電腦快炸" / quick capture). Re-transcribe later. Hot-
         # toggleable mid-recording via a {type:'mode'} control message.
-        rec = {"on": ws.query_params.get("record_only") == "1"}
+        rec = {"on": ws.query_params.get("record_only") == "1"
+               or live_mode == "record"}
         interim_lag_bytes = int(2 * live_interim_s * 16000) * 2
 
         async def receiver():
@@ -3150,15 +3844,18 @@ def create_app(store, *, summary_backend, asr_backend=None,
         finally:
             rtask.cancel()
             pump.pad_to(time.time())  # equalize track lengths to the final wall-clock
-            await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
-            for f in audio_files.values():
-                f.close()
+            # Clear recording state FIRST (dot -> idle immediately); persist the
+            # trailing utterance after, so a slow final ASR doesn't hold the UI.
             idle["live"] = max(0, idle["live"] - 1)
             if live_active.get(mid, 0) <= 1:
                 live_active.pop(mid, None)
+                live_paused.discard(mid)
             else:
                 live_active[mid] -= 1
             _touch()  # idle countdown starts when recording stops
+            for f in audio_files.values():
+                f.close()
+            await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
             # Stop != finalize — explicit only.
 
     @app.post("/meetings")
@@ -3240,7 +3937,49 @@ def create_app(store, *, summary_backend, asr_backend=None,
         # propagate to the global voiceprint so future meetings auto-use the new name
         # (no-op when old is a raw live cluster label — no such global speaker exists yet)
         store.rename_global_speaker(body.old, new)
-        return {"renamed": n, "merged": merged, "backup": backup}
+        # Assignment enrolls: naming a meeting-local placeholder (對方N) with a REAL
+        # name is what teaches the global 語者庫 — enroll its voiceprint now from this
+        # meeting's audio. (rename_global_speaker was a no-op above since no global row
+        # existed for the placeholder.) Best-effort; never blocks the rename.
+        enrolled = False
+        try:
+            import diarize as diar  # noqa: PLC0415
+            if new and diar._is_placeholder(body.old) and not diar._is_placeholder(new):
+                enrolled = _enroll_meeting_speaker(store, mid, body.track, new)
+        except Exception as e:
+            print(f"enroll on assign failed: {e}", file=sys.stderr)
+        return {"renamed": n, "merged": merged, "backup": backup, "enrolled": enrolled}
+
+    @app.post("/meetings/{mid}/transcript/{tid}/speaker")
+    def set_line_speaker(mid: int, tid: int, body: LineSpeakerIn):
+        # Reassign a SINGLE line's speaker — 抽離 a line the diarizer put under the
+        # wrong person (e.g. an "Imp" line that's actually "Angle"). Only this row
+        # changes; the rest of that speaker's lines stay put.
+        if store.get_meeting(mid) is None:
+            raise HTTPException(404, "meeting not found")
+        sp = body.speaker.strip()
+        if not sp:
+            raise HTTPException(400, "empty speaker")
+        # Capture the line's CURRENT speaker + span BEFORE the change so we can move
+        # (not just copy) its voiceprint contribution — see _unlearn_speaker_clip.
+        prev = store.transcript_row(mid, tid)
+        n = store.set_transcript_speaker(mid, tid, sp)
+        # A reassignment MOVES the audio's voiceprint contribution (unified with the
+        # whole-speaker rename semantics): enroll/reinforce the CORRECT person AND
+        # subtract this line from the mis-attributed one, so the wrong person stops
+        # being taught by audio that was never theirs. Both best-effort; a failure
+        # never blocks the relabel.
+        enrolled = False
+        try:
+            import diarize as diar  # noqa: PLC0415
+            if not diar._is_placeholder(sp):
+                enrolled = _enroll_meeting_speaker(store, mid, body.track, sp)
+            if prev is not None and (old := prev["speaker"]) and old != sp:
+                _unlearn_speaker_clip(store, mid, prev["track"] or body.track, old,
+                                      prev["start_ms"], prev["end_ms"])
+        except Exception as e:
+            print(f"enroll/unlearn on line-assign failed: {e}", file=sys.stderr)
+        return {"changed": n, "enrolled": enrolled}
 
     @app.delete("/meetings/{mid}")
     def delete_meeting(mid: int):
@@ -3277,7 +4016,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
         if (asr_backend is not None and _ane_available()
                 and store.get_setting("ane", "0") == "1"):
             import backends
-            return backends.make_batch_backend("ane-qwen3-0.6b")
+            return backends.make_backend("ane-qwen3-0.6b-hybrid")
         return asr_backend
 
     @app.post("/meetings/{mid}/transcribe")
@@ -3288,11 +4027,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
             raise HTTPException(404, "meeting not found")
         if body.model:
             import backends
-            backend = backends.make_batch_backend(body.model, body.language)
+            backend = backends.make_backend(
+                body.model, body.language, wait=(backends.route(body.model) == "groq"))
         else:
             backend = _default_asr()
         if backend is None:
             raise HTTPException(503, "no ASR backend configured")
+        spans = live_name_spans(store, mid)  # keep live's recognized speakers
         store.clear_transcripts(mid)  # full replace (incl live) -> one coherent set
         base = store.get_meeting(mid)["created_at"]
         n = 0
@@ -3309,6 +4050,7 @@ def create_app(store, *, summary_backend, asr_backend=None,
                                          t["start_ms"] + off_ms, t["end_ms"] + off_ms,
                                          speaker, t["text"])
                     n += 1
+        apply_name_spans(store, mid, spans)
         return {"transcripts": n}
 
     @app.post("/meetings/{mid}/transcribe/start")
@@ -3321,15 +4063,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
             return {"state": "running"}  # already in progress
         if body.model:
             import backends
-            backend = backends.make_batch_backend(body.model, body.language)
+            backend = backends.make_backend(
+                body.model, body.language, wait=(backends.route(body.model) == "groq"))
         else:
             backend = _default_asr()
         if backend is None:
             raise HTTPException(503, "no ASR backend configured")
+        # Grab the speakers live already recognized BEFORE wiping — they're the
+        # better labels and clear_transcripts would otherwise destroy them for good.
+        spans = live_name_spans(store, mid)
         store.clear_transcripts(mid)  # full replace (incl live) -> one coherent set
         import threading
         threading.Thread(target=_run_transcribe_job,
-                         args=(store, mid, backend, transcribe_jobs),
+                         args=(store, mid, backend, transcribe_jobs, live_busy, spans),
                          daemon=True).start()
         return {"state": "started"}
 
@@ -3359,10 +4105,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
         import threading
         transcribe_jobs[mid] = {"state": "running", "done": 0, "total": 0,
                                 "text": "辨識中…"}
+        # Uploads use the ACCURATE default backend, never the ANE/NPU one — the
+        # user found ANE accuracy too low for uploaded files. (ANE stays available
+        # for live + manual re-transcribe; only the auto-upload path is pinned.)
         threading.Thread(
             target=_run_upload_job,
-            args=(store, mid, path, _default_asr(), summary_backend, summary_model,
-                  kind, title, transcribe_jobs),
+            args=(store, mid, path, asr_backend, summary_backend, summary_model,
+                  kind, title, transcribe_jobs, live_busy),
             daemon=True).start()
         return RedirectResponse(f"/m/{mid}", status_code=303)
 
@@ -3381,7 +4130,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                              "text": "產生摘要中…"}
         threading.Thread(target=_run_summary_job,
                          args=(store, mid, body.kind, summary_backend,
-                               summary_model, summary_jobs), daemon=True).start()
+                               summary_model, summary_jobs, live_busy),
+                         daemon=True).start()
         return {"started": True}
 
     @app.get("/meetings/{mid}/summary/progress")
@@ -3561,6 +4311,43 @@ def create_app(store, *, summary_backend, asr_backend=None,
         store.add_speaker_nonmatch(body.keep.strip(), body.drop.strip())
         return {"ok": True}
 
+    @app.get("/speakers/split-candidates")
+    def speaker_split_candidates():
+        # FREE pre-filter: names whose stored voiceprints split into >=2 groups
+        # (same name likely given to two different people). No audio. The audio
+        # check (/speakers/split-check) confirms before anything changes.
+        import diarize as diar  # noqa: PLC0415
+        return {"candidates": diar.split_candidates(store.list_speakers())}
+
+    @app.post("/speakers/split-check")
+    async def speaker_split_check(body: NameIn):
+        # Bounded audio sample -> is this name actually two voices? Read-only.
+        # Threadpool: embedding + track decode are CPU-bound, keep the loop free.
+        return await run_in_threadpool(_speaker_split_check, store, body.name)
+
+    @app.post("/speakers/split")
+    async def speaker_split(body: SpeakerMergeIn):
+        # Apply: replace name's centroids with two clean ones (keep -> body.keep,
+        # new person -> body.drop). Snapshots the DB first (reversible).
+        return await run_in_threadpool(_apply_speaker_split, store, body.keep.strip(),
+                                       body.drop)
+
+    @app.get("/speakers/clip.wav")
+    def speaker_clip(mid: int, track: str, a: int, b: int):
+        # A slice of a meeting track as wav, for 試聽 a split group's representative.
+        import recorder  # noqa: PLC0415
+        pcm = _assemble_track(store, mid, track)
+        if pcm is None:
+            raise HTTPException(404, "no audio")
+        sr = 16000
+        i = int(a / 1000 * sr) * 2
+        j = int(min(b, a + 8000) / 1000 * sr) * 2   # cap 8s
+        clip = pcm[i:max(i + 2, j)]
+        if not clip:
+            raise HTTPException(404, "empty clip")
+        return Response(recorder.pcm_to_wav(clip, sample_rate=sr, channels=1),
+                        media_type="audio/wav")
+
     @app.get("/storage")
     def storage():
         # Disk usage of app-generated data, so you can see what's eating space.
@@ -3643,9 +4430,17 @@ def create_app(store, *, summary_backend, asr_backend=None,
         return {"deleted": name}
 
     _SETTINGS = {"persist_speakers": "1", "speaker_threshold": "0.62", "ane": "0",
-                 "denoise": "0", "float_panel": "0",
+                 "denoise": "0", "summary_correct": "1",
+                 "remote_store": "0",  # ☁️ 上傳到 server toggle (default OFF)
                  # /live recording default, so the page never needs re-picking:
-                 "live_source": "mic"}
+                 "live_source": "mic",
+                 # 辨識語系 default ("" = 自動偵測). Applies to live + native capture
+                 # so the floatpanel (which had no lang UI) stops mis-detecting.
+                 "live_language": "",
+                 # Session mode: both = 錄音+即時辨識 / record = 純錄音，不辨識 /
+                 # transcribe = 純字幕，不留錄音檔. Read by BOTH live sockets, so the
+                 # floatpanel inherits it with no Swift change (same as live_language).
+                 "live_mode": "both"}
 
     @app.get("/settings/{key}")
     def get_setting_route(key: str):
@@ -3662,8 +4457,25 @@ def create_app(store, *, summary_backend, asr_backend=None,
             v = "1" if v in ("1", "true", "on") else "0"
         elif key == "live_source":
             v = v if v in ("mic", "system", "both", "dual") else "mic"
+        elif key == "live_language":
+            v = v if v in ("", "zh", "en", "ja", "ko", "yue") else ""
+        elif key == "live_mode":
+            v = v if v in ("both", "record", "transcribe") else "both"
         store.set_setting(key, v)
         return {"value": store.get_setting(key, _SETTINGS[key])}
+
+    # --- opt-in remote-store plugin ---
+    # The route is registered whenever the plugin folder is present (a release can
+    # ship without it). It stays DORMANT until turned on: the push handler + the
+    # UI button both gate on the `remote_store` setting (default OFF) or a
+    # REMOTE_STORE env flag — so a normal build shows nothing and can't push until
+    # the user flips the toggle in 設定. REMOTE_PLUGIN = "the folder is here".
+    try:
+        import plugins.remote_store as _remote_plugin
+        _remote_plugin.register(app, store)
+        globals()["REMOTE_PLUGIN"] = True
+    except Exception:
+        globals()["REMOTE_PLUGIN"] = False
 
     return app
 
@@ -3723,8 +4535,23 @@ if __name__ == "__main__":  # pragma: no cover
             _llm["fn"] = mlx_lm_backend(llm_model)
         return _llm["fn"](prompt)
 
+    def _release():
+        """Free the summary weights between jobs (see _release_llm). Dropping the
+        closure isn't enough — MLX keeps freed buffers in its own allocator pool,
+        so the arrays only return to the OS after clear_cache()."""
+        if _llm.pop("fn", None) is None:
+            return
+        import gc  # noqa: PLC0415
+        gc.collect()
+        try:
+            import mlx.core as mx  # noqa: PLC0415
+            mx.clear_cache()
+        except Exception:
+            pass
+
+    summary_backend.release = _release
+
     import backends
-    from live import mlx_whisper_live_backend
 
     fallback = [m for m in live_fallback.split(",") if m and m != live_model]
 
@@ -3736,7 +4563,7 @@ if __name__ == "__main__":  # pragma: no cover
 
     # Modular + hot-reloadable: manager rebuilds the live AdaptiveBackend on swap.
     live_manager = backends.LiveModelManager(
-        make=backends.make_live_backend, model=live_model, fallback=fallback,
+        make=backends.make_backend, model=live_model, fallback=fallback,
         rtf_budget=live_rtf_budget,
         on_change=lambda m: mp.save_chosen(profile_path, m))
     if backends.route(live_model) == "ane":  # default is ANE -> warm at boot
@@ -3745,9 +4572,14 @@ if __name__ == "__main__":  # pragma: no cover
     app = create_app(
         Store("data/meetings.db"),
         summary_backend=summary_backend,
-        asr_backend=backends.make_batch_backend(asr_model),  # routes qwen3/whisper
+        # Batch-only (auto-upload + default re-transcribe, never live) — wait=True
+        # lets a groq-* pick block on the RPM guard instead of skipping windows.
+        asr_backend=backends.make_backend(
+            asr_model, wait=(backends.route(asr_model) == "groq")),
         live_manager=live_manager,
-        live_interim_backend=(mlx_whisper_live_backend(live_interim_model)
+        # Same factory as everything else — the interim preview is the same engine
+        # on a shorter window, not a separate kind of backend.
+        live_interim_backend=(backends.make_backend(live_interim_model)
                               if live_interim_model else None),
         model_names={"interim": live_interim_model, "accurate": asr_model,
                      "summary": llm_model},
@@ -3760,5 +4592,20 @@ if __name__ == "__main__":  # pragma: no cover
         live_max_lag_s=live_max_lag,
         summary_model=llm_model,
     )
+    # Exit hygiene. There was none: no atexit, no signal handler, nothing — so the
+    # ANE helper and the qwen3cpp daemon reparented to launchd on every shutdown,
+    # each still holding a loaded model. The supervisor now sends TERM before KILL
+    # specifically so this runs.
+    import atexit
+    import signal
+    atexit.register(backends.kill_subprocesses)
+
+    def _bye(signum, _frame):
+        backends.kill_subprocesses()
+        raise SystemExit(0)          # let atexit + uvicorn unwind normally
+
+    for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(_sig, _bye)
+
     port = int(os.environ.get("MEETING_PORT", "8765"))  # 8000 left free for dev
     uvicorn.run(app, host="127.0.0.1", port=port)  # loopback only (G2)
