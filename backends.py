@@ -205,33 +205,43 @@ _GROQ_RPM_SAFE = 18
 _GROQ_STATE = {"calls": {}, "lock": None}  # model -> deque of recent call times
 _GROQ_QUOTA_WARN_REQUESTS = 5
 _GROQ_QUOTA_WARN_TOKENS = 500
+_GROQ_QUOTA_WARN_AUDIO_SECONDS = 60
 
 
-def _groq_can_call(model):
-    """Client-side RPM guard: True (and records the attempt) if this model has
-    made fewer than _GROQ_RPM_SAFE calls in the trailing 60s; False if a call
-    right now would risk a 429. Skipping is safe — the audio isn't lost, it's
-    just not sent to Groq for this window (re-transcribe can retry later)."""
+def _groq_can_call(model, wait=False):
+    """Client-side RPM guard: True (and records the attempt) once this model
+    has fewer than _GROQ_RPM_SAFE calls in the trailing 60s. wait=False (live):
+    returns False immediately if throttled — the window is skipped, audio stays
+    on disk. wait=True (batch): blocks until a slot frees up instead of
+    skipping, because a batch job may have already deleted the old transcript
+    and cannot afford to silently drop windows."""
     import threading  # noqa: PLC0415
     import time  # noqa: PLC0415
     from collections import deque  # noqa: PLC0415
     if _GROQ_STATE["lock"] is None:
         _GROQ_STATE["lock"] = threading.Lock()
-    with _GROQ_STATE["lock"]:
-        now = time.monotonic()
-        dq = _GROQ_STATE["calls"].setdefault(model, deque())
-        while dq and now - dq[0] > 60:
-            dq.popleft()
-        if len(dq) >= _GROQ_RPM_SAFE:
+    while True:
+        with _GROQ_STATE["lock"]:
+            now = time.monotonic()
+            dq = _GROQ_STATE["calls"].setdefault(model, deque())
+            while dq and now - dq[0] > 60:
+                dq.popleft()
+            if len(dq) < _GROQ_RPM_SAFE:
+                dq.append(now)
+                return True
+            sleep_for = 60 - (now - dq[0]) + 0.05
+        if not wait:
             return False
-        dq.append(now)
-        return True
+        time.sleep(max(0.1, sleep_for))
 
 
 def _groq_warn_quota(resp):
-    """Low-quota heads-up only. Groq puts remaining RPM/TPM in response
-    headers on every call; we stay quiet unless it's actually running low, so
-    a live session's stderr isn't spammed once per utterance."""
+    """Low-quota heads-up only. Groq puts remaining RPM/TPM/audio-seconds in
+    response headers on every call; we stay quiet unless it's actually
+    running low, so a live session's stderr isn't spammed once per utterance.
+    The transcription endpoint's real cap is audio-seconds (duration-based),
+    not tokens — the tokens header may not even be present here, but the
+    check is harmless to keep."""
     import sys  # noqa: PLC0415
     try:
         rem_req = resp.headers.get("x-ratelimit-remaining-requests")
@@ -240,23 +250,32 @@ def _groq_warn_quota(resp):
         rem_tok = resp.headers.get("x-ratelimit-remaining-tokens")
         if rem_tok is not None and float(rem_tok) < _GROQ_QUOTA_WARN_TOKENS:
             print(f"groq quota low: {rem_tok} tokens remaining", file=sys.stderr)
+        rem_audio = resp.headers.get("x-ratelimit-remaining-audio-seconds")
+        if rem_audio is not None and float(rem_audio) < _GROQ_QUOTA_WARN_AUDIO_SECONDS:
+            print(f"groq quota low: {rem_audio} audio-seconds remaining", file=sys.stderr)
     except (TypeError, ValueError):
         pass
 
 
-def groq_backend(model, language=None):
+def groq_backend(model, language=None, wait=False):
     """Remote Whisper via Groq's OpenAI-compatible transcription endpoint.
     callable(pcm_bytes | audio_path) -> [{start, end, text}] (seconds) — same
     contract as every other backend. Network call: fail-soft on any error
     (log + return []), matching mlx_whisper_backend's "one bad window can't
     kill a session" rule. Raises at construction time (not per-call) if
-    GROQ_API_KEY is missing — that's a config problem, not a transient one."""
+    GROQ_API_KEY is missing — that's a config problem, not a transient one.
+    wait: forwarded to the RPM guard — False (live) skips a throttled window,
+    True (batch) blocks until a slot frees up (see _groq_can_call)."""
     import os  # noqa: PLC0415
+    import sys  # noqa: PLC0415
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError(
             "GROQ_API_KEY not set — put it in .env or export it before "
             "selecting a groq-* model")
+    if model not in _GROQ_MODELS:
+        print(f"groq_backend: unrecognized model id '{model}', forwarding as-is",
+              file=sys.stderr)
     groq_model = _GROQ_MODELS.get(model, model)
 
     def _run(audio):
@@ -268,7 +287,7 @@ def groq_backend(model, language=None):
         pcm = _pcm_bytes(audio)
         if len(pcm) < 3200:  # <0.1s -> not worth a call
             return []
-        if not _groq_can_call(model):
+        if not _groq_can_call(model, wait=wait):
             print(f"groq {model}: near RPM limit, skipping window "
                   f"(audio kept for re-transcribe)", file=sys.stderr)
             return []
@@ -290,8 +309,11 @@ def groq_backend(model, language=None):
             return []
         _groq_warn_quota(resp)
         try:
-            segments = resp.json().get("segments", [])
+            body = resp.json()
         except ValueError:
+            return []
+        segments = body.get("segments") if isinstance(body, dict) else None
+        if not isinstance(segments, list):
             return []
         return [{"start": s.get("start", 0.0), "end": s.get("end", 0.0), "text": s.get("text", "")}
                 for s in segments
@@ -302,7 +324,7 @@ def groq_backend(model, language=None):
     return _run
 
 
-def make_backend(model, language=None):
+def make_backend(model, language=None, wait=False):
     """THE ASR backend factory: a model id maps to exactly ONE engine, used by
     both live and re-transcribe. Returns callable(pcm_bytes | audio_path) ->
     [{start, end, text}].
@@ -318,6 +340,8 @@ def make_backend(model, language=None):
     blob across the window via clip_ms.
 
     language=None -> auto-detect; a code ("zh"/"en"/"ja"...) forces it.
+    wait: only meaningful for the groq engine's RPM guard — see groq_backend.
+    Every other branch ignores it (no other engine has this concept).
     """
     if route(model) == "ane":
         # The in-repo persistent helper, same as live. The homebrew `speech` CLI
@@ -340,7 +364,7 @@ def make_backend(model, language=None):
     if r == "firered":
         return _takes_path(firered_batch_backend(model, language))
     if r == "groq":
-        return groq_backend(model, language)
+        return groq_backend(model, language, wait=wait)
     import asr  # noqa: PLC0415
     return asr.mlx_whisper_backend(model, language)  # bytes, .pcm or container
 
