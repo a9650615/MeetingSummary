@@ -1,3 +1,5 @@
+import os
+
 from fastapi.testclient import TestClient
 
 from app import create_app
@@ -798,3 +800,14 @@ def test_retranscribe_runs_diarize_for_speaker_breaks(tmp_path, monkeypatch):
     app._run_transcribe_job(store, mid, backend=None, jobs=jobs)
     assert called.get("mid") == mid            # diarize ran after transcription
     assert jobs[mid]["state"] == "done" and jobs[mid]["done"] == 3
+
+
+def test_load_dotenv_sets_missing_keys_without_overriding(tmp_path, monkeypatch):
+    import app
+    env_file = tmp_path / ".env"
+    env_file.write_text("GROQ_API_KEY=from-dotenv\nALREADY_SET=from-dotenv\n# comment\n\n")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("ALREADY_SET", "from-shell")
+    app._load_dotenv(str(env_file))
+    assert os.environ["GROQ_API_KEY"] == "from-dotenv"
+    assert os.environ["ALREADY_SET"] == "from-shell"  # .env never overrides

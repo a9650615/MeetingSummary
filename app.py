@@ -42,7 +42,26 @@ def _ensure_tool_path():
         [p for p in extra if p not in cur] + cur)
 
 
+def _load_dotenv(path=None):
+    """Read .env (repo root, gitignored) into os.environ for local secrets
+    (e.g. GROQ_API_KEY) — never overrides a value already set externally."""
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value.strip()
+
+
 _ensure_tool_path()
+_load_dotenv()
 
 
 def _md_html(text):
