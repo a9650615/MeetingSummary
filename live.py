@@ -611,7 +611,11 @@ class AdaptiveBackend:
         t0 = self.clock()
         out = self.backends[self.idx](window_bytes)
         dur = len(window_bytes) / (self.sr * 2)
-        if dur > 0:
+        # A remote/network backend's wall time is dominated by round-trip
+        # latency, not audio length — RTF is not a meaningful signal for it,
+        # and judging it would permanently (one-way) downgrade Groq off a
+        # couple of ordinary-latency round trips. Exempt any groq-* tier.
+        if dur > 0 and not self.models[self.idx].lower().startswith("groq-"):
             rtf = (self.clock() - t0) / dur
             if self._warmup:
                 self._warmup = False  # cold-load call — ignore its inflated RTF

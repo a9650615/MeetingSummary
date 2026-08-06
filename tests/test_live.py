@@ -322,6 +322,37 @@ def test_adaptive_stays_on_fast_backend():
     assert ab.current_model == "a" and ab.pop_notice() is None
 
 
+def test_adaptive_never_downgrades_a_groq_tier():
+    # A network backend's wall time is round-trip latency, not audio length —
+    # RTF is meaningless for it. Even many consecutive "slow" calls (huge RTF)
+    # must never advance idx away from a groq-* tier.
+    ticks = iter([0, 2] * 20)  # warmup + 19 "slow" calls, way past patience
+    slow = lambda b: [{"start": 0, "end": 1, "text": "x"}]
+    fast = lambda b: [{"start": 0, "end": 1, "text": "y"}]
+    ab = AdaptiveBackend([slow, fast], ["groq-whisper-large-v3", "small"],
+                         sample_rate=16000, rtf_budget=0.8, patience=2,
+                         clock=lambda: next(ticks))
+    win = b"\x00" * 32000
+    for _ in range(19):
+        ab(win)
+    assert ab.current_model == "groq-whisper-large-v3"  # never downgraded
+    assert ab.pop_notice() is None
+
+
+def test_adaptive_still_downgrades_non_groq_regression_guard():
+    # Same slow/patience shape as the groq-exemption test above, but with a
+    # plain local model id — must still downgrade normally (the exemption is
+    # string-prefix scoped, not a general disable of the RTF judging).
+    ticks = iter([0, 2, 0, 2, 0, 2])  # warmup + 2 slow -> downgrade
+    slow = lambda b: [{"start": 0, "end": 1, "text": "x"}]
+    fast = lambda b: [{"start": 0, "end": 1, "text": "y"}]
+    ab = AdaptiveBackend([slow, fast], ["turbo", "small"], sample_rate=16000,
+                         rtf_budget=0.8, patience=2, clock=lambda: next(ticks))
+    win = b"\x00" * 32000
+    ab(win); ab(win); ab(win)
+    assert ab.current_model == "small"
+
+
 def test_preprocess_removes_dc_and_normalizes():
     sig = (np.sin(np.linspace(0, 12, 1000)) * 0.02 + 0.1).astype(np.float32)
     out = preprocess(sig)
