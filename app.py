@@ -57,7 +57,7 @@ def _load_dotenv(path=None):
             key, _, value = line.partition("=")
             key = key.strip()
             if key and key not in os.environ:
-                os.environ[key] = value.strip()
+                os.environ[key] = value.strip().strip("'\"")
 
 
 _ensure_tool_path()
@@ -475,6 +475,10 @@ def _models_page():
         "</optgroup>"
         "<optgroup label='🐢 transformers · 慢'>"
         "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B</option>"
+        "</optgroup>"
+        "<optgroup label='☁️ Groq API · 遠端'>"
+        "<option value='groq-whisper-large-v3-turbo'>Groq whisper turbo(快·遠端)</option>"
+        "<option value='groq-whisper-large-v3'>Groq whisper large-v3(最準·遠端)</option>"
         "</optgroup>"
         "</select>"
         "<p class=hint style='margin:.6em 0 0' id=livemodelmsg>原生浮動面板與網頁錄音都會用這個模型（下次開始錄音起生效）。</p></div>"
@@ -952,15 +956,21 @@ if(notesEl) notesEl.addEventListener('input',()=>{clearTimeout(noteTimer);noteTi
 
 function showModels(m){
   curModel.textContent = '(目前 '+(m.live||'-').split('/').pop()+')';
-  if(m.live_requested) modelSel.value = m.live_requested;
+  if(m.live_requested){ modelSel.value = m.live_requested; modelSel.dataset.applied = m.live_requested; }
   document.getElementById('accmodel').textContent = (m.accurate||'-').split('/').pop();
 }
 fetch('/models').then(r=>r.json()).then(showModels).catch(()=>{});
 fetch('/live/prewarm',{method:'POST'}).catch(()=>{});  // warm ANE helper before first record
 modelSel.onchange = () => {
+  const prev = modelSel.dataset.applied || modelSel.value;
   fetch('/models',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({live:modelSel.value})})
-    .then(r=>r.json()).then(()=>fetch('/models').then(r=>r.json()).then(showModels));
+    .then(r=>{
+      if(!r.ok) return r.text().then(t=>{throw new Error(t||'設定失敗');});
+      return r.json();
+    })
+    .then(()=>fetch('/models').then(r=>r.json()).then(showModels))
+    .catch(()=>{curModel.textContent='⚠️ 設定失敗';modelSel.value=prev;});
 };
 // 純錄音 hot-toggle: flip mid-recording (e.g. when the machine overheats) without
 // stop/restart — sends a control message to the live socket.
@@ -3428,7 +3438,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
     def set_models(body: ModelIn):
         if live_manager is None:
             raise HTTPException(503, "no live model manager")
-        live_manager.set_model(body.live)  # hot reload — no restart
+        try:
+            live_manager.set_model(body.live)  # hot reload — no restart
+        except Exception as e:
+            raise HTTPException(400, str(e))
         if on_model_change:
             on_model_change(body.live)
         if backends.route(body.live) == "ane":  # pre-warm the helper (~13s load) off-thread
@@ -4009,7 +4022,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             raise HTTPException(404, "meeting not found")
         if body.model:
             import backends
-            backend = backends.make_backend(body.model, body.language)
+            backend = backends.make_backend(
+                body.model, body.language, wait=(backends.route(body.model) == "groq"))
         else:
             backend = _default_asr()
         if backend is None:
@@ -4044,7 +4058,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             return {"state": "running"}  # already in progress
         if body.model:
             import backends
-            backend = backends.make_backend(body.model, body.language)
+            backend = backends.make_backend(
+                body.model, body.language, wait=(backends.route(body.model) == "groq"))
         else:
             backend = _default_asr()
         if backend is None:
@@ -4552,7 +4567,10 @@ if __name__ == "__main__":  # pragma: no cover
     app = create_app(
         Store("data/meetings.db"),
         summary_backend=summary_backend,
-        asr_backend=backends.make_backend(asr_model),  # routes qwen3/whisper
+        # Batch-only (auto-upload + default re-transcribe, never live) — wait=True
+        # lets a groq-* pick block on the RPM guard instead of skipping windows.
+        asr_backend=backends.make_backend(
+            asr_model, wait=(backends.route(asr_model) == "groq")),
         live_manager=live_manager,
         # Same factory as everything else — the interim preview is the same engine
         # on a shorter window, not a separate kind of backend.

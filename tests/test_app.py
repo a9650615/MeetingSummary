@@ -813,6 +813,19 @@ def test_load_dotenv_sets_missing_keys_without_overriding(tmp_path, monkeypatch)
     assert os.environ["ALREADY_SET"] == "from-shell"  # .env never overrides
 
 
+def test_load_dotenv_strips_surrounding_quotes(tmp_path, monkeypatch):
+    # GROQ_API_KEY="gsk_..." is a natural way to write a .env line — the
+    # literal quote characters must not end up in the value.
+    import app
+    env_file = tmp_path / ".env"
+    env_file.write_text('GROQ_API_KEY="gsk_abc123"\nSINGLE=\'quoted-val\'\n')
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("SINGLE", raising=False)
+    app._load_dotenv(str(env_file))
+    assert os.environ["GROQ_API_KEY"] == "gsk_abc123"
+    assert os.environ["SINGLE"] == "quoted-val"
+
+
 def test_live_page_offers_groq_models(tmp_path):
     c, _ = make_client(tmp_path)
     html = c.get("/live").text
@@ -825,4 +838,33 @@ def test_meeting_detail_offers_groq_remodel(tmp_path):
     mid = store.create_meeting("m", 1.0, "zh-TW")
     html = c.get(f"/m/{mid}").text
     assert "groq-whisper-large-v3-turbo" in html
+
+
+def test_settings_page_offers_groq_livemodel(tmp_path):
+    c, _ = make_client(tmp_path)
+    html = c.get("/models/manage").text
+    assert "groq-whisper-large-v3-turbo" in html
     assert "groq-whisper-large-v3" in html
+
+
+def test_set_models_groq_without_api_key_returns_400_not_500(tmp_path, monkeypatch):
+    # Missing GROQ_API_KEY raises RuntimeError inside LiveModelManager.set_model
+    # (eager chain construction) — the /models POST handler must turn that into
+    # a real 400 with the reason, not an unhandled 500 the live page's fetch
+    # silently swallows.
+    import backends
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    store = Store(tmp_path / "m.db")
+
+    def _make(model, language=None):
+        if backends.route(model) == "groq":
+            return backends.make_backend(model, language)  # real -> raises if unconfigured
+        return lambda audio: []  # avoid needing real ASR deps for the non-groq path
+
+    live_manager = backends.LiveModelManager(make=_make, model="qwen3-asr-0.6b-q4-k-m")
+    app = create_app(store, summary_backend=lambda p: "x", live_manager=live_manager)
+    c = TestClient(app)
+    r = c.post("/models", json={"live": "groq-whisper-large-v3"})
+    assert r.status_code == 400
+    assert "GROQ_API_KEY" in r.text
+    assert live_manager.requested == "qwen3-asr-0.6b-q4-k-m"  # unchanged on failure
