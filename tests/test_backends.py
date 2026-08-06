@@ -186,3 +186,14 @@ def test_make_backend_dispatches_groq(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     run = backends.make_backend("groq-whisper-large-v3-turbo")
     assert callable(run)
+
+
+def test_groq_backend_tolerates_segment_missing_fields(monkeypatch):
+    import httpx
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    backends._GROQ_STATE["calls"].clear()
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResp(json_data={"segments": [
+        {"no_speech_prob": 0.1, "compression_ratio": 1.5, "avg_logprob": -0.3},  # missing start/end/text
+    ]}))
+    run = backends.groq_backend("groq-whisper-large-v3")
+    assert run(b"\x00\x01" * 4000) == [{"start": 0.0, "end": 0.0, "text": ""}]

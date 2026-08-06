@@ -293,7 +293,7 @@ def groq_backend(model, language=None):
             segments = resp.json().get("segments", [])
         except ValueError:
             return []
-        return [{"start": s["start"], "end": s["end"], "text": s["text"]}
+        return [{"start": s.get("start", 0.0), "end": s.get("end", 0.0), "text": s.get("text", "")}
                 for s in segments
                 if s.get("no_speech_prob", 0) < 0.6
                 and s.get("compression_ratio", 0) < 2.4
