@@ -811,3 +811,18 @@ def test_load_dotenv_sets_missing_keys_without_overriding(tmp_path, monkeypatch)
     app._load_dotenv(str(env_file))
     assert os.environ["GROQ_API_KEY"] == "from-dotenv"
     assert os.environ["ALREADY_SET"] == "from-shell"  # .env never overrides
+
+
+def test_live_page_offers_groq_models(tmp_path):
+    c, _ = make_client(tmp_path)
+    html = c.get("/live").text
+    assert "groq-whisper-large-v3-turbo" in html
+    assert "groq-whisper-large-v3" in html
+
+
+def test_meeting_detail_offers_groq_remodel(tmp_path):
+    c, store = make_client(tmp_path)
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    html = c.get(f"/m/{mid}").text
+    assert "groq-whisper-large-v3-turbo" in html
+    assert "groq-whisper-large-v3" in html

@@ -758,6 +758,10 @@ _LIVE_BODY = """
           <optgroup label="🐢 transformers · 慢">
           <option value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR 0.6B</option>
           </optgroup>
+          <optgroup label="☁️ Groq API · 遠端">
+          <option value="groq-whisper-large-v3-turbo">Groq whisper turbo(快·遠端)</option>
+          <option value="groq-whisper-large-v3">Groq whisper large-v3(最準·遠端)</option>
+          </optgroup>
         </select></label>
     </div>
     <div class=row style="margin-top:12px">
@@ -2668,6 +2672,10 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<optgroup label='🐢 transformers · 慢'>"
         "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B</option>"
         "<option value='Qwen/Qwen3-ASR-1.7B'>Qwen3-ASR 1.7B(很慢)</option>"
+        "</optgroup>"
+        "<optgroup label='☁️ Groq API · 遠端'>"
+        "<option value='groq-whisper-large-v3-turbo'>Groq whisper turbo(快·遠端)</option>"
+        "<option value='groq-whisper-large-v3'>Groq whisper large-v3(最準·遠端)</option>"
         "</optgroup>"
         "</select>"
         "<select id=relang>"
