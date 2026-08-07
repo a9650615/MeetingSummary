@@ -352,6 +352,15 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
     # windows. Disable with LIVE_HPF=0. Best-effort: a missing scipy just skips it.
     hpf_on = os.environ.get("LIVE_HPF", "1") != "0"
     filters = {}  # tag -> HighPass instance (or False if it failed to build)
+    # tag -> {"task", "started", "warned"}: a feed() call in flight. TwoPassSession
+    # has no lock, and asyncio.wait_for's timeout only stops US from waiting — the
+    # threadpool thread underneath keeps running to completion. Without this
+    # tracking, the next tick used to dispatch a SECOND concurrent feed() call on
+    # the same session, corrupting the byte-counter live timestamps are built
+    # from (root cause of captions drifting out of sync with the audio). New
+    # audio for a busy tag goes into `queued` instead of racing it.
+    inflight = {}
+    queued = {}  # tag -> bytearray of audio that arrived while inflight[tag] ran
     while True:
         # Wake on new audio OR on a 0.5s tick. The tick matters: a native
         # source can start (helper alive, no error) yet stream ZERO frames --
@@ -367,13 +376,53 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
             pass
         if should_abort and should_abort():
             break
-        for tag, buf in pump.buffers.items():
-            if not buf:
+        # Harvest any feed() calls that finished since the last tick BEFORE
+        # deciding what to dispatch this tick — a tag whose task just completed
+        # must be cleared from `inflight` here so queued audio for it (below)
+        # can go out this same tick instead of waiting for one more.
+        for tag, info in list(inflight.items()):
+            task = info["task"]
+            if not task.done():
+                if not info["warned"] and time.monotonic() - info["started"] > FEED_TIMEOUT_S:
+                    # Informational only now — we no longer abandon the call
+                    # (that used to race the next feed()). The audio is safe
+                    # (already on disk); captions for this tag just lag until
+                    # the stuck call returns (a daemon backend's own watchdog
+                    # kills+respawns it, so this is bounded in practice).
+                    print(f"live feed wedged >{FEED_TIMEOUT_S}s ({tag}) — waiting for "
+                          f"it to finish before sending more audio (audio saved)",
+                          file=sys.stderr)
+                    info["warned"] = True
                 continue
-            chunk = bytes(buf)
+            del inflight[tag]
+            try:
+                events = task.result()
+            except WebSocketDisconnect:
+                raise
+            except Exception as e:  # transient ASR error -> keep going
+                # repr, not str: some exceptions (e.g. TimeoutError) stringify
+                # to "" — this used to log "...error (continuing): " with no cause.
+                print(f"live consumer error (continuing): {e!r}", file=sys.stderr)
+                continue
+            for ev in events:
+                await emit(ev, tracks[tag])
+        for tag, buf in pump.buffers.items():
+            new_chunk = bytes(buf)
             buf.clear()
             if rec_on():
                 continue  # 純錄音: PCM already saved; skip ASR (no inference)
+            info = inflight.get(tag)
+            if info is not None and not info["task"].done():
+                # A feed() call for this tag is still running (see the harvest
+                # loop above). Queue instead of dispatching a second one — the
+                # unlocked TwoPassSession can't safely be touched from two
+                # threads at once (see the module-level comment on `inflight`).
+                if new_chunk:
+                    queued.setdefault(tag, bytearray()).extend(new_chunk)
+                continue
+            if not new_chunk and tag not in queued:
+                continue
+            chunk = bytes(queued.pop(tag, b"")) + new_chunk
             if len(chunk) > TRACK_BACKLOG_MAXB:
                 print(f"live ASR backlog {len(chunk)//32000}s -> trim (audio saved)",
                       file=sys.stderr)
@@ -397,27 +446,9 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
             # post-meeting /diarize pass relabels accurately. Same gate as interim.
             want_interim = len(chunk) <= interim_lag_bytes
             want_diarize = want_interim
-            try:
-                # Safety net: a wedged backend must NOT hang consume forever (the
-                # "live captions stop mid-recording and never recover" bug). flush
-                # already had this guard; the live feed path didn't, so a stalled
-                # inference (e.g. a Metal/whisper-mlx stall with no backend watchdog)
-                # froze all further transcription. 40s > the 30s daemon watchdog, so
-                # a daemon backend kills+respawns first and returns cleanly; on
-                # timeout we skip this window and continue (audio is on disk for
-                # re-transcribe). Normal feed is <1s, so this never fires in practice.
-                events = await asyncio.wait_for(
-                    run_in_threadpool(sessions[tag].feed, chunk, want_interim, want_diarize),
-                    timeout=FEED_TIMEOUT_S)
-                for ev in events:
-                    await emit(ev, tracks[tag])
-            except WebSocketDisconnect:
-                raise
-            except Exception as e:  # transient ASR error / timeout -> keep going
-                # repr, not str: TimeoutError (the FEED_TIMEOUT_S case, and the one
-                # that actually matters) stringifies to "" — this line used to log
-                # "live consumer error (continuing): " with no cause at all.
-                print(f"live consumer error (continuing): {e!r}", file=sys.stderr)
+            task = asyncio.ensure_future(
+                run_in_threadpool(sessions[tag].feed, chunk, want_interim, want_diarize))
+            inflight[tag] = {"task": task, "started": time.monotonic(), "warned": False}
         if pop_notice and (msg := pop_notice()):
             if on_notice:
                 await on_notice(msg)
@@ -432,14 +463,46 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
             if on_stop:
                 await on_stop()
             break
+    # Whatever's still in flight should finish before returning: flush_sessions()
+    # is about to call session.flush() on these same (unlocked) objects, which
+    # would race a still-running feed() thread exactly like the mid-loop case
+    # above. should_abort's "drop whatever's buffered" only applies to queued
+    # audio bytes, never to a thread that's already running. Bounded, though —
+    # a backend with no internal watchdog (raw MLX/Metal) can in principle
+    # never return, and consume() returning is what lets /live/stop finish; a
+    # tag that's still stuck after the wait is reported back so the caller can
+    # skip flush() for just that tag instead of racing it.
+    stuck = set()
+    for tag, info in inflight.items():
+        try:
+            events = await asyncio.wait_for(info["task"], timeout=FEED_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            print(f"live feed still wedged after {FEED_TIMEOUT_S}s ({tag}) at stop — "
+                  f"skipping flush for this track (audio saved, safe to re-transcribe)",
+                  file=sys.stderr)
+            stuck.add(tag)
+            continue
+        except Exception as e:  # noqa: BLE001  backend error -> nothing to emit
+            print(f"live consumer error (continuing): {e!r}", file=sys.stderr)
+            continue
+        for ev in events:
+            try:
+                await emit(ev, tracks[tag])
+            except WebSocketDisconnect:
+                pass  # socket's already gone; nothing left to emit to
+    return stuck
 
 
-async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store):
+async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store, skip=()):
     """Final flush on stop: drain each TwoPassSession's tail (a partial
     utterance) and persist any 'final' it yields. Timed out per-track so a
     wedged backend can't hang stop forever — the backend's own watchdog
-    reaps the thread."""
+    reaps the thread. `skip`: tags consume() couldn't safely hand off (its
+    feed() call was still running) — touching their session here would race
+    that leftover thread, so skip flush for just those tags."""
     for tag, s in sessions.items():
+        if tag in skip:
+            continue
         t = time.perf_counter()
         try:
             evs = await asyncio.wait_for(run_in_threadpool(s.flush), timeout=15)

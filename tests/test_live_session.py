@@ -200,6 +200,76 @@ def test_consume_survives_wedged_feed(monkeypatch):
     assert asyncio.run(run()) == []  # wedged feed -> no finals, but consume returned
 
 
+def test_consume_queues_audio_instead_of_racing_a_slow_feed(monkeypatch):
+    # Root cause of the live timestamp-drift bug: when a feed() call runs past
+    # FEED_TIMEOUT_S, asyncio.wait_for only stops US from waiting — the
+    # threadpool thread keeps running underneath. Without this guard, the next
+    # tick's audio would be fed to the SAME (unlocked) TwoPassSession
+    # concurrently, corrupting the byte-accounting the live timestamps are
+    # built from. New audio that arrives while a feed() is still in flight
+    # must be queued, never dispatched as a second concurrent call.
+    import threading
+    monkeypatch.setattr(live_session, "FEED_TIMEOUT_S", 0.05)
+
+    class SlowSession:
+        def __init__(self):
+            self.calls = []
+            self.concurrent = 0
+            self.max_concurrent = 0
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def feed(self, chunk, want_interim, want_diarize=True):
+            self.concurrent += 1
+            self.max_concurrent = max(self.max_concurrent, self.concurrent)
+            self.calls.append(bytes(chunk))
+            if len(self.calls) == 1:
+                self.entered.set()
+                self.release.wait(5)  # bounded so a regression can't hang the suite
+            self.concurrent -= 1
+            return []
+
+        def flush(self):
+            return []
+
+    async def run():
+        tracks = {"t": ("mic", "我")}
+        pump = live_session.WallClockPump(tracks, {"t": io.BytesIO()}, t0=time.time())
+        sess = SlowSession()
+        pump.feed("t", b"\x01" * 10)  # dispatched immediately -> blocks inside feed()
+
+        ticks = {"n": 0}
+
+        def should_stop():
+            ticks["n"] += 1
+            return ticks["n"] > 8
+
+        async def emit(ev, label):
+            pass
+
+        task = asyncio.create_task(live_session.consume(
+            pump, {"t": sess}, tracks, rec_on=lambda: False, emit=emit,
+            should_stop=should_stop, interim_lag_bytes=10**9))
+
+        await asyncio.to_thread(sess.entered.wait, 5)
+        pump.feed("t", b"\x02" * 10)  # arrives while call #1 is still stuck
+        await asyncio.sleep(0.3)
+        # The second chunk must be queued, NOT fed concurrently.
+        assert sess.max_concurrent == 1
+        assert len(sess.calls) == 1
+
+        sess.release.set()
+        await asyncio.wait_for(task, timeout=5)
+        return sess
+
+    sess = asyncio.run(run())
+    assert sess.max_concurrent == 1  # never ran feed() twice at once
+    assert len(sess.calls) == 2
+    # WallClockPump pads with silence for real elapsed time between feeds, so
+    # check the queued payload's tail rather than an exact match.
+    assert sess.calls[1].endswith(b"\x02" * 10)  # queued chunk went out once free
+
+
 def test_consume_skips_asr_when_record_only():
     async def run():
         tracks = {"t": ("mic", "我")}

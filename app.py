@@ -3222,8 +3222,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
 
         async def _run():
             drain = asyncio.create_task(_push_drain())
+            stuck = set()
             try:
-                await live_session.consume(
+                stuck = await live_session.consume(
                     pump, sessions, tracks, rec_on=lambda: mode == "record",
                     emit=live_session.make_store_emit(mid, conn_offset_ms, store,
                                                       push=_push),
@@ -3243,7 +3244,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 _touch()
                 for f in audio_files.values():
                     f.close()
-                await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
+                await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms,
+                                                  store, skip=stuck)
 
         native_sessions[mid]["task"] = asyncio.create_task(_run())
         try:
@@ -3834,8 +3836,9 @@ def create_app(store, *, summary_backend, asr_backend=None,
         async def _on_rename(old, new, track):
             await ws.send_json({"type": "rename", "from": old, "to": new, "track": track})
 
+        stuck = set()
         try:
-            await live_session.consume(
+            stuck = await live_session.consume(
                 pump, sessions, tracks, rec_on=lambda: rec["on"], emit=_emit,
                 should_stop=_should_stop, interim_lag_bytes=interim_lag_bytes,
                 on_notice=_on_notice, pop_notice=_pop_notice,
@@ -3855,7 +3858,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
             _touch()  # idle countdown starts when recording stops
             for f in audio_files.values():
                 f.close()
-            await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms, store)
+            await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms,
+                                              store, skip=stuck)
             # Stop != finalize — explicit only.
 
     @app.post("/meetings")
