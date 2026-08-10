@@ -851,6 +851,14 @@ struct PanelView: View {
         }
         .padding(16).frame(width: 320)
         .onReceive(Timer.publish(every: 0.7, on: .main, in: .common).autoconnect()) { _ in
+            // Idle-CPU fix: pulse only ever shows through .opacity when
+            // dotActive && !paused (see the dot's opacity binding above) — but
+            // this timer used to animate it unconditionally forever, keeping
+            // SwiftUI's compositor busy redrawing an invisible change even
+            // with the panel sitting fully idle. Skip the animation (and the
+            // value flip) entirely outside that window; the dot is a flat
+            // opacity of 1 anyway, so there's nothing to keep in sync.
+            guard dotActive && !m.paused else { pulse = 1; return }
             withAnimation(.easeInOut(duration: 0.6)) { pulse = pulse == 1 ? 0.35 : 1 }
         }
     }
