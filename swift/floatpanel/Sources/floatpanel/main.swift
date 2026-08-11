@@ -308,6 +308,12 @@ final class Model: ObservableObject {
     // resuming is instant and the meeting is never split.
     @Published var paused = false
     @Published var showSubtitle = false   // YouTube-style caption overlay toggle
+    // 字幕限定 (caption-only, ephemeral): floatpanel-only toggle, sent as
+    // ?mode=caption to /ws/native-capture. No meeting/transcript/audio is
+    // ever created server-side while this is on — see
+    // docs/superpowers/specs/2026-08-11-caption-only-mode-design.md. Not
+    // persisted; resets to off on every launch, same as `source`.
+    @Published var captionOnly = false
     @Published var source: Source = .mic
     // A native session can fail AFTER capture already started (e.g. mic/screen-
     // recording access denied when the capturer actually opens the device) —
@@ -605,6 +611,7 @@ final class Model: ObservableObject {
     // NOT touch the sink/capturers — callers wire/rewire those as needed.
     private func openRelayTask(session: URLSession, epoch: Int) -> URLSessionWebSocketTask? {
         var urlStr = "ws://127.0.0.1:\(port)/ws/native-capture?source=\(source.rawValue)&diarize=1"
+        if captionOnly { urlStr += "&mode=caption" }
         if let m = relayMid { urlStr += "&session=\(m)" }
         guard let wsURL = URL(string: urlStr) else { return nil }
         let task = session.webSocketTask(with: wsURL)
@@ -728,6 +735,11 @@ final class Model: ObservableObject {
     // gap the reconnected live socket couldn't cover is filled in (audio + STT) at
     // its real timeline position. Fire-and-forget HTTP, independent of the ws.
     private func sendBackfill(gapStart: Date) {
+        // No audio was ever meant to survive in caption-only mode — buffering
+        // and POSTing an outage gap for a session with no meeting row to
+        // attach it to would be pointless (and /native/backfill has nothing
+        // sensible to do with a negative pseudo-mid).
+        guard !captionOnly else { return }
         guard let sink = self.sink, let m = relayMid ?? mid else { return }
         let blob = sink.drainPending()
         guard !blob.isEmpty else { return }
@@ -821,6 +833,12 @@ struct PanelView: View {
                     ForEach(Source.allCases) { s in Text(s.label).tag(s) }
                 }
                 .pickerStyle(.segmented).labelsHidden()
+                Toggle(isOn: $m.captionOnly) {
+                    Text("💬 字幕限定（不錄音、不留紀錄）")
+                }
+                .toggleStyle(.checkbox).font(.caption)
+                .help("只顯示即時字幕，不錄音、不建立會議記錄、不存逐字稿。"
+                      + "效能不足時文字可能遺失（不留音檔可補救，這是預期行為）。")
             }
             if !m.liveNotice.isEmpty {
                 // e.g. mic/screen-recording denied when capture actually starts —
