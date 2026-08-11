@@ -3121,7 +3121,6 @@ def create_app(store, *, summary_backend, asr_backend=None,
             # mints a fresh pseudo-mid, even if a stale ?session= is present.
             mid = _next_caption_mid()
             conn_offset_ms = 0
-            _caption_sessions[mid] = {"title": "字幕限定", "created_at": t0}
         else:
             # Reconnect/resume: floatpanel remembers the meeting id from the
             # {"type":"meeting"} message below and passes it back as ?session=
@@ -3186,6 +3185,8 @@ def create_app(store, *, summary_backend, asr_backend=None,
         idle["live"] += 1
         live_active[mid] = 1
         native_sessions[mid] = {"proc": None, "task": None, "notice": None}
+        if mode == "caption":
+            _caption_sessions[mid] = {"title": "字幕限定", "created_at": t0}
 
         class _WSFrameReader:
             # Adapt WS binary frames to asyncio.StreamReader.readexactly so

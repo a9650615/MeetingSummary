@@ -10,6 +10,7 @@ import time
 
 from fastapi.testclient import TestClient
 
+import live_session
 import recorder
 from app import create_app
 from store import Store
@@ -57,6 +58,36 @@ def test_caption_mode_creates_no_meeting_and_no_transcripts(tmp_path, monkeypatc
 
     assert len(store.list_meetings()) == before  # NOT ONE new meeting row
     assert list((tmp_path / "data").glob("*/*.pcm")) == []  # and no audio
+
+
+def test_caption_mode_never_enables_diarization(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "m.db")
+    app = create_app(store, summary_backend=lambda p: "x", asr_backend=None,
+                     live_manager=_FakeLiveManager())
+    calls = []
+    monkeypatch.setattr(live_session, "enable_diarization",
+                         lambda *a, **k: calls.append(a))
+    with TestClient(app) as c:
+        with c.websocket_connect(
+                "/ws/native-capture?source=system&mode=caption&diarize=1") as ws:
+            ws.receive_json()
+            ws.send_bytes(_frames())
+            assert _wait_until(lambda: c.get("/live/state").json()["recording"] is True)
+            time.sleep(0.2)  # give the fire-and-forget _init_diar() a chance to run
+            assert calls == []  # the diarize=1 guard must be scoped to mode=="caption"
+        assert _wait_until(lambda: c.get("/live/state").json()["recording"] is False)
+
+    # Regression guard: the monkeypatch itself works and diar is NOT disabled
+    # in general — only for mode="caption".
+    with TestClient(app) as c:
+        with c.websocket_connect(
+                "/ws/native-capture?source=system&diarize=1") as ws:
+            ws.receive_json()
+            ws.send_bytes(_frames())
+            assert _wait_until(lambda: c.get("/live/state").json()["recording"] is True)
+            assert _wait_until(lambda: len(calls) == 1)
+        assert _wait_until(lambda: c.get("/live/state").json()["recording"] is False)
 
 
 def test_default_mode_still_records(tmp_path, monkeypatch):
