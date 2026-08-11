@@ -37,6 +37,28 @@ def test_transcribe_mode_keeps_no_audio_and_no_segment(tmp_path, monkeypatch):
     assert store.list_segments(mid) == []                   # and no phantom segment
 
 
+def test_caption_mode_creates_no_meeting_and_no_transcripts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "m.db")
+    app = create_app(store, summary_backend=lambda p: "x", asr_backend=None,
+                     live_manager=_FakeLiveManager())
+    before = len(store.list_meetings())
+    with TestClient(app) as c:
+        with c.websocket_connect(
+                "/ws/native-capture?source=system&mode=caption&diarize=1") as ws:
+            mid = ws.receive_json()["id"]
+            assert mid < 0  # pseudo-mid, never a real autoincrement id
+            ws.send_bytes(_frames())
+            assert _wait_until(lambda: c.get("/live/state").json()["recording"] is True)
+            state = c.get("/live/state").json()
+            assert state["mid"] == mid
+            assert state["title"] == "字幕限定"  # fallback, not a DB row
+        assert _wait_until(lambda: c.get("/live/state").json()["recording"] is False)
+
+    assert len(store.list_meetings()) == before  # NOT ONE new meeting row
+    assert list((tmp_path / "data").glob("*/*.pcm")) == []  # and no audio
+
+
 def test_default_mode_still_records(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     store = Store(tmp_path / "m.db")

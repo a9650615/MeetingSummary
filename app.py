@@ -2924,6 +2924,19 @@ def create_app(store, *, summary_backend, asr_backend=None,
     # pruned, one int per meeting for the app's lifetime — trivial vs. tracking
     # session end here too.
     _live_rev = {}
+    # Fully ephemeral live captions (mode="caption", floatpanel only — see
+    # docs/superpowers/specs/2026-08-11-caption-only-mode-design.md): no
+    # meeting row exists, so /live/state needs somewhere else to read
+    # title/started_at from. Keyed by the same pseudo-mid used everywhere
+    # else (live_active, native_sessions, ...). Popped when the session ends.
+    _caption_sessions = {}
+    _caption_mid_ctr = [0]  # next pseudo-mid = decrement then use; negative,
+    # so it can never collide with a real (positive, autoincrement) meetings.id
+
+    def _next_caption_mid():
+        _caption_mid_ctr[0] -= 1
+        return _caption_mid_ctr[0]
+
     _CAPTION_IDLE_S = 6  # clear the panel caption after this much silence
 
     def _open_panel():
@@ -3014,7 +3027,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
         notice = None
         started_at = None
         if mid is not None:
-            m = store.get_meeting(mid)
+            # A caption-only session (mode="caption") has no meetings row —
+            # fall back to the in-memory session dict app._caption_sessions
+            # keeps for exactly this (see its definition for why).
+            m = store.get_meeting(mid) or _caption_sessions.get(mid)
             title = m["title"] if m else None
             started_at = m["created_at"] if m else None  # session start epoch, for /live attach-on-load's timer
             caption = store.latest_transcript(mid)
@@ -3082,28 +3098,45 @@ def create_app(store, *, summary_backend, asr_backend=None,
         source = qp.get("source", "mic")
         if source not in ("mic", "system", "both"):
             source = "mic"
-        diarize = qp.get("diarize") == "1"
+        # Session mode (see _SETTINGS['live_mode']). The floatpanel sends no mode
+        # of its own for the normal cases (it inherits the saved setting — same
+        # trick live_language uses to reach the panel without a Swift change) —
+        # EXCEPT "caption", which floatpanel's own toggle always sends explicitly
+        # and which is deliberately never a persistable _SETTINGS value (it must
+        # never leak into a browser /ws/live session via the shared setting).
+        mode = qp.get("mode") or store.get_setting("live_mode", "both")
+        # No diarization in caption-only mode (see the design doc) — enforced
+        # here regardless of what the client sent, since this is the one place
+        # that decides whether any `store` call happens on a pseudo-mid below.
+        diarize = qp.get("diarize") == "1" and mode != "caption"
 
         import recorder  # noqa: PLC0415
         t0 = time.time()
-        # Reconnect/resume: floatpanel remembers the meeting id from the
-        # {"type":"meeting"} message below and passes it back as ?session=
-        # after a dropped relay socket, so the resumed audio lands in the SAME
-        # meeting instead of fragmenting into a new one each reconnect. Same
-        # pattern as ws_live (see there for the offset rationale).
-        session = qp.get("session")
-        if session and session.isdigit() and store.get_meeting(int(session)) is not None:
-            mid = int(session)
-            conn_offset_ms = max(0, int((t0 - store.get_meeting(mid)["created_at"]) * 1000))
-        else:
-            title = time.strftime("錄音 %Y-%m-%d %H:%M", time.localtime(t0))
-            mid = store.create_meeting(title, t0, "zh-TW")
+        if mode == "caption":
+            # 字幕限定: fully ephemeral. A pseudo-mid (negative, never collides
+            # with a real autoincrement meetings.id) satisfies every OTHER piece
+            # of bookkeeping below (live_active/native_sessions/live_paused/
+            # live_stop) — none of them actually require a real DB row, only a
+            # hashable key. No reconnect/resume for this mode: every connection
+            # mints a fresh pseudo-mid, even if a stale ?session= is present.
+            mid = _next_caption_mid()
             conn_offset_ms = 0
+            _caption_sessions[mid] = {"title": "字幕限定", "created_at": t0}
+        else:
+            # Reconnect/resume: floatpanel remembers the meeting id from the
+            # {"type":"meeting"} message below and passes it back as ?session=
+            # after a dropped relay socket, so the resumed audio lands in the SAME
+            # meeting instead of fragmenting into a new one each reconnect. Same
+            # pattern as ws_live (see there for the offset rationale).
+            session = qp.get("session")
+            if session and session.isdigit() and store.get_meeting(int(session)) is not None:
+                mid = int(session)
+                conn_offset_ms = max(0, int((t0 - store.get_meeting(mid)["created_at"]) * 1000))
+            else:
+                title = time.strftime("錄音 %Y-%m-%d %H:%M", time.localtime(t0))
+                mid = store.create_meeting(title, t0, "zh-TW")
+                conn_offset_ms = 0
         await ws.send_json({"type": "meeting", "id": mid})
-        # Session mode (see _SETTINGS['live_mode']). The floatpanel sends no mode
-        # of its own, so it inherits the saved setting — same trick live_language
-        # uses to reach the panel without a Swift change.
-        mode = ws.query_params.get("mode") or store.get_setting("live_mode", "both")
         if source == "mic":
             tracks = {recorder.TRACK_MIC: ("mic", "我")}
         elif source == "system":
@@ -3111,9 +3144,11 @@ def create_app(store, *, summary_backend, asr_backend=None,
         else:
             tracks = {recorder.TRACK_MIC: ("mic", "我"),
                       recorder.TRACK_SYSTEM: ("system", "對方")}
-        if mode == "transcribe":
-            # 純字幕: no recording kept. Skip the segment row too — an empty audio
-            # dir is otherwise indistinguishable from a recording that failed.
+        if mode in ("transcribe", "caption"):
+            # 純字幕/字幕限定: no recording kept. Skip the segment row too — an
+            # empty audio dir is otherwise indistinguishable from a recording
+            # that failed. (caption mode also has no meeting row to attach a
+            # segment to in the first place.)
             audio_files = {tag: live_session.NullSink() for tag in tracks}
         else:
             audio_dir = f"data/{mid}-{int(t0)}"
@@ -3231,8 +3266,10 @@ def create_app(store, *, summary_backend, asr_backend=None,
             try:
                 stuck = await live_session.consume(
                     pump, sessions, tracks, rec_on=lambda: mode == "record",
-                    emit=live_session.make_store_emit(mid, conn_offset_ms, store,
-                                                      push=_push),
+                    emit=(live_session.make_caption_only_emit(push=_push)
+                          if mode == "caption" else
+                          live_session.make_store_emit(mid, conn_offset_ms, store,
+                                                       push=_push)),
                     should_stop=_should_stop,
                     interim_lag_bytes=int(2 * live_interim_s * 16000) * 2,
                     pop_notice=_pop_notice)
@@ -3246,11 +3283,13 @@ def create_app(store, *, summary_backend, asr_backend=None,
                 live_active.pop(mid, None)
                 native_sessions.pop(mid, None)
                 live_paused.discard(mid)
+                _caption_sessions.pop(mid, None)
                 _touch()
                 for f in audio_files.values():
                     f.close()
                 await live_session.flush_sessions(sessions, tracks, mid, conn_offset_ms,
-                                                  store, skip=stuck)
+                                                  store, skip=stuck,
+                                                  persist=(mode != "caption"))
 
         native_sessions[mid]["task"] = asyncio.create_task(_run())
         try:
