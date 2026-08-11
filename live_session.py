@@ -38,6 +38,19 @@ _MERGE_MAX_MS = 30000    # one line spans at most ~30s
 _MERGE_MAX_CHARS = 60    # ...and at most ~60 chars
 
 
+def _should_merge(prev, spk, start, end, joined):
+    """Whether a new final continues `prev` (the previous line for this
+    track) as one merged line, vs. starting a fresh one. Same speaker, a
+    short enough gap, and the merged result still within the length/duration
+    caps — see the _MERGE_* constants above."""
+    if prev is None or prev["speaker"] != spk:
+        return False
+    gap = start - prev["end_ms"]
+    return (0 <= gap <= _MERGE_GAP_MS
+            and (end - prev["start_ms"]) <= _MERGE_MAX_MS
+            and len(joined) <= _MERGE_MAX_CHARS)
+
+
 def resolve_speaker(diar_label, side_label):
     """The speaker to DISPLAY for a live final. A recognized name (from the
     voiceprint DB) wins; an auto placeholder (說話者N / 對方N / 我N) collapses to
@@ -308,18 +321,12 @@ def make_store_emit(mid, conn_offset_ms, store, push=None):
         # doesn't grow one unbounded line. A speaker change (different label) or a
         # long gap starts a fresh line — "split by the session's people".
         prev = store.last_live_row(mid, track)
-        merged = False
         shown = ev["text"]  # what the client should DISPLAY for this line
-        if prev is not None and prev["speaker"] == spk:
-            gap = start - prev["end_ms"]
-            joined = (prev["text"] or "") + (ev["text"] or "")
-            if (0 <= gap <= _MERGE_GAP_MS
-                    and (end - prev["start_ms"]) <= _MERGE_MAX_MS
-                    and len(joined) <= _MERGE_MAX_CHARS):
-                store.extend_transcript(prev["id"], joined, end)
-                merged = True
-                shown = joined
-        if not merged:
+        joined = ((prev["text"] or "") + (ev["text"] or "")) if prev is not None else ev["text"]
+        if prev is not None and _should_merge(prev, spk, start, end, joined):
+            store.extend_transcript(prev["id"], joined, end)
+            shown = joined
+        else:
             store.add_transcript(mid, "live", track, start, end, spk, ev["text"])
         if push:
             # Push the MERGED line, not just this fragment: the panel's 1.5s
@@ -355,18 +362,11 @@ def make_caption_only_emit(push=None):
         end = ev.get("end_ms", ev["start_ms"])
         prev = last.get(track)
         shown = ev["text"]
-        if prev is not None and prev["speaker"] == spk:
-            gap = start - prev["end_ms"]
-            joined = (prev["text"] or "") + (ev["text"] or "")
-            if (0 <= gap <= _MERGE_GAP_MS
-                    and (end - prev["start_ms"]) <= _MERGE_MAX_MS
-                    and len(joined) <= _MERGE_MAX_CHARS):
-                last[track] = {"speaker": spk, "text": joined,
-                               "start_ms": prev["start_ms"], "end_ms": end}
-                shown = joined
-            else:
-                last[track] = {"speaker": spk, "text": ev["text"],
-                               "start_ms": start, "end_ms": end}
+        joined = ((prev["text"] or "") + (ev["text"] or "")) if prev is not None else ev["text"]
+        if prev is not None and _should_merge(prev, spk, start, end, joined):
+            last[track] = {"speaker": spk, "text": joined,
+                           "start_ms": prev["start_ms"], "end_ms": end}
+            shown = joined
         else:
             last[track] = {"speaker": spk, "text": ev["text"],
                            "start_ms": start, "end_ms": end}
