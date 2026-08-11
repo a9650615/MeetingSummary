@@ -332,6 +332,50 @@ def make_store_emit(mid, conn_offset_ms, store, push=None):
     return emit
 
 
+def make_caption_only_emit(push=None):
+    """Same same-speaker line-merging behavior as make_store_emit, but for
+    the fully ephemeral caption-only mode (mode="caption"): there is no
+    meeting row and no transcripts table to read/write, so the "previous
+    line" lives in a plain dict scoped to this closure instead of a
+    store.last_live_row() round-trip. push is the ONLY output — the
+    floatpanel reads captions exclusively from these pushed events (see
+    docs/superpowers/specs/2026-08-11-caption-only-mode-design.md), never
+    from a DB-backed poll, so there is nothing else for this function to do."""
+    last = {}  # track -> {"speaker", "text", "start_ms", "end_ms"}
+
+    async def emit(ev, label):
+        track, speaker = label
+        if ev["kind"] != "final":
+            if push:
+                await push({"type": "interim", "track": track,
+                            "speaker": speaker, "text": ev["text"]})
+            return
+        spk = store_speaker(ev.get("speaker"), speaker)
+        start = ev["start_ms"]
+        end = ev.get("end_ms", ev["start_ms"])
+        prev = last.get(track)
+        shown = ev["text"]
+        if prev is not None and prev["speaker"] == spk:
+            gap = start - prev["end_ms"]
+            joined = (prev["text"] or "") + (ev["text"] or "")
+            if (0 <= gap <= _MERGE_GAP_MS
+                    and (end - prev["start_ms"]) <= _MERGE_MAX_MS
+                    and len(joined) <= _MERGE_MAX_CHARS):
+                last[track] = {"speaker": spk, "text": joined,
+                               "start_ms": prev["start_ms"], "end_ms": end}
+                shown = joined
+            else:
+                last[track] = {"speaker": spk, "text": ev["text"],
+                               "start_ms": start, "end_ms": end}
+        else:
+            last[track] = {"speaker": spk, "text": ev["text"],
+                           "start_ms": start, "end_ms": end}
+        if push:
+            await push({"type": "final", "track": track,
+                        "speaker": spk, "text": shown})
+    return emit
+
+
 async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
                    interim_lag_bytes, on_notice=None, pop_notice=None, on_stop=None,
                    should_abort=None, on_rename=None, pop_rename=None):
@@ -493,13 +537,17 @@ async def consume(pump, sessions, tracks, *, rec_on, emit, should_stop,
     return stuck
 
 
-async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store, skip=()):
+async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store, skip=(),
+                         persist=True):
     """Final flush on stop: drain each TwoPassSession's tail (a partial
     utterance) and persist any 'final' it yields. Timed out per-track so a
     wedged backend can't hang stop forever — the backend's own watchdog
     reaps the thread. `skip`: tags consume() couldn't safely hand off (its
     feed() call was still running) — touching their session here would race
-    that leftover thread, so skip flush for just those tags."""
+    that leftover thread, so skip flush for just those tags. `persist=False`
+    (caption-only mode): still runs each session's flush() to drain its
+    internal buffer cleanly, but never writes the result anywhere — there is
+    no meeting row for it to belong to."""
     for tag, s in sessions.items():
         if tag in skip:
             continue
@@ -511,6 +559,8 @@ async def flush_sessions(sessions, tracks, mid, conn_offset_ms, store, skip=()):
             evs = []
         print(f"[live stop] flush {tag} {(time.perf_counter()-t)*1000:.0f}ms",
               file=sys.stderr)
+        if not persist:
+            continue
         for ev in evs:
             if ev["kind"] == "final":  # audio-position offset, not wall-clock
                 spk = store_speaker(ev.get("speaker"), tracks[tag][1])

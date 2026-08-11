@@ -434,6 +434,89 @@ def test_make_store_emit_persists_only_final(tmp_path):
     assert store.latest_transcript(mid) == "我：done"
 
 
+def _caption_finals(evs):
+    pushed = []
+
+    async def push(payload):
+        pushed.append(payload)
+
+    emit = live_session.make_caption_only_emit(push=push)
+
+    async def run():
+        for ev, label in evs:
+            await emit({"kind": "final", **ev}, label)
+    asyncio.run(run())
+    return [p for p in pushed if p["type"] == "final"]
+
+
+def test_caption_only_emit_never_touches_the_store(monkeypatch):
+    # The whole point of this mode: zero DB calls. Fail loudly if anything
+    # tries to reach a `store` object at all (there isn't one to pass in).
+    emit = live_session.make_caption_only_emit()
+
+    async def run():
+        await emit({"kind": "interim", "text": "hi", "start_ms": 0, "end_ms": 0},
+                   ("mic", "我"))
+        await emit({"kind": "final", "text": "hi", "start_ms": 0, "end_ms": 500},
+                   ("mic", "我"))
+    asyncio.run(run())  # would raise if it touched anything DB-shaped
+
+
+def test_caption_only_emit_streams_interim_and_final():
+    pushed = []
+
+    async def push(p):
+        pushed.append(p)
+
+    emit = live_session.make_caption_only_emit(push=push)
+
+    async def run():
+        await emit({"kind": "interim", "text": "暫定", "start_ms": 0, "end_ms": 0},
+                   ("system", "對方"))
+        await emit({"kind": "final", "text": "定稿", "start_ms": 0, "end_ms": 1000},
+                   ("system", "對方"))
+    asyncio.run(run())
+    assert pushed[0]["type"] == "interim" and pushed[0]["text"] == "暫定"
+    assert pushed[1] == {"type": "final", "track": "system", "speaker": "對方",
+                         "text": "定稿"}
+
+
+def test_caption_only_emit_merges_same_speaker_short_gap():
+    rows = _caption_finals([
+        ({"text": "你好", "start_ms": 0, "end_ms": 1000}, ("system", "說話者1")),
+        ({"text": "今天", "start_ms": 1500, "end_ms": 2500}, ("system", "說話者1")),
+    ])
+    assert len(rows) == 2                 # one push per emit call...
+    assert rows[-1]["text"] == "你好今天"  # ...but the second carries the MERGED text
+
+
+def test_caption_only_emit_speaker_change_starts_new_line():
+    rows = _caption_finals([
+        ({"text": "你好", "start_ms": 0, "end_ms": 1000}, ("system", "說話者1")),
+        ({"text": "我是", "start_ms": 1200, "end_ms": 2000}, ("system", "說話者2")),
+    ])
+    assert [r["text"] for r in rows] == ["你好", "我是"]  # not merged
+
+
+def test_caption_only_emit_long_gap_starts_new_line():
+    rows = _caption_finals([
+        ({"text": "你好", "start_ms": 0, "end_ms": 1000}, ("system", "說話者1")),
+        ({"text": "再來", "start_ms": 6000, "end_ms": 7000}, ("system", "說話者1")),
+    ])
+    assert [r["text"] for r in rows] == ["你好", "再來"]  # gap > 3s -> not merged
+
+
+def test_flush_sessions_persist_false_skips_the_store(tmp_path):
+    store = Store(tmp_path / "m.db")
+    mid = store.create_meeting("t", 0.0, "zh-TW")
+    tracks = {"t": ("mic", "我")}
+    session = StubSession(flush_events=[{"kind": "final", "start_ms": 0, "end_ms": 500,
+                                         "text": "hello"}])
+    asyncio.run(live_session.flush_sessions({"t": session}, tracks, mid, conn_offset_ms=0,
+                                            store=store, persist=False))
+    assert store.latest_transcript(mid) is None
+
+
 def test_resolve_speaker_collapses_placeholder_to_side_keeps_name():
     r = live_session.resolve_speaker
     assert r("說話者1", "對方") == "對方"      # auto cluster -> side label
