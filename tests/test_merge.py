@@ -39,6 +39,41 @@ def test_iter_transcribe_streams_progress(tmp_path):
     assert not os.path.exists(os.path.join(d, "_win.pcm"))  # temp cleaned
 
 
+def test_iter_transcribe_reports_denoising_before_first_window(tmp_path, monkeypatch):
+    # Bug: denoise runs synchronously on first-window access (_src()), with no
+    # progress event yielded first — jobs[mid] sits at done:0 with blank text for
+    # however long the external `speech denoise` CLI takes on the whole source
+    # file, which on a real ~29-min meeting looks indistinguishable from a hang.
+    import app
+    import backends
+    monkeypatch.setattr(app, "_ane_available", lambda: True)
+    denoise_calls = []
+
+    def _fake_denoise(path, raw_pcm=False):
+        denoise_calls.append(path)
+        return path  # stub: no real subprocess, same PCM back
+    monkeypatch.setattr(backends, "denoise_file", _fake_denoise)
+
+    s = Store(tmp_path / "m.db")
+    mid = s.create_meeting("M", 1000.0, "zh-TW")
+    s.set_setting("denoise", "1")
+    d = str(tmp_path / "seg")
+    os.makedirs(d)
+    with open(os.path.join(d, "mic.pcm"), "wb") as f:
+        f.write(_audio(2.0))
+    s.add_segment(mid, 0, d, started_at=1000.0, duration_s=2, origin="recorded")
+    backend = lambda p: [{"start": 0.0, "end": 1.0, "text": "視窗"}]
+    evs = list(iter_transcribe(s, mid, backend, window_s=1))
+    assert denoise_calls  # denoise did run
+    # a progress event announcing "降噪中…" must land BEFORE the first window's
+    # own progress event (i.e. before denoise_file was even called)
+    denoising_idx = next(i for i, e in enumerate(evs)
+                         if e["type"] == "progress" and e.get("text") == "降噪中…")
+    first_window_idx = next(i for i, e in enumerate(evs)
+                            if e["type"] == "progress" and e.get("done") == 1)
+    assert denoising_idx < first_window_idx
+
+
 def test_iter_transcribe_reads_compressed_m4a(tmp_path):
     # After 完成會議 compresses .pcm -> .m4a, re-recognition must still find audio
     # (regression: iter_transcribe read .pcm directly, saw nothing on compressed

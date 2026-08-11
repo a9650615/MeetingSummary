@@ -2198,6 +2198,11 @@ def iter_transcribe(store, mid, backend, window_s=29, sample_rate=16000,
         win_off_ms = seg_off + int(bs / 2 / sample_rate * 1000)
         win_dur_ms = int(bl / 2 / sample_rate * 1000)   # so untimed backends spread within the window
         tmp = f"{os.path.dirname(p)}/_win.pcm"
+        if denoise_on and p not in _clean:
+            # denoise_file() below shells out and blocks on the WHOLE source file
+            # (can take as long as the recording itself) — announce it, or the job
+            # sits at done:0 with blank text and looks hung for that entire time.
+            yield {"type": "progress", "done": i, "total": len(units), "text": "降噪中…"}
         with open(_src(p), "rb") as f:
             f.seek(bs)
             raw = f.read(bl)
