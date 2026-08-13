@@ -91,8 +91,15 @@ final class PanelMicCapturer: NSObject, AVCaptureAudioDataOutputSampleBufferDele
     let session = AVCaptureSession()
     let sink: WSFrameSink
     private var agcEnv: Float = 200
+    // 混合(both) mode only: system audio already covers 對方, so a quiet mic
+    // frame is background noise, not signal — drop it instead of feeding the
+    // noise floor into diarization/ASR. Not applied to mic-only, which must
+    // stay continuous. Threshold judged against agcEnv (the smoothed peak
+    // envelope, not raw peak) so a single click doesn't flap the gate.
+    private let gated: Bool
+    private let gateThreshold: Float = 300
 
-    init(sink: WSFrameSink) { self.sink = sink; super.init() }
+    init(sink: WSFrameSink, gated: Bool = false) { self.sink = sink; self.gated = gated; super.init() }
 
     func start() throws {
         guard let dev = AVCaptureDevice.default(for: .audio) else {
@@ -152,6 +159,7 @@ final class PanelMicCapturer: NSObject, AVCaptureAudioDataOutputSampleBufferDele
                 }
             }
         }
+        if gated && agcEnv < gateThreshold { return }
         sink.write(track: CAP_TRACK_MIC, payload: Data(bytes: p, count: len))
     }
 }
@@ -554,7 +562,7 @@ final class Model: ObservableObject {
                 DispatchQueue.main.async {
                     guard let self = self, self.relayEpoch == epoch else { return }  // not stopped/restarted meanwhile
                     if granted {
-                        let mic = PanelMicCapturer(sink: sink)
+                        let mic = PanelMicCapturer(sink: sink, gated: self.source == .both)
                         do { try mic.start(); self.micCap = mic; self.audioLive = true }
                         catch { self.liveNotice = "麥克風擷取失敗: \(error.localizedDescription)" }
                     } else {
