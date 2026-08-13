@@ -37,6 +37,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>icon</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>擷取麥克風音訊以轉錄會議。</string>
+  <key>NSScreenCaptureUsageDescription</key><string>擷取系統音訊以轉錄會議。</string>
 </dict></plist>
 PLIST
 
