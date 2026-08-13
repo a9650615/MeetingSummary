@@ -1,0 +1,54 @@
+name: chatllm runtime (build + cache)
+# Builds the portable chatllm.cpp runtime tarball OUTSIDE the release path and
+# stashes it on a fixed internal release (chatllm-runtime-cache) that release.yml
+# just downloads + re-uploads (seconds, not the ~40min cmake build). Upstream has
+# no macOS prebuilt to fetch instead, so this workflow is the one place we build
+# it — once per package_chatllm.sh/pin change, not once per version tag.
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - package_chatllm.sh
+      - .github/workflows/chatllm-runtime.yml
+
+permissions:
+  contents: write   # upload the tarball onto the internal cache release
+
+jobs:
+  build:
+    runs-on: macos-15   # same libc++/Xcode requirement as release.yml's chatllm step
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Install ccache
+        run: command -v ccache >/dev/null || brew install ccache
+      - name: Cache ccache dir
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-chatllm-arm64-${{ hashFiles('package_chatllm.sh') }}
+          restore-keys: |
+            ccache-chatllm-arm64-
+      - name: Cache chatllm.cpp checkout + build
+        uses: actions/cache@v4
+        with:
+          path: chatllm.cpp
+          # Pin (upstream tag) lives inside package_chatllm.sh, so hashing it alone
+          # is enough to invalidate the cache on either a pin bump or a script change.
+          key: chatllm-arm64-${{ hashFiles('package_chatllm.sh') }}
+      - name: Build + package chatllm runtime
+        run: ./package_chatllm.sh "$PWD/chatllm-runtime-arm64.tar.gz"
+      - name: Publish to internal cache release
+        run: |
+          gh release view chatllm-runtime-cache >/dev/null 2>&1 || \
+            gh release create chatllm-runtime-cache \
+              --prerelease \
+              --title "chatllm runtime (internal build cache)" \
+              --notes "Internal artifact storage for the chatllm.cpp macOS runtime, rebuilt by .github/workflows/chatllm-runtime.yml. Not a MeetingSummary release — release.yml fetches this asset and re-attaches it to each version tag; do not download this directly."
+          gh release upload chatllm-runtime-cache "chatllm-runtime-arm64.tar.gz" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -83,21 +83,21 @@ jobs:
         run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME" "MeetingSummary-${GITHUB_REF_NAME}.zip"
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Cache chatllm build
-        uses: actions/cache@v4
-        with:
-          path: chatllm.cpp
-          key: chatllm-arm64-${{ hashFiles('package_chatllm.sh') }}
-      - name: Build + attach prebuilt chatllm runtime (best-effort)
-        # Portable arm64 bundle (rpath -> @loader_path) so users need no cmake;
-        # setup_runtime.sh downloads it. Bounded + continue-on-error -> a slow/failed
-        # chatllm build can't hang or fail the already-published release.
+      - name: Attach prebuilt chatllm runtime (best-effort, fetched not built)
+        # The actual ~40min cmake build lives in chatllm-runtime.yml, which stashes
+        # its output on the internal chatllm-runtime-cache release. This step just
+        # fetches that tarball and re-attaches it here — seconds, not minutes. If
+        # the internal release/asset isn't there yet (e.g. first run ever, before
+        # chatllm-runtime.yml has completed once), skip: best-effort, never blocks
+        # the already-published release.
         continue-on-error: true
-        timeout-minutes: 50   # cold ggml Metal build is slow; once it completes the
-                              # cache makes subsequent runs fast. Still non-blocking.
+        timeout-minutes: 5
         run: |
-          ./package_chatllm.sh "$PWD/chatllm-runtime-arm64.tar.gz"
-          gh release upload "$GITHUB_REF_NAME" "chatllm-runtime-arm64.tar.gz" --clobber
+          if gh release download chatllm-runtime-cache -p "chatllm-runtime-arm64.tar.gz" --clobber; then
+            gh release upload "$GITHUB_REF_NAME" "chatllm-runtime-arm64.tar.gz" --clobber
+          else
+            echo "chatllm-runtime-cache has no asset yet — skipping (best-effort); run chatllm-runtime.yml manually to seed it"
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Cache qwen3-ane swift build

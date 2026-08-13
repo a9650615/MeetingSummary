@@ -8,11 +8,18 @@ set -euo pipefail
 cd "$(dirname "$0")"
 OUT="${1:-$PWD/chatllm-runtime-arm64.tar.gz}"
 
+# Pinned upstream release tag. Unpinned --depth 1 (no --branch) tracks HEAD, so a
+# fresh checkout can silently build different (possibly broken) upstream code on
+# every release — bump this deliberately when upgrading.
+CHATLLM_REF=v2026.05
+
 command -v cmake >/dev/null || { echo "need cmake to build chatllm"; exit 1; }
-[ -d chatllm.cpp ] || git clone --depth 1 https://github.com/foldl/chatllm.cpp
+[ -d chatllm.cpp ] || git clone --branch "$CHATLLM_REF" --depth 1 https://github.com/foldl/chatllm.cpp
 cd chatllm.cpp
 if [ ! -f bindings/libchatllm.dylib ]; then
-  cmake -B build -DCMAKE_BUILD_TYPE=Release
+  CCACHE_ARGS=()
+  command -v ccache >/dev/null 2>&1 && CCACHE_ARGS=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+  cmake -B build -DCMAKE_BUILD_TYPE=Release "${CCACHE_ARGS[@]}"
   # Build ONLY the shared lib (cmake pulls in its ggml deps). Building the default
   # "all" target compiles every chatllm example/tool too — minutes vs ~40 min.
   cmake --build build --target libchatllm -j --config Release

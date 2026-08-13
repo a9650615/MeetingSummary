@@ -120,8 +120,17 @@ fi
 # Best-effort like the icon block above: dev machines without a floatpanel release
 # build still produce a working (degraded — panel-less, browser-fallback) launcher.
 FP_BIN="swift/floatpanel/.build/release/floatpanel"
+FP_NESTED="dist/panel/MeetingSummary.app/Contents/MacOS/floatpanel"
 if [ -x "$FP_BIN" ]; then
-  [ -d dist/panel/MeetingSummary.app ] || ./build_floatpanel_app.sh
+  # Rebuild the panel bundle whenever the compiled binary is newer than the one
+  # already nested in it. A plain "does dist/panel exist?" test silently ships a
+  # STALE panel forever: the bundle from the first build never gets refreshed, so
+  # a rebuilt $FP_BIN is only ever used as an existence gate and never copied —
+  # you repackage, relaunch, and your Swift change simply isn't there (measured:
+  # a week-old panel binary, byte-identical md5, shipped after a fresh compile).
+  if [ ! -x "$FP_NESTED" ] || [ "$FP_BIN" -nt "$FP_NESTED" ]; then
+    ./build_floatpanel_app.sh
+  fi
   mkdir -p "$APP/Contents/Resources/panel"
   cp -R dist/panel/MeetingSummary.app "$APP/Contents/Resources/panel/"
   echo "nested panel: $APP/Contents/Resources/panel/MeetingSummary.app"
