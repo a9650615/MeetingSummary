@@ -322,6 +322,15 @@ final class Model: ObservableObject {
     // docs/superpowers/specs/2026-08-11-caption-only-mode-design.md. Not
     // persisted; resets to off on every launch, same as `source`.
     @Published var captionOnly = false
+    // Persisted "錄音模式" (both/record/transcribe) — same _SETTINGS['live_mode']
+    // value the web settings page's <select id=live_mode_opt> reads/writes
+    // (app.py ~line 671). The floatpanel already inherits this setting for
+    // every /ws/native-capture connection that sends no `mode` of its own
+    // (app.py:3160) — this picker just gives that existing behavior a face in
+    // the panel UI, so no relay-URL change is needed for it. `captionOnly`
+    // stays the one ephemeral, never-persisted exception (explicit &mode=
+    // caption below), and always wins when both are set.
+    @Published var liveMode = "both"
     @Published var source: Source = .mic
     // A native session can fail AFTER capture already started (e.g. mic/screen-
     // recording access denied when the capturer actually opens the device) —
@@ -383,6 +392,26 @@ final class Model: ObservableObject {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             DispatchQueue.main.async { done?(d, code) }
         }.resume()
+    }
+
+    // One-shot on launch: pick up whatever live_mode is currently saved server-
+    // side so the picker reflects reality after a relaunch instead of always
+    // defaulting to "both" (captionOnly has no equivalent — it's deliberately
+    // never persisted, see its declaration above).
+    func fetchLiveMode() {
+        req("/settings/live_mode") { [weak self] data, _ in
+            guard let self = self, let d = data,
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let v = o["value"] as? String else { return }
+            self.liveMode = v
+        }
+    }
+
+    // Same write-through the web settings page's <select id=live_mode_opt>
+    // onchange does (app.py ~line 672) — one shared setting, two UIs.
+    func setLiveMode(_ v: String) {
+        liveMode = v
+        req("/settings/live_mode", method: "POST", json: ["value": v])
     }
 
     func poll() {
@@ -841,6 +870,27 @@ struct PanelView: View {
                     ForEach(Source.allCases) { s in Text(s.label).tag(s) }
                 }
                 .pickerStyle(.segmented).labelsHidden()
+                HStack(spacing: 6) {
+                    Text("錄音模式").font(.caption).foregroundStyle(.secondary)
+                    Picker("", selection: Binding(
+                        get: { m.liveMode },
+                        set: { m.setLiveMode($0) }
+                    )) {
+                        Text("錄音＋即時辨識").tag("both")
+                        Text("純錄音（省電，不即時辨識）").tag("record")
+                        Text("純字幕（不留錄音檔）").tag("transcribe")
+                    }
+                    .pickerStyle(.menu).labelsHidden().font(.caption)
+                    Spacer()
+                }
+                .disabled(m.captionOnly)
+                .opacity(m.captionOnly ? 0.5 : 1)
+                .help("與網頁設定頁「錄音模式」共用同一設定，改了會存回伺服器。"
+                      + "開啟下方「字幕限定」時這裡會被蓋過、暫時停用。")
+                if m.liveMode == "record" && !m.captionOnly {
+                    Text("此模式不會顯示即時字幕（純錄音，事後才有逐字稿）")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
                 Toggle(isOn: $m.captionOnly) {
                     Text("💬 字幕限定（不錄音、不留紀錄）")
                 }
@@ -1071,6 +1121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
         }
         m.poll()
+        m.fetchLiveMode()
         let mm = m
         Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in mm.poll() }
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in mm.tick() }
