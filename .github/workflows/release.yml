@@ -8,7 +8,11 @@ permissions:
 
 jobs:
   build-app:
-    runs-on: macos-14   # Apple Silicon: swiftc (micbusy) + sips/iconutil for the bundle
+    runs-on: macos-15   # Apple Silicon: swiftc (micbusy) + sips/iconutil for the bundle.
+                        # macos-14's default Xcode 15.4 (Swift 5.10) can't resolve the
+                        # qwen3-ane deps (several require Swift tools 6.0-6.2) and its
+                        # libc++ can't build chatllm.cpp's newer C++. macos-14 is also
+                        # being deprecated by GitHub (unsupported after 2026-11-02).
     env:
       # Optional code-signing. Set these repo secrets to sign releases with a
       # stable identity (so TCC grants persist across updates for end users):
@@ -23,6 +27,14 @@ jobs:
       SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select latest stable Xcode
+        # macos-15's default Xcode (16.4, Swift 6.1) is still short of the Swift
+        # 6.2 tools some qwen3-ane deps declare; pick whatever stable Xcode is
+        # newest on the runner instead of pinning a version number that GitHub
+        # will eventually remove from the image.
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
       - name: VERSION must match the tag
         run: |
           v=$(cat VERSION); t="${GITHUB_REF_NAME#v}"
