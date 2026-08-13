@@ -692,7 +692,7 @@ def two_way_split(embs, *, min_side=2, iters=5):
 
 def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
                          match_threshold=0.62, min_secs=1.2, sample_rate=16000,
-                         on_promote=None, continuity_threshold=0.5):
+                         on_promote=None, continuity_threshold=0.5, grace_relax=0.15):
     """Factory for the LIVE per-utterance speaker label fn: fn(pcm_bytes) -> label.
 
     Recognizes voices the user already NAMED in past meetings (cosine-match the
@@ -722,9 +722,11 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
         return promoted.get(sid, f"說話者{sid + 1}")
 
     last = {"label": None, "e": None}  # last EMITTED (label, normalized emb) — continuity anchor
+    grace = {"used": False}  # one relaxed continuity retry per miss-streak (see fn below)
 
     def _emit(label, e):
         last["label"], last["e"] = label, e
+        grace["used"] = False
         return label
 
     def fn(audio):
@@ -763,7 +765,21 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
         # interjection by another party can be absorbed — accepted for live; the
         # post-meeting /diarize pass re-clusters accurately.
         if last["e"] is not None and float(e @ last["e"]) >= continuity_threshold:
+            grace["used"] = False                     # clean continuation refills the grace budget
             return last["label"]
+        # Grace: a NAMED speaker's utterance that fails both the direct match and
+        # the full continuity bar gets ONE relaxed retry (continuity_threshold -
+        # grace_relax) against the last emitted embedding before dropping to a
+        # fresh 說話者N. Anchor stays put (same no-drift rule as continuity above)
+        # and the budget doesn't refill until a real match/continuity succeeds —
+        # so a genuinely different, sustained interruption still falls through on
+        # its second utterance instead of getting smothered indefinitely.
+        if (last["label"] is not None and not _is_placeholder(last["label"])
+                and not grace["used"] and last["e"] is not None
+                and float(e @ last["e"]) >= continuity_threshold - grace_relax):
+            grace["used"] = True
+            return last["label"]
+        grace["used"] = False
         return _emit(_label_for(sid), e)             # unknown -> session-local cluster
 
     def embed(audio):

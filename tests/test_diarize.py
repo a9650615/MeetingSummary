@@ -452,6 +452,84 @@ def test_live_speaker_labeler_continuity_keeps_last_speaker_on_noisy_utterance()
     assert fn(b"x" * 4000) == "Alice"      # noisy 0.55 -> continuity keeps Alice, no flicker
 
 
+def _at_cosine(base, orth, cos):
+    return cos * base + np.sqrt(1 - cos ** 2) * orth
+
+
+def test_live_speaker_labeler_grace_saves_one_below_continuity_dip():
+    # A named speaker's utterance can dip BELOW continuity_threshold (noisier
+    # than the 0.55 case above) yet still plausibly be the same voice. One
+    # relaxed grace retry (continuity_threshold - grace_relax) should still
+    # keep the real name instead of dropping to a fresh 說話者N.
+    dim = 16
+    rng = np.random.default_rng(2)
+    alice = rng.normal(size=dim); alice /= np.linalg.norm(alice)
+    orth = rng.normal(size=dim); orth -= (orth @ alice) * alice; orth /= np.linalg.norm(orth)
+    dip = _at_cosine(alice, orth, 0.42)   # below continuity_threshold(0.5), above 0.5-0.15
+    seq = [alice, dip]
+    calls = {"i": 0}
+
+    def extractor(_audio):
+        v = seq[min(calls["i"], len(seq) - 1)]; calls["i"] += 1
+        return v
+
+    rows = [_spk_row("Alice", alice)]
+    fn = diarize.live_speaker_labeler(extractor, rows, session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=0,
+                                      continuity_threshold=0.5, grace_relax=0.15)
+    assert fn(b"x" * 4000) == "Alice"      # clean -> recognized
+    assert fn(b"x" * 4000) == "Alice"      # 0.42 dip: below continuity, grace saves it
+
+
+def test_live_speaker_labeler_grace_does_not_absorb_a_different_speaker():
+    # The grace retry must still reject a genuinely different, near-orthogonal
+    # voice — it relaxes the bar, it does not remove it. A real interruption
+    # by someone else must fall through to a new session-local label.
+    dim = 16
+    rng = np.random.default_rng(3)
+    alice = rng.normal(size=dim); alice /= np.linalg.norm(alice)
+    orth = rng.normal(size=dim); orth -= (orth @ alice) * alice; orth /= np.linalg.norm(orth)
+    other = _at_cosine(alice, orth, 0.05)   # far below even the relaxed 0.35 bar
+    seq = [alice, other]
+    calls = {"i": 0}
+
+    def extractor(_audio):
+        v = seq[min(calls["i"], len(seq) - 1)]; calls["i"] += 1
+        return v
+
+    rows = [_spk_row("Alice", alice)]
+    fn = diarize.live_speaker_labeler(extractor, rows, session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=0,
+                                      continuity_threshold=0.5, grace_relax=0.15)
+    assert fn(b"x" * 4000) == "Alice"        # clean -> recognized
+    assert fn(b"x" * 4000) != "Alice"        # clearly different voice -> not absorbed
+
+
+def test_live_speaker_labeler_grace_is_one_shot_per_streak():
+    # Grace is a single consecutive-miss allowance, not a standing exemption:
+    # two dips in a row must not both ride on grace, or a real speaker change
+    # sustained over several utterances would be permanently misattributed.
+    dim = 16
+    rng = np.random.default_rng(4)
+    alice = rng.normal(size=dim); alice /= np.linalg.norm(alice)
+    orth = rng.normal(size=dim); orth -= (orth @ alice) * alice; orth /= np.linalg.norm(orth)
+    dip = _at_cosine(alice, orth, 0.42)
+    seq = [alice, dip, dip]
+    calls = {"i": 0}
+
+    def extractor(_audio):
+        v = seq[min(calls["i"], len(seq) - 1)]; calls["i"] += 1
+        return v
+
+    rows = [_spk_row("Alice", alice)]
+    fn = diarize.live_speaker_labeler(extractor, rows, session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=0,
+                                      continuity_threshold=0.5, grace_relax=0.15)
+    assert fn(b"x" * 4000) == "Alice"      # clean -> recognized
+    assert fn(b"x" * 4000) == "Alice"      # 1st dip: grace saves it
+    assert fn(b"x" * 4000) != "Alice"      # 2nd dip in a row: grace budget spent, no free pass
+
+
 def _unit(rng, dim=16):
     v = rng.normal(size=dim); return v / np.linalg.norm(v)
 

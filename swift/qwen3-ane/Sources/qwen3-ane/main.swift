@@ -38,7 +38,14 @@ struct Qwen3Ane {
             let samples: [Float] = body.withUnsafeBytes { raw in
                 raw.bindMemory(to: Int16.self).map { Float(Int16(littleEndian: $0)) / 32768.0 }
             }
-            let text = model.transcribe(audio: samples, sampleRate: 16000, language: nil)
+            // Each transcribe() call drives up to `maxTokens` CoreML decode steps,
+            // each allocating fresh MLMultiArray/MLFeatureProvider objects (see
+            // CoreMLTextDecoder.writeChunk). This is a bare CLI entry point with no
+            // run loop to auto-drain autorelease pools, so without this the
+            // Objective-C-bridged CoreML objects pile up for the process lifetime.
+            let text = autoreleasepool {
+                model.transcribe(audio: samples, sampleRate: 16000, language: nil)
+            }
             let data = (try? JSONSerialization.data(withJSONObject: ["text": text])) ?? Data("{}".utf8)
             stdout.write(data)
             stdout.write(Data("\n".utf8))
