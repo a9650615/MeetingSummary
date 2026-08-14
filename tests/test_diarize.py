@@ -237,7 +237,12 @@ def test_live_speaker_labeler_promotes_session_cluster_to_named_voice():
     # retroactively promoted to the real name for this and all future
     # occurrences (fixes named voices going permanently unrecognized).
     dim = 16
-    rng = np.random.default_rng(0)
+    # seed 7: the first draw's own cosine to alice_dir lands BELOW even fix
+    # A's relaxed single-utterance retry floor (0.58) -- still no individual
+    # match on sample 1, so this keeps testing the GRADUAL (multi-sample)
+    # promotion path this test is named for, distinct from
+    # test_live_speaker_labeler_single_utterance_promotes_at_relaxed_threshold.
+    rng = np.random.default_rng(7)
     alice_dir = rng.normal(size=dim)
     alice_dir /= np.linalg.norm(alice_dir)
 
@@ -575,3 +580,234 @@ def test_similar_pairs_skips_two_named_people():
     names = {frozenset((p["a"], p["b"])) for p in pairs}
     assert frozenset(("Jimmy", "Frank")) not in names       # two named -> skipped
     assert frozenset(("Jimmy", "對方5")) in names            # named<->unnamed -> kept
+
+
+# --- standup fix A: single-utterance session-cluster promotion retry ---
+
+def test_live_speaker_labeler_single_utterance_promotes_at_relaxed_threshold():
+    # Standup: one utterance per person, no repeats to average noise out. A
+    # single utterance's own embedding can land just under match_threshold
+    # (0.62) for a truly named voice by noise alone -- the relaxed retry
+    # (>= 0.58, just above the documented 0.51-0.57 cross-speaker overlap
+    # ceiling) must still promote it.
+    dim = 16
+    rng = np.random.default_rng(10)
+    alice = rng.normal(size=dim); alice /= np.linalg.norm(alice)
+    orth = rng.normal(size=dim); orth -= (orth @ alice) * alice; orth /= np.linalg.norm(orth)
+    near = _at_cosine(alice, orth, 0.60)   # below 0.62, above the 0.58 relaxed floor
+
+    def extractor(_audio):
+        return near
+
+    rows = [_spk_row("Alice", alice)]
+    fn = diarize.live_speaker_labeler(extractor, rows, session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=0)
+    assert fn(b"x" * 4000) == "Alice"
+
+
+def test_live_speaker_labeler_single_utterance_does_not_promote_in_overlap_band():
+    # The most important guard for fix A: a DIFFERENT (unknown) speaker's
+    # single utterance can coincidentally land in the documented 0.51-0.57
+    # cross-speaker overlap band against a named voice's centroid. The
+    # relaxed retry must still reject it -- promoting here would
+    # misattribute a stranger as Alice.
+    dim = 16
+    rng = np.random.default_rng(11)
+    alice = rng.normal(size=dim); alice /= np.linalg.norm(alice)
+    orth = rng.normal(size=dim); orth -= (orth @ alice) * alice; orth /= np.linalg.norm(orth)
+    overlap = _at_cosine(alice, orth, 0.55)   # squarely in the 0.51-0.57 danger band
+
+    def extractor(_audio):
+        return overlap
+
+    rows = [_spk_row("Alice", alice)]
+    fn = diarize.live_speaker_labeler(extractor, rows, session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=0)
+    label = fn(b"x" * 4000)
+    assert label != "Alice"
+    assert label == "說話者1"
+
+
+def test_live_speaker_labeler_promotion_retry_scoped_to_single_utterance_cluster():
+    # Once a session cluster has accumulated 2 utterances, the relaxed
+    # single-utterance retry must NOT apply -- only the full match_threshold
+    # governs the smoothed (count==2) centroid, exactly as before this fix.
+    #
+    # Two utterances, EACH individually at cosine 0.4685 to Alice (below the
+    # 0.58 relaxed floor, so neither promotes alone at count==1), noisy in
+    # opposite orthogonal directions so their running-mean centroid partially
+    # cancels that noise and lands at cosine 0.60 to Alice -- squarely in the
+    # (0.58, 0.62) rescue band. If the count==1 relax wrongly also covered
+    # count==2, this would promote; scoped correctly, it must not.
+    dim = 16
+    rng = np.random.default_rng(12)
+    alice = rng.normal(size=dim); alice /= np.linalg.norm(alice)
+    o1 = rng.normal(size=dim); o1 -= (o1 @ alice) * alice; o1 /= np.linalg.norm(o1)
+    o2 = rng.normal(size=dim); o2 -= (o2 @ alice) * alice; o2 -= (o2 @ o1) * o1
+    o2 /= np.linalg.norm(o2)
+    s1 = _at_cosine(alice, o1, 0.4685)
+    s2 = _at_cosine(alice, o2, 0.4685)
+    seq = [s1, s2]
+    calls = {"i": 0}
+
+    def extractor(_audio):
+        v = seq[min(calls["i"], len(seq) - 1)]; calls["i"] += 1
+        return v
+
+    rows = [_spk_row("Alice", alice)]
+    fn = diarize.live_speaker_labeler(extractor, rows, session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=0)
+    labels = [fn(b"x" * 4000) for _ in range(2)]
+    assert labels[0] != "Alice"           # count==1 at 0.4685: below the relax floor too
+    assert labels[-1] != "Alice"          # count==2 at ~0.60: relax must not extend here
+
+
+# --- standup fix B: short utterances no longer blindly inherit the last label ---
+
+def test_live_speaker_labeler_short_utterance_no_longer_inherits_blindly():
+    # Standup: A speaks a full paragraph (gets 說話者1), then B says a very
+    # short "沒有" (< min_secs). The old behavior blindly inherited A's
+    # label; B's short utterance is a genuinely different, unrelated voice
+    # and must NOT be mislabeled as A -- neutral (None, falls back to the
+    # generic side label at the caller) is the honest answer here.
+    dim = 16
+    rng = np.random.default_rng(20)
+    a_voice = rng.normal(size=dim); a_voice /= np.linalg.norm(a_voice)
+    b_voice = rng.normal(size=dim); b_voice -= (b_voice @ a_voice) * a_voice
+    b_voice /= np.linalg.norm(b_voice)   # orthogonal to A -> clearly different voice
+    seq = [a_voice, b_voice]
+    calls = {"i": 0}
+
+    def extractor(_audio):
+        v = seq[min(calls["i"], len(seq) - 1)]; calls["i"] += 1
+        return v
+
+    fn = diarize.live_speaker_labeler(extractor, [], session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=1.2)
+    a_label = fn(b"x" * 40000)             # >= min_bytes -> full utterance -> 說話者1
+    assert a_label == "說話者1"
+    b_label = fn(b"x" * 4000)              # < min_bytes -> short interjection
+    assert b_label is None                 # neutral, not inherited from A
+
+
+def test_live_speaker_labeler_short_followup_still_resolves_to_same_named_voice():
+    # Regression guard: a named speaker's normal utterance followed by a
+    # genuinely short follow-up from the SAME voice (e.g. "對，就這樣") must
+    # still resolve to that name via the read-only peek match, even though
+    # the blind-inherit shortcut is gone.
+    dim = 16
+    rng = np.random.default_rng(21)
+    alice = rng.normal(size=dim); alice /= np.linalg.norm(alice)
+
+    def extractor(_audio):
+        return alice          # every utterance sounds like Alice
+
+    rows = [_spk_row("Alice", alice)]
+    fn = diarize.live_speaker_labeler(extractor, rows, session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=1.2)
+    assert fn(b"x" * 40000) == "Alice"
+    assert fn(b"x" * 4000) == "Alice"     # short follow-up, same voice -> still Alice
+
+
+def test_live_speaker_labeler_short_followup_stays_on_established_session_cluster():
+    # The biggest regression risk for fix B: in a NORMAL (non-standup)
+    # meeting, an unrecognized speaker's short follow-ups after their own
+    # longer utterance must keep resolving to that SAME session cluster via
+    # peek, not scatter into generic side-label fallbacks -- that would look
+    # like a string of fake speaker switches.
+    dim = 16
+    rng = np.random.default_rng(22)
+    voice = rng.normal(size=dim); voice /= np.linalg.norm(voice)
+
+    def extractor(_audio):
+        return voice          # every utterance is the SAME (unknown) voice
+
+    fn = diarize.live_speaker_labeler(extractor, [], session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=1.2)
+    first = fn(b"x" * 40000)                       # full utterance -> spawns 說話者1
+    assert first == "說話者1"
+    for _ in range(3):
+        assert fn(b"x" * 4000) == "說話者1"        # short follow-ups stay on cluster
+
+
+# --- standup fix C: SpeakerTracker merge bar adapts to turn-taking gaps ---
+
+class _FakeClock:
+    """Deterministic stand-in for time.monotonic() -- advance .t manually to
+    simulate a real gap between SpeakerTracker.assign() calls."""
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_speaker_tracker_same_speaker_noisy_repeats_still_merge_when_adjacent():
+    # Regression guard (do NOT break the 07-02-era over-split fix): the
+    # SAME speaker's consecutive, real-time-ADJACENT utterances can fluctuate
+    # noisily (0.4-0.6 cosine) against the running centroid due to short-
+    # utterance noise -- they must all merge into ONE cluster. No fake clock
+    # injected here: a tight test loop is itself "adjacent" (near-zero real
+    # elapsed time), exactly like genuine consecutive live utterances.
+    dim = 16
+    rng = np.random.default_rng(30)
+    base = rng.normal(size=dim); base /= np.linalg.norm(base)
+    t = SpeakerTracker(threshold=0.4)
+    assert t.assign(base) == 0
+    for target_cos in (0.45, 0.58, 0.42, 0.50):
+        centroid = t.centroids[0]
+        orth = rng.normal(size=dim)
+        orth -= (orth @ centroid) * centroid
+        orth /= np.linalg.norm(orth)
+        v = _at_cosine(centroid, orth, target_cos)
+        assert t.assign(v) == 0     # still merges despite noisy 0.4-0.6 similarity
+    assert len(t.centroids) == 1
+
+
+def test_speaker_tracker_different_speakers_stay_separate_across_a_turn_gap():
+    # The new scenario fix C targets: standup turn-taking. Each person speaks
+    # once, separated by a real pause (> ADJACENT_GAP_S). Their single-
+    # utterance embeddings can coincidentally land in the documented
+    # 0.51-0.57 cross-speaker overlap band relative to an earlier speaker's
+    # centroid -- across a genuine gap, that must NOT be treated as a
+    # same-turn noise dip; each person gets an independent id.
+    dim = 16
+    rng = np.random.default_rng(31)
+    alice = rng.normal(size=dim); alice /= np.linalg.norm(alice)
+    orth = rng.normal(size=dim); orth -= (orth @ alice) * alice; orth /= np.linalg.norm(orth)
+    bob = _at_cosine(alice, orth, 0.55)     # squarely in the overlap band vs Alice
+
+    clock = _FakeClock()
+    t = SpeakerTracker(threshold=0.4, clock=clock)
+    assert t.assign(alice) == 0
+    clock.t += SpeakerTracker.ADJACENT_GAP_S + 1.0   # a real turn-taking pause
+    assert t.assign(bob) == 1                        # NOT merged -- independent id
+
+
+def test_live_speaker_labeler_standup_each_person_once_gets_distinct_labels():
+    # End-to-end standup through the public factory: 3 people, each speaks
+    # once, separated by a real turn-taking pause, none in the global
+    # voiceprint DB. They must come back as 3 DISTINCT session-local labels
+    # instead of collapsing into one via the old flat 0.4 threshold.
+    dim = 16
+    rng = np.random.default_rng(32)
+    a = rng.normal(size=dim); a /= np.linalg.norm(a)
+    orth = rng.normal(size=dim); orth -= (orth @ a) * a; orth /= np.linalg.norm(orth)
+    b = _at_cosine(a, orth, 0.55)     # coincidentally close to A (danger band)
+    c = rng.normal(size=dim); c /= np.linalg.norm(c)   # clearly distinct voice
+    seq = [a, b, c]
+    calls = {"i": 0}
+
+    def extractor(_audio):
+        v = seq[min(calls["i"], len(seq) - 1)]; calls["i"] += 1
+        return v
+
+    clock = _FakeClock()
+    fn = diarize.live_speaker_labeler(extractor, [], session_threshold=0.4,
+                                      match_threshold=0.62, min_secs=0,
+                                      clock=clock)
+    labels = []
+    for _ in range(3):
+        labels.append(fn(b"x" * 4000))
+        clock.t += 5.0     # turn-taking pause between each standup speaker
+    assert len(set(labels)) == 3

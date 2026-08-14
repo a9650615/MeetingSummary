@@ -194,29 +194,77 @@ def assign_speakers(transcripts, segments, *, prefix="說話者", names=None,
     return out
 
 
+# Highest cosine similarity measured between DIFFERENT speakers' short-utterance
+# embeddings on this embedding model (0.51-0.57, from live match-threshold
+# calibration) + a small margin. Used as a floor below which a merge/promotion
+# decision must never relax, however lenient the caller's own thresholds are —
+# see SpeakerTracker.confirm_threshold and live_speaker_labeler's single-
+# utterance promotion retry.
+_CROSS_SPEAKER_OVERLAP_CEILING = 0.58
+
+
 class SpeakerTracker:
     """Online (live) speaker clustering. Feed an utterance embedding -> returns a
     0-based speaker id: nearest centroid by cosine if similar enough, else a new
     speaker. Less accurate than offline global clustering (no future context,
-    threshold-sensitive) — the post-meeting /diarize pass can re-cluster to fix."""
+    threshold-sensitive) — the post-meeting /diarize pass can re-cluster to fix.
 
-    def __init__(self, threshold=0.4):
+    Merge bar is temporally adaptive: two utterances arriving within
+    ADJACENT_GAP_S of each other (real wall-clock time between assign() calls)
+    are treated as the same conversational turn and merge at the lenient
+    `threshold` — this is what protects the same-speaker-noise case `threshold`
+    was lowered to 0.4 for. Utterances separated by a longer gap (a plausible
+    speaker handoff, e.g. daily-standup turn-taking) must clear the stricter
+    `confirm_threshold` instead: a flat 0.4 bar merges different people whose
+    single utterances happen to land in the documented 0.51-0.57 cross-speaker
+    overlap band. This is a heuristic, not a certainty — a genuine same-speaker
+    pause longer than ADJACENT_GAP_S can still, rarely, spawn a spurious new id
+    if that resumed utterance is unusually noisy; validate against a real
+    standup recording before trusting the gap length blindly."""
+
+    ADJACENT_GAP_S = 3.0  # matches live_session._MERGE_GAP_MS's same-speaker-continuation gap
+
+    def __init__(self, threshold=0.4, confirm_threshold=None, clock=None):
         # Lower threshold = merge more readily = fewer spurious speakers. 3D-Speaker
         # cosine on short utterances is noisy, so default conservatively to avoid
         # over-splitting (the common live failure). Tune via LIVE_DIAR_THRESHOLD.
         self.threshold = threshold
+        self.confirm_threshold = max(
+            _CROSS_SPEAKER_OVERLAP_CEILING if confirm_threshold is None else confirm_threshold,
+            threshold)
         self.centroids = []
         self.counts = []
         self.last_id = 0
+        import time  # noqa: PLC0415
+        self._clock = clock or time.monotonic
+        self._last_ts = None
+
+    def is_adjacent(self):
+        """Whether a decision made RIGHT NOW falls within ADJACENT_GAP_S of the
+        last assign() call — read-only, no state mutation, so both the no-spawn
+        peek path and live_speaker_labeler's own continuity/grace fallbacks
+        (which face the exact same same-turn-vs-handoff question this class
+        was built to answer) can share one clock instead of drifting apart."""
+        return (self._last_ts is not None
+                and (self._clock() - self._last_ts) <= self.ADJACENT_GAP_S)
+
+    def _current_bar(self):
+        """The merge bar for a decision made RIGHT NOW, without committing any
+        state — read-only, so the no-spawn peek path (peek_from_emb) can use
+        the same adjacency-aware bar as assign() without pretending to have
+        just accepted an utterance."""
+        return self.threshold if self.is_adjacent() else self.confirm_threshold
 
     def assign(self, emb):
         import numpy as np  # noqa: PLC0415
         emb = np.asarray(emb, dtype=np.float32)
         emb = emb / (np.linalg.norm(emb) + 1e-9)
+        bar = self._current_bar()
+        self._last_ts = self._clock()
         if self.centroids:
             sims = [float(c @ emb) for c in self.centroids]
             best = max(range(len(sims)), key=sims.__getitem__)
-            if sims[best] >= self.threshold:
+            if sims[best] >= bar:
                 n = self.counts[best]
                 c = (self.centroids[best] * n + emb) / (n + 1)
                 self.centroids[best] = c / (np.linalg.norm(c) + 1e-9)
@@ -692,7 +740,8 @@ def two_way_split(embs, *, min_side=2, iters=5):
 
 def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
                          match_threshold=0.62, min_secs=1.2, sample_rate=16000,
-                         on_promote=None, continuity_threshold=0.5, grace_relax=0.15):
+                         on_promote=None, continuity_threshold=0.5, grace_relax=0.15,
+                         single_promote_relax=0.04, clock=None):
     """Factory for the LIVE per-utterance speaker label fn: fn(pcm_bytes) -> label.
 
     Recognizes voices the user already NAMED in past meetings (cosine-match the
@@ -710,8 +759,10 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
     a caller can retroactively rename that cluster's already-emitted lines (only
     the promotion path ever creates a 說話者N cluster; the direct known-match path
     above returns a name immediately, nothing to rename)."""
+    import time  # noqa: PLC0415
     import numpy as np  # noqa: PLC0415
-    tr = SpeakerTracker(threshold=session_threshold)
+    _clock = clock or time.monotonic
+    tr = SpeakerTracker(threshold=session_threshold, clock=_clock)
     # One clean count-weighted centroid per name (dropping garbage/outlier
     # enrollments) instead of every fragmented row — see _consolidate_named.
     known = _consolidate_named(speakers)
@@ -721,66 +772,22 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
     def _label_for(sid):
         return promoted.get(sid, f"說話者{sid + 1}")
 
-    last = {"label": None, "e": None}  # last EMITTED (label, normalized emb) — continuity anchor
+    # last EMITTED (label, normalized emb, wall-clock time) — continuity anchor.
+    # "ts" tracks time since the LAST EMISSION specifically (not tr.assign()'s
+    # own clock: a direct known-voice match below never touches tr at all), so
+    # continuity/grace gate on the same same-turn-vs-handoff question
+    # SpeakerTracker answers for merging, using the actual last thing said.
+    last = {"label": None, "e": None, "ts": None}
     grace = {"used": False}  # one relaxed continuity retry per miss-streak (see fn below)
 
     def _emit(label, e):
-        last["label"], last["e"] = label, e
+        last["label"], last["e"], last["ts"] = label, e, _clock()
         grace["used"] = False
         return label
 
-    def fn(audio):
-        if len(audio) < min_bytes and last["label"] is not None:
-            return last["label"]                     # too short -> continue last speaker, don't spawn
-        emb = np.asarray(extractor(audio), dtype=np.float32)
-        e = emb / (np.linalg.norm(emb) + 1e-9)
-        if known:
-            name, _sim = match_speaker(e, known, match_threshold)
-            if name is not None:
-                return _emit(name, e)                # recognized a named voice
-        sid = tr.assign(emb)
-        if sid not in promoted and known:
-            # A short single utterance's own embedding can land just under
-            # match_threshold by noise even for a truly named voice (measured:
-            # separate short utterances from the SAME speaker don't always
-            # individually clear 0.62). But tr's running-mean centroid for this
-            # cluster gets less noisy as more of that speaker's utterances
-            # accumulate into it — so retry the named match against THAT refined
-            # centroid; once it crosses match_threshold, "promote" the cluster so
-            # this and all its future occurrences resolve to the real name.
-            # Earlier 說話者N lines are fixed up live via on_promote (retroactive
-            # rename), no longer left for the post-meeting pass.
-            name, _sim = match_speaker(tr.centroids[sid], known, match_threshold)
-            if name is not None:
-                promoted[sid] = name
-                if on_promote:
-                    on_promote(f"說話者{sid + 1}", name)
-                return _emit(name, e)
-        # Temporal continuity: an unrecognized/noisy utterance whose embedding is
-        # still close to the LAST emitted speaker (softer than match_threshold) is
-        # almost certainly that same person still talking — inherit their label
-        # instead of flickering to 對方 / a fresh 說話者N. Same-turn utterances are
-        # more self-similar than any single one is to a noisy enrolled centroid.
-        # Anchor emb stays put (no drift). Tradeoff: a quick, acoustically-similar
-        # interjection by another party can be absorbed — accepted for live; the
-        # post-meeting /diarize pass re-clusters accurately.
-        if last["e"] is not None and float(e @ last["e"]) >= continuity_threshold:
-            grace["used"] = False                     # clean continuation refills the grace budget
-            return last["label"]
-        # Grace: a NAMED speaker's utterance that fails both the direct match and
-        # the full continuity bar gets ONE relaxed retry (continuity_threshold -
-        # grace_relax) against the last emitted embedding before dropping to a
-        # fresh 說話者N. Anchor stays put (same no-drift rule as continuity above)
-        # and the budget doesn't refill until a real match/continuity succeeds —
-        # so a genuinely different, sustained interruption still falls through on
-        # its second utterance instead of getting smothered indefinitely.
-        if (last["label"] is not None and not _is_placeholder(last["label"])
-                and not grace["used"] and last["e"] is not None
-                and float(e @ last["e"]) >= continuity_threshold - grace_relax):
-            grace["used"] = True
-            return last["label"]
-        grace["used"] = False
-        return _emit(_label_for(sid), e)             # unknown -> session-local cluster
+    def _turn_adjacent():
+        return (last["ts"] is not None
+                and (_clock() - last["ts"]) <= SpeakerTracker.ADJACENT_GAP_S)
 
     def embed(audio):
         # STATE-FREE normalized embedding for a window (no spawn, no centroid
@@ -808,9 +815,99 @@ def live_speaker_labeler(extractor, speakers, *, session_threshold=0.4,
         if tr.centroids:
             sims = [float(c @ e) for c in tr.centroids]
             best = max(range(len(sims)), key=sims.__getitem__)
-            if sims[best] >= tr.threshold:
+            if sims[best] >= tr._current_bar():
                 return _label_for(best)
         return None
+
+    def fn(audio):
+        if len(audio) < min_bytes:
+            # Too short for a reliable voiceprint (< min_secs). Used to blindly
+            # inherit the last speaker's label — correct for a same-speaker
+            # mid-sentence pause, wrong for a standup handoff ("沒有" from the
+            # NEXT person). Read-only peek against named voices + already-
+            # ESTABLISHED session clusters instead: it resolves a genuine
+            # same-voice follow-up (peek matches) exactly like before, but a
+            # different voice's interjection gets no opinion (None) rather
+            # than someone else's name — never spawns a new cluster off such
+            # an unreliable signal either. None falls back to the side label
+            # (我/對方) at the caller (see live_session.store_speaker), not a
+            # guessed identity.
+            emb = np.asarray(extractor(audio), dtype=np.float32)
+            e = emb / (np.linalg.norm(emb) + 1e-9)
+            label = peek_from_emb(e)
+            if label is not None:
+                return _emit(label, e)
+            return None
+        emb = np.asarray(extractor(audio), dtype=np.float32)
+        e = emb / (np.linalg.norm(emb) + 1e-9)
+        if known:
+            name, _sim = match_speaker(e, known, match_threshold)
+            if name is not None:
+                return _emit(name, e)                # recognized a named voice
+        turn_adjacent = _turn_adjacent()  # read before _emit()/tr.assign() move the clock forward
+        sid = tr.assign(emb)
+        if sid not in promoted and known:
+            # A short single utterance's own embedding can land just under
+            # match_threshold by noise even for a truly named voice (measured:
+            # separate short utterances from the SAME speaker don't always
+            # individually clear 0.62). But tr's running-mean centroid for this
+            # cluster gets less noisy as more of that speaker's utterances
+            # accumulate into it — so retry the named match against THAT refined
+            # centroid; once it crosses match_threshold, "promote" the cluster so
+            # this and all its future occurrences resolve to the real name.
+            # Earlier 說話者N lines are fixed up live via on_promote (retroactive
+            # rename), no longer left for the post-meeting pass.
+            name, _sim = match_speaker(tr.centroids[sid], known, match_threshold)
+            if name is None and tr.counts[sid] == 1:
+                # A cluster still holding just ONE utterance (the standup case:
+                # each person speaks once, so this is the only shot at
+                # recognition) has no averaging to smooth that utterance's own
+                # noise — retry once at a relaxed bar. Never below
+                # _CROSS_SPEAKER_OVERLAP_CEILING: measured DIFFERENT speakers'
+                # single utterances land at 0.51-0.57, so relaxing past that
+                # ceiling would trade standup recognition for cross-speaker
+                # mix-ups. If match_threshold is already at/below the ceiling
+                # (e.g. a caller-tuned lenient live route), there is nothing
+                # left to relax — skip the retry rather than tighten it.
+                relaxed = max(match_threshold - single_promote_relax,
+                              _CROSS_SPEAKER_OVERLAP_CEILING)
+                if relaxed < match_threshold:
+                    name, _sim = match_speaker(tr.centroids[sid], known, relaxed)
+            if name is not None:
+                promoted[sid] = name
+                if on_promote:
+                    on_promote(f"說話者{sid + 1}", name)
+                return _emit(name, e)
+        # Temporal continuity: an unrecognized/noisy utterance whose embedding is
+        # still close to the LAST emitted speaker (softer than match_threshold) is
+        # almost certainly that same person still talking — inherit their label
+        # instead of flickering to 對方 / a fresh 說話者N. Same-turn utterances are
+        # more self-similar than any single one is to a noisy enrolled centroid.
+        # Anchor emb stays put (no drift). Tradeoff: a quick, acoustically-similar
+        # interjection by another party can be absorbed — accepted for live; the
+        # post-meeting /diarize pass re-clusters accurately. Gated on turn_adjacent:
+        # without a time check this absorbed a standup handoff too (a different
+        # person's utterance can coincidentally clear 0.5 cosine to the last
+        # speaker) — only a same-turn gap gets the free pass.
+        if (turn_adjacent and last["e"] is not None
+                and float(e @ last["e"]) >= continuity_threshold):
+            grace["used"] = False                     # clean continuation refills the grace budget
+            return last["label"]
+        # Grace: a NAMED speaker's utterance that fails both the direct match and
+        # the full continuity bar gets ONE relaxed retry (continuity_threshold -
+        # grace_relax) against the last emitted embedding before dropping to a
+        # fresh 說話者N. Anchor stays put (same no-drift rule as continuity above)
+        # and the budget doesn't refill until a real match/continuity succeeds —
+        # so a genuinely different, sustained interruption still falls through on
+        # its second utterance instead of getting smothered indefinitely.
+        if (turn_adjacent and last["label"] is not None
+                and not _is_placeholder(last["label"])
+                and not grace["used"] and last["e"] is not None
+                and float(e @ last["e"]) >= continuity_threshold - grace_relax):
+            grace["used"] = True
+            return last["label"]
+        grace["used"] = False
+        return _emit(_label_for(sid), e)             # unknown -> session-local cluster
 
     def peek(audio):
         return peek_from_emb(embed(audio))
