@@ -2006,13 +2006,22 @@ def _apply_speaker_split(store, name, new_name):
             "backup": backup}
 
 
-def _enroll_meeting_speaker(store, mid, track, name):
+def _enroll_meeting_speaker(store, mid, track, name, spans=None):
     """Assignment enrolls AND learns-from-correction: compute `name`'s voiceprint from
     their audio in THIS meeting, then either enroll it (name new to the 語者庫) or
     REINFORCE the existing voiceprint (count-weighted nudge) so a manual 命名/抽離
     teaches the system — future meetings recognize this voice as `name`, avoiding the
     mistake you just fixed. Nudge (not a new row) keeps the库 un-fragmented. Best-effort;
-    returns True if it enrolled or reinforced."""
+    returns True if it enrolled or reinforced.
+
+    spans (optional): explicit (meeting_id, track, start_ms, end_ms) rows to embed,
+    instead of re-querying "every row currently named `name` in this meeting". Pass
+    this for a bulk rename — looking up by the NEW name after the rename already
+    landed would also sweep in whatever ELSE that name already covers in this
+    meeting from an earlier, unrelated merge, teaching the voiceprint from audio
+    this specific action never touched (measured: a 對方->Una merge followed by a
+    說話者3->Una merge re-embedded ALL "Una" rows, including the first merge's
+    already-contaminated ones, instead of just 說話者3's own audio)."""
     import numpy as np  # noqa: PLC0415
     import diarize as diar  # noqa: PLC0415
 
@@ -2020,7 +2029,7 @@ def _enroll_meeting_speaker(store, mid, track, name):
         return x / (np.linalg.norm(x) + 1e-9)
     ext = diar.embedding_extractor()
     cache, embs = {}, []
-    for s in store.meeting_speaker_spans(mid, name, track=track):
+    for s in (spans if spans is not None else store.meeting_speaker_spans(mid, name, track=track)):
         key = (s["meeting_id"], s["track"])
         if key not in cache:
             cache[key] = _assemble_track(store, s["meeting_id"], s["track"])
@@ -2648,6 +2657,32 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
     audio_card = (f"<div class='card sticky'><h2 style='margin-top:0'>回放</h2>{players}"
                   "<p class=hint style='margin:.5em 0 0'>點逐字稿任一行可跳到該段落播放。"
                   "捲動時播放器固定在頂部。</p></div>") if audio_tracks else ""
+    # 整場改名: distinct (raw label, track) groups still present in this meeting,
+    # so a person scattered across several raw labels (說話者2/說話者5/對方 — the
+    # live "掉人" symptom re-splitting one voice into multiple session clusters)
+    # can be swept into one name in a single submit, instead of the click-open-
+    # input-type-reload cycle once per fragment. Only worth showing once there's
+    # more than one label to sweep.
+    from collections import Counter as _Counter  # noqa: PLC0415
+    _grp = _Counter()
+    for r in transcripts:
+        _grp[(str(r.get("speaker_raw", r["speaker"])), str(r["track"]), str(r["speaker"]))] += 1
+    bulk_groups = sorted(_grp.items(), key=lambda kv: -kv[1])
+    bulk_rename = ""
+    if len(bulk_groups) > 1:
+        opts = "".join(
+            f"<label class=chk style='display:block;margin:2px 0'>"
+            f"<input type=checkbox class=bulksel data-raw='{html.escape(raw)}' data-track='{html.escape(trk)}'> "
+            f"{html.escape(disp)}<span class=muted style='margin-left:4px'>({trk}·{n})</span></label>"
+            for (raw, trk, disp), n in bulk_groups)
+        bulk_rename = (
+            "<details style='margin:-4px 0 12px'><summary class=hint style='cursor:pointer'>"
+            "🏷️ 整場改名（勾選多個標籤一次改成同一人）</summary>"
+            f"<div style='margin:8px 0 0;padding:8px;border-radius:8px;background:var(--card,#f6f6f8)'>{opts}"
+            "<div class=row style='margin-top:6px'>"
+            "<input id=bulkname placeholder='改成…' list=spkdl autocomplete=off style='font:inherit'>"
+            "<button class=btn id=bulkgo>套用</button>"
+            "<span class='muted small' id=bulkmsg></span></div></div></details>")
     badge = "done" if meeting["status"] == "finalized" else "live"
     remote_btn = ""
     if remote_enabled:
@@ -2662,6 +2697,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         + ((f"<div class=hint style='margin:-6px 0 12px'>🔁 本場認得："
             + "、".join(html.escape(n) for n in recognized)
             + " <a href='/speakers/manage'>管理語者</a></div>") if recognized else "")
+        + bulk_rename
         + "<div class=card><h2 style='margin-top:0'>摘要</h2>"
         "<label class='muted small'>📝 筆記（摘要的可信參考：人名／日期／決議，自動儲存）</label>"
         "<textarea id=mnotes rows=2 placeholder='補充重點…' "
@@ -2858,6 +2894,23 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "dl.id='spkdl';document.body.appendChild(dl);}"
         "dl.innerHTML=(j.speakers||[]).map(s=>`<option value=\"${_esc(s.name)}\">`).join('');"
         "window._spk=new Set((j.speakers||[]).map(s=>s.name));});})();"
+        # 整場改名: one submit renames every checked (raw label, track) group to
+        # the same person — sequential POSTs to the existing single-label rename
+        # endpoint (no new backend route), one page reload at the end.
+        "(function(){const go=document.getElementById('bulkgo');if(!go)return;"
+        "go.onclick=async()=>{"
+        "const nw=document.getElementById('bulkname').value.trim();"
+        "const msg=document.getElementById('bulkmsg');"
+        "const sel=[...document.querySelectorAll('.bulksel:checked')];"
+        "if(!nw||!sel.length){msg.textContent='請勾選標籤並輸入姓名';return;}"
+        "if(!confirm(`把選中的 ${sel.length} 個標籤都改成「${nw}」？（伺服器會先備份資料庫）`))return;"
+        f"const MID2={mid};"
+        "go.disabled=true;msg.textContent='套用中…';"
+        "for(const cb of sel){"
+        "await fetch(`/meetings/${MID2}/speaker`,{method:'POST',"
+        "headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({old:cb.dataset.raw,new:nw,track:cb.dataset.track})});}"
+        "location.reload();};})();"
         # Tags: chips + remove (✕) + an add input (Enter to add).
         "function _esc(s){return (s||'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));}"
         f"const MID={mid};"
@@ -3999,22 +4052,45 @@ def create_app(store, *, summary_backend, asr_backend=None,
             new in store.meeting_speaker_names(mid, track=body.track)
             or any(s["name"] == new for s in store.list_speakers()))
         backup = _backup_db(store) if merged else None
+        # Capture BEFORE the rename lands, scoped to `old` — see _enroll_meeting_speaker's
+        # spans param docstring for why (looking up by `new` afterward would also sweep in
+        # an unrelated earlier merge that already shares this name in this meeting). Captured
+        # regardless of whether `old` is a placeholder: a rename can ALSO be a correction of
+        # a real (but wrong) name — e.g. lines that were mislabeled Pei but are actually
+        # Angle — and that case needs the same audio to teach Angle.
+        import diarize as diar  # noqa: PLC0415
+        old_spans = []
+        if new and new != body.old:
+            try:
+                old_spans = store.meeting_speaker_spans(mid, body.old, track=body.track)
+            except Exception as e:
+                print(f"span capture before assign failed: {e}", file=sys.stderr)
         n = store.rename_speaker(mid, body.old, new, track=body.track)
         # propagate to the global voiceprint so future meetings auto-use the new name
         # (no-op when old is a raw live cluster label — no such global speaker exists yet)
         store.rename_global_speaker(body.old, new)
-        # Assignment enrolls: naming a meeting-local placeholder (對方N) with a REAL
-        # name is what teaches the global 語者庫 — enroll its voiceprint now from this
-        # meeting's audio. (rename_global_speaker was a no-op above since no global row
-        # existed for the placeholder.) Best-effort; never blocks the rename.
+        # Assignment enrolls the TARGET and, when the source was a real (not placeholder)
+        # name, unlearns the SOURCE — a rename both teaches who this audio actually is
+        # AND stops teaching the wrong person from it. Symmetric with set_line_speaker's
+        # per-line 抽離, just applied to the whole batch of moved spans. Best-effort;
+        # never blocks the rename.
         enrolled = False
+        unlearned = 0
         try:
-            import diarize as diar  # noqa: PLC0415
-            if new and diar._is_placeholder(body.old) and not diar._is_placeholder(new):
-                enrolled = _enroll_meeting_speaker(store, mid, body.track, new)
+            if old_spans and not diar._is_placeholder(new):
+                enrolled = _enroll_meeting_speaker(store, mid, body.track, new, spans=old_spans)
         except Exception as e:
             print(f"enroll on assign failed: {e}", file=sys.stderr)
-        return {"renamed": n, "merged": merged, "backup": backup, "enrolled": enrolled}
+        if old_spans and not diar._is_placeholder(body.old):
+            for s in old_spans:
+                try:
+                    if _unlearn_speaker_clip(store, mid, s["track"] or body.track, body.old,
+                                             s["start_ms"], s["end_ms"]):
+                        unlearned += 1
+                except Exception as e:
+                    print(f"unlearn on assign failed: {e}", file=sys.stderr)
+        return {"renamed": n, "merged": merged, "backup": backup,
+                "enrolled": enrolled, "unlearned": unlearned}
 
     @app.post("/meetings/{mid}/transcript/{tid}/speaker")
     def set_line_speaker(mid: int, tid: int, body: LineSpeakerIn):
