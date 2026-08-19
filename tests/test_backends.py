@@ -87,6 +87,20 @@ def test_route_groq():
     assert backends.route("groq-whisper-large-v3-turbo") == "groq"
 
 
+def test_route_breeze():
+    assert backends.route("MediaTek-Research/Breeze-ASR-25") == "breeze"
+
+
+def test_breeze_lang_locked_never_auto():
+    # No None/"" entry: auto-detect is exactly the failure mode this model
+    # exists to avoid, so every caller-passed language (including unset) must
+    # resolve to a real forced language, never fall through to whisper auto-detect.
+    assert backends._BREEZE_LANG.get("") == "chinese"
+    assert backends._BREEZE_LANG.get(None or "") == "chinese"
+    assert backends._BREEZE_LANG.get("zh") == "chinese"
+    assert backends._BREEZE_LANG.get("en") == "english"
+
+
 def test_groq_backend_requires_api_key(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     import pytest

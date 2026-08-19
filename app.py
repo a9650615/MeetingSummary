@@ -1676,6 +1676,7 @@ _SUPPORTED = [
     {"id": "qwen3-asr-1.7b", "label": "Qwen3-ASR 1.7B（chatllm·慢·備用）", "kind": "chatllm", "group": "🔧 .cpp · Metal"},
     {"id": "Qwen/Qwen3-ASR-0.6B", "label": "Qwen3-ASR 0.6B", "kind": "hf", "group": "🐢 transformers · 慢"},
     {"id": "Qwen/Qwen3-ASR-1.7B", "label": "Qwen3-ASR 1.7B（最準·慢）", "kind": "hf", "group": "🐢 transformers · 慢"},
+    {"id": "MediaTek-Research/Breeze-ASR-25", "label": "Breeze-ASR-25（中英混雜專用·慢）", "kind": "hf", "group": "🐢 transformers · 慢"},
     # 說話者分群模型(sherpa pyannote-3-0 seg + 3dspeaker emb)由 diarize.py 首次分群時
     # 自動下載到 models/，不在此清單(community-1 onnx 與 sherpa 不相容,缺 sample_rate metadata)。
 ]
@@ -2692,6 +2693,7 @@ def _detail_page(mid, meeting, transcripts, summaries, audio_tracks=(), tags=(),
         "<optgroup label='🐢 transformers · 慢'>"
         "<option value='Qwen/Qwen3-ASR-0.6B'>Qwen3-ASR 0.6B</option>"
         "<option value='Qwen/Qwen3-ASR-1.7B'>Qwen3-ASR 1.7B(很慢)</option>"
+        "<option value='MediaTek-Research/Breeze-ASR-25'>Breeze-ASR-25(中英混雜專用·很慢)</option>"
         "</optgroup>"
         "<optgroup label='☁️ Groq API · 遠端'>"
         "<option value='groq-whisper-large-v3-turbo'>Groq whisper turbo(快·遠端)</option>"

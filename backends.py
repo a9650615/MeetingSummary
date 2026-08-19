@@ -26,6 +26,8 @@ def route(model):
         return "qwen3"
     if m == "firered" or "fire-red" in m:  # FireRedASR-AED via sherpa-onnx (CPU, batch)
         return "firered"
+    if "breeze-asr" in m:  # MediaTek Breeze-ASR-25, whisper-large-v2 zh-en code-switch tune
+        return "breeze"
     return "whisper"
 
 
@@ -363,6 +365,8 @@ def make_backend(model, language=None, wait=False):
         return _takes_path(qwen3_batch_backend(model, language))
     if r == "firered":
         return _takes_path(firered_batch_backend(model, language))
+    if r == "breeze":
+        return _takes_path(breeze_batch_backend(model, language))
     if r == "groq":
         return groq_backend(model, language, wait=wait)
     import asr  # noqa: PLC0415
@@ -989,6 +993,51 @@ def _clean_firered(text):
     import re  # noqa: PLC0415
     text = re.sub(r"<[^>]*>", "", text or "")
     return re.sub(r"\s+", " ", text).strip()
+
+
+# Breeze wants a Whisper LANGUAGE NAME baked into generate(), never left on
+# auto: it's a whisper-large-v2 fine-tune for zh-en code-switch, and auto
+# per-window language guessing is exactly the failure mode this model exists to
+# avoid. Locked to Chinese by default regardless of what the caller passes.
+_BREEZE_LANG = {"": "chinese", "zh": "chinese", "en": "english", "ja": "japanese",
+                 "ko": "korean", "yue": "chinese"}
+
+
+def breeze_batch_backend(model="MediaTek-Research/Breeze-ASR-25", language=None):
+    """Offline Breeze-ASR-25 (MediaTek, whisper-large-v2 fine-tune for Mandarin-English
+    code-switching) via raw transformers — no mlx/GGUF conversion exists upstream.
+    Apple Silicon: torch on MPS if available, else CPU (slow, not realtime; batch
+    re-transcribe only). Lazy import so torch/transformers aren't required unless
+    this backend is actually selected. Language is always forced (see _BREEZE_LANG) —
+    letting Whisper auto-detect per-window is what breaks code-switch in the first
+    place, which is the whole reason this model exists."""
+    state = {}
+    lang = _BREEZE_LANG.get(language or "", "chinese")
+
+    def _run(audio_path):
+        import numpy as np  # noqa: PLC0415
+        if "m" not in state:  # lazy: don't block startup / first request beyond load
+            import torch  # noqa: PLC0415
+            from transformers import (  # noqa: PLC0415
+                WhisperForConditionalGeneration, WhisperProcessor)
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            processor = WhisperProcessor.from_pretrained(model)
+            m = WhisperForConditionalGeneration.from_pretrained(model).to(device).eval()
+            state["m"], state["processor"], state["device"] = m, processor, device
+        with open(str(audio_path), "rb") as f:  # window temp is raw s16le pcm
+            samples = np.frombuffer(f.read(), dtype=np.int16).astype(np.float32) / 32768.0
+        if samples.size == 0:
+            return []
+        import torch  # noqa: PLC0415
+        processor, m, device = state["processor"], state["m"], state["device"]
+        inputs = processor(samples, sampling_rate=16000, return_tensors="pt")
+        features = inputs.input_features.to(device)
+        with torch.no_grad():
+            ids = m.generate(features, language=lang, task="transcribe")
+        text = processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
+        return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
+
+    return _run
 
 
 def qwen3_batch_backend(model="Qwen/Qwen3-ASR-0.6B", language=None):
