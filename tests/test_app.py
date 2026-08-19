@@ -398,6 +398,49 @@ def test_summary_route_is_async_started(tmp_path):
         "running", "done")
 
 
+def test_catchup_floor_ms_caps_far_back_since():
+    from app import _catchup_floor_ms
+    # never pressed (since_ms=None) on a long meeting -> fall back to last 10min
+    assert _catchup_floor_ms(None, 20 * 60_000, cap_ms=10 * 60_000) == 10 * 60_000
+    # pressed long ago -> still capped at 10min back from the latest line, not
+    # re-summarized all the way back to that stale press
+    assert _catchup_floor_ms(1_000, 20 * 60_000, cap_ms=10 * 60_000) == 10 * 60_000
+    # pressed recently -> since_ms wins (window is shorter than the cap)
+    assert _catchup_floor_ms(19 * 60_000, 20 * 60_000, cap_ms=10 * 60_000) == 19 * 60_000
+
+
+def test_catchup_route_404_for_missing_meeting(tmp_path):
+    c, store = make_client(tmp_path)
+    assert c.post("/meetings/999/catchup", json={}).status_code == 404
+
+
+def test_catchup_route_skips_backend_when_window_empty(tmp_path):
+    calls = []
+    c, store = make_client(tmp_path, summary_backend=lambda p: calls.append(p) or "X")
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    r = c.post(f"/meetings/{mid}/catchup", json={})
+    assert r.status_code == 200
+    assert r.json()["text"] == "剛剛沒有新內容"
+    assert calls == []  # no transcript in the window -> never calls the LLM
+
+
+def test_catchup_route_summarizes_window_only(tmp_path):
+    captured = {}
+
+    def backend(p):
+        captured["p"] = p
+        return "剛才在討論預算。"
+
+    c, store = make_client(tmp_path, summary_backend=backend)
+    mid = store.create_meeting("m", 1.0, "zh-TW")
+    store.add_transcript(mid, "accurate", "mic", 0, 1000, "我", "很久以前講的話")
+    store.add_transcript(mid, "accurate", "mic", 700_000, 701_000, "我", "討論預算")
+    r = c.post(f"/meetings/{mid}/catchup", json={"since_ms": 600_000})
+    assert r.status_code == 200
+    assert r.json()["text"] == "剛才在討論預算。"
+    assert "討論預算" in captured["p"] and "很久以前講的話" not in captured["p"]
+
+
 def test_transcribe_route_runs_asr_and_stores(tmp_path):
     seg_dir = tmp_path / "seg0"
     seg_dir.mkdir()

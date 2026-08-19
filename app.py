@@ -1268,6 +1268,10 @@ class SummaryIn(BaseModel):
     kind: str = "minutes"
 
 
+class CatchupIn(BaseModel):
+    since_ms: int | None = None
+
+
 class ModelIn(BaseModel):
     live: str
 
@@ -1390,6 +1394,19 @@ def _speaker_roster(store):
         if n and not re.fullmatch(r"說話者\d+|對方\d*|我|Speaker\s*\d+", n):
             out.append(n)
     return sorted(set(out))
+
+
+_CATCHUP_CAP_MS = 10 * 60_000  # "剛才講到哪" never reaches back further than this
+
+
+def _catchup_floor_ms(since_ms, latest_ms, cap_ms=_CATCHUP_CAP_MS):
+    """Start of the catchup window: since_ms (elapsed ms of the panel's last
+    press), but never further back than cap_ms before the latest transcript
+    line. since_ms=None (never pressed) or a stale press both fall back to
+    "last N minutes of actual speech" instead of re-summarizing from meeting
+    start. latest_ms (not wall-clock time) keeps this on the same elapsed-ms
+    basis as start_ms/end_ms, so no client/server clock sync is needed."""
+    return max(since_ms or 0, latest_ms - cap_ms)
 
 
 def _summary_input(store, mid, meeting, backend):
@@ -4186,6 +4203,24 @@ def create_app(store, *, summary_backend, asr_backend=None,
     @app.get("/meetings/{mid}/summary/progress")
     def summary_progress(mid: int):
         return summary_jobs.get(mid, {"state": "idle"})
+
+    @app.post("/meetings/{mid}/catchup")
+    def catchup_meeting(mid: int, body: CatchupIn):
+        # "剛才講到哪" — a small, capped window (_CATCHUP_CAP_MS), summarized
+        # synchronously. Unlike /summary this never runs on the whole meeting,
+        # so it stays fast enough not to need the background-job/progress dance.
+        _touch()
+        meeting = store.get_meeting(mid)
+        if meeting is None:
+            raise HTTPException(404, "meeting not found")
+        rows = store.list_transcripts(mid)
+        latest_ms = max((r["end_ms"] for r in rows), default=0)
+        floor_ms = _catchup_floor_ms(body.since_ms, latest_ms)
+        text = _transcript_text([r for r in rows if r["start_ms"] >= floor_ms])
+        if not text.strip():
+            return {"text": "剛剛沒有新內容", "since_ms": latest_ms}
+        out = summarize(text, kind="catchup", lang=meeting["lang"], backend=summary_backend)
+        return {"text": out, "since_ms": latest_ms}
 
     @app.post("/meetings/{mid}/notes")
     def set_notes_route(mid: int, body: SettingIn):

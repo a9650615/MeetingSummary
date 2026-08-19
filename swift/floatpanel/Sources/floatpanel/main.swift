@@ -322,6 +322,14 @@ final class Model: ObservableObject {
     // docs/superpowers/specs/2026-08-11-caption-only-mode-design.md. Not
     // persisted; resets to off on every launch, same as `source`.
     @Published var captionOnly = false
+    // 「剛才講到哪」quick catch-up popover state.
+    @Published var catchupShowing = false
+    @Published var catchupLoading = false
+    @Published var catchupText: String?
+    // Elapsed-ms of the last catch-up window's end, as returned by the server
+    // (server's transcript-ms basis, not the client's wall clock) — sent back
+    // as since_ms next press so each catch-up covers only what's new.
+    private var catchupSinceMs: Int?
     // Persisted "錄音模式" (both/record/transcribe) — same _SETTINGS['live_mode']
     // value the web settings page's <select id=live_mode_opt> reads/writes
     // (app.py ~line 671). The floatpanel already inherits this setting for
@@ -805,6 +813,29 @@ final class Model: ObservableObject {
         relaySession?.invalidateAndCancel(); relaySession = nil
     }
 
+    // 「剛才講到哪」: summarize since the last press (server-capped, see
+    // app.py's /catchup — never reaches back more than ~10min of actual speech).
+    func runCatchup() {
+        guard let mid = mid, !catchupLoading else { return }
+        catchupLoading = true
+        catchupText = nil
+        catchupShowing = true
+        var json: [String: Any] = [:]
+        if let s = catchupSinceMs { json["since_ms"] = s }
+        req("/meetings/\(mid)/catchup", method: "POST", json: json) { [weak self] data, code in
+            guard let self = self else { return }
+            self.catchupLoading = false
+            guard code == 200, let d = data,
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let text = o["text"] as? String else {
+                self.catchupText = "抓不到剛才的內容，稍後再試。"
+                return
+            }
+            self.catchupText = text
+            self.catchupSinceMs = o["since_ms"] as? Int
+        }
+    }
+
     // 主控台: the review/list/settings UI still lives in the browser (native entry
     // is /live only for now) — this is the one door back to it.
     func openConsole() {
@@ -858,6 +889,58 @@ struct PanelView: View {
                     Text(m.elapsed).font(.system(.subheadline, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
+                if !m.recording {
+                    // Recording-mode pull-down lives here (top row, alongside the
+                    // other icon buttons) rather than its own row below — one
+                    // unified 4-way choice (was: a 3-way menu PLUS a separate
+                    // 字幕限定 checkbox that just disabled the menu when checked,
+                    // i.e. already mutually exclusive in practice, just not in UI).
+                    // 字幕限定 only flips the ephemeral captionOnly flag — it must
+                    // NEVER touch m.liveMode, which persists to the server setting
+                    // (docs/superpowers/specs/2026-08-11-caption-only-mode-design.md:
+                    // caption-only must reset to off on every relaunch, never be
+                    // remembered like the other three).
+                    Menu {
+                        Button("錄音＋即時辨識") { m.captionOnly = false; m.setLiveMode("both") }
+                        Button("純錄音（省電，不即時辨識）") { m.captionOnly = false; m.setLiveMode("record") }
+                        Button("純字幕（不留錄音檔）") { m.captionOnly = false; m.setLiveMode("transcribe") }
+                        Divider()
+                        Button("字幕限定（不錄音、不留紀錄）") { m.captionOnly = true }
+                    } label: {
+                        Image(systemName: m.captionOnly ? "text.bubble.fill"
+                              : m.liveMode == "record" ? "mic.fill"
+                              : m.liveMode == "transcribe" ? "text.bubble" : "waveform.and.mic")
+                    }
+                    .menuStyle(.borderlessButton).fixedSize()
+                    .help("錄音模式：" + (m.captionOnly ? "字幕限定（不錄音、不留紀錄）"
+                          : m.liveMode == "record" ? "純錄音（省電，不即時辨識）"
+                          : m.liveMode == "transcribe" ? "純字幕（不留錄音檔）" : "錄音＋即時辨識")
+                          + "。與網頁設定頁「錄音模式」共用同一設定（字幕限定除外，不會被記住）。")
+                }
+                if m.recording && !m.captionOnly {
+                    // 字幕限定沒有 meeting/逐字稿紀錄，按了只會一直回「沒有新內容」，故不顯示。
+                    Button { m.runCatchup() } label: {
+                        if m.catchupLoading {
+                            ProgressView().controlSize(.small).frame(width: 14, height: 14)
+                        } else {
+                            Image(systemName: "clock.arrow.circlepath")
+                        }
+                    }
+                    .buttonStyle(.borderless).disabled(m.catchupLoading)
+                    .help("剛才講到哪：快速回顧上次按過之後的對話")
+                    .popover(isPresented: $m.catchupShowing, arrowEdge: .bottom) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("剛才講到哪").font(.headline)
+                            if m.catchupLoading {
+                                ProgressView().frame(maxWidth: .infinity).padding(.vertical, 12)
+                            } else {
+                                Text(m.catchupText ?? "").font(.body).fixedSize(horizontal: false, vertical: true)
+                            }
+                            Button("關閉") { m.catchupShowing = false }
+                                .buttonStyle(.bordered).frame(maxWidth: .infinity)
+                        }.padding(14).frame(width: 260)
+                    }
+                }
                 Button { m.showSubtitle.toggle() } label: {
                     Image(systemName: m.showSubtitle ? "captions.bubble.fill" : "captions.bubble")
                 }.buttonStyle(.borderless).help("字幕浮層：畫面底部顯示最新逐字（像 YouTube 即時字幕）")
@@ -870,33 +953,10 @@ struct PanelView: View {
                     ForEach(Source.allCases) { s in Text(s.label).tag(s) }
                 }
                 .pickerStyle(.segmented).labelsHidden()
-                HStack(spacing: 6) {
-                    Text("錄音模式").font(.caption).foregroundStyle(.secondary)
-                    Picker("", selection: Binding(
-                        get: { m.liveMode },
-                        set: { m.setLiveMode($0) }
-                    )) {
-                        Text("錄音＋即時辨識").tag("both")
-                        Text("純錄音（省電，不即時辨識）").tag("record")
-                        Text("純字幕（不留錄音檔）").tag("transcribe")
-                    }
-                    .pickerStyle(.menu).labelsHidden().font(.caption)
-                    Spacer()
-                }
-                .disabled(m.captionOnly)
-                .opacity(m.captionOnly ? 0.5 : 1)
-                .help("與網頁設定頁「錄音模式」共用同一設定，改了會存回伺服器。"
-                      + "開啟下方「字幕限定」時這裡會被蓋過、暫時停用。")
                 if m.liveMode == "record" && !m.captionOnly {
                     Text("此模式不會顯示即時字幕（純錄音，事後才有逐字稿）")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
-                Toggle(isOn: $m.captionOnly) {
-                    Text("💬 字幕限定（不錄音、不留紀錄）")
-                }
-                .toggleStyle(.checkbox).font(.caption)
-                .help("只顯示即時字幕，不錄音、不建立會議記錄、不存逐字稿。"
-                      + "效能不足時文字可能遺失（不留音檔可補救，這是預期行為）。")
             }
             if !m.liveNotice.isEmpty {
                 // e.g. mic/screen-recording denied when capture actually starts —

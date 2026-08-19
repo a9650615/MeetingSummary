@@ -197,6 +197,20 @@ def test_long_transcript_map_reduce():
     assert len(calls) > 1
 
 
+def test_catchup_prompt_asks_for_brief_recap():
+    p = build_prompt("我: 討論預算", kind="catchup", lang="zh-TW")
+    assert "剛才" in p and "2" in p  # short recap cue, distinct from minutes' 【區塊】format
+    assert "決議事項" not in p and "行動項目" not in p  # not minutes/actions' structured blocks
+
+
+def test_catchup_returns_backend_output_without_actions_block():
+    # catchup is a plain recap — must NOT get minutes' per-speaker 【待辦行動】 append.
+    out = summarize("我: 我今天會做測試", kind="catchup", lang="zh-TW",
+                    backend=lambda p: "剛才在討論測試進度。")
+    assert out == "剛才在討論測試進度。"
+    assert "待辦行動" not in out
+
+
 def test_prompt_reflects_kind_and_lang():
     assert "決議" in build_prompt("hi", kind="minutes", lang="zh-TW")
     assert "條列" in build_prompt("hi", kind="bullets", lang="zh-TW")
