@@ -10,11 +10,14 @@ _CLUSTER_LABEL = re.compile(r"^說話者\d+$")
 
 def _disp_speaker(speaker, track):
     """Collapse a stored session cluster label (說話者N, not yet promoted to a
-    recognized name) to its track's side label for the live caption reads — 對方
-    (system) / 混合 (both) / 我 (mic). A promoted/recognized name passes through.
-    Mirrors live_session.display_speaker; inlined here to keep store dependency-free."""
+    recognized name) to its track's side label + cluster number for the live
+    caption reads — 對方N (system) / 混合N (both) / 我N (mic), so distinct
+    unrecognized speakers stay distinguishable. A promoted/recognized name
+    passes through. Mirrors live_session.display_speaker; inlined here to keep
+    store dependency-free."""
     if speaker and _CLUSTER_LABEL.match(speaker):
-        return {"system": "對方", "mixed": "混合"}.get(track, "我")
+        side = {"system": "對方", "mixed": "混合"}.get(track, "我")
+        return side + speaker[len("說話者"):]
     return speaker
 
 

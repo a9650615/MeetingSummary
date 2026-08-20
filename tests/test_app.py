@@ -330,7 +330,7 @@ def test_meeting_page_rename_uses_raw_stored_speaker_not_display_label(tmp_path)
 
     html = c.get(f"/m/{mid}").text
     assert "data-spk='說話者1'" in html
-    assert ">對方<" in html
+    assert ">對方1<" in html
 
     r = c.post(f"/meetings/{mid}/speaker", json={"old": "說話者1", "new": "Scott", "track": "system"})
     assert r.json()["renamed"] == 1

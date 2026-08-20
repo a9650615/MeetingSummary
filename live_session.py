@@ -78,12 +78,16 @@ _CLUSTER_LABEL = re.compile(r"^說話者\d+$")
 
 def display_speaker(stored, track):
     """Collapse a STORED session cluster label (說話者N, not yet promoted) to its
-    track's side label for DISPLAY only — 對方/我/混合. A promoted name, a
-    recognized name, or an already-side label passes through unchanged. Post-
-    meeting /diarize labels (對方1, 我2, …) never match here (different prefix),
-    so this never touches that feature's own multi-speaker labels."""
+    track's side label + that cluster's number for DISPLAY — 對方N/我N/混合N —
+    same convention the post-meeting /diarize pass already uses, so distinct
+    unrecognized speakers on the same side stay distinguishable instead of all
+    reading as one indistinguishable 對方/我. A promoted name, a recognized name,
+    or an already-side label passes through unchanged. Post-meeting /diarize
+    labels (對方1, 我2, …) never match here (different prefix), so this never
+    touches that feature's own multi-speaker labels."""
     if stored and _CLUSTER_LABEL.match(stored):
-        return {"system": "對方", "mixed": "混合"}.get(track, "我")
+        side = {"system": "對方", "mixed": "混合"}.get(track, "我")
+        return side + stored[len("說話者"):]
     return stored
 
 

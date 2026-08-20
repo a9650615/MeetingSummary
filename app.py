@@ -818,15 +818,17 @@ const startBtn=document.getElementById('start'), stopBtn=document.getElementById
 (function(){const pb=document.getElementById('pause'); if(pb) pb.onclick=()=>togglePause();})();
 const modelSel=document.getElementById('model'), curModel=document.getElementById('curmodel');
 const COLORS={'我':'#1565c0','對方':'#2e7d32'};  // speaker colors
-function colored(speaker){ return COLORS[speaker]||'#444'; }
+function colored(speaker){ return COLORS[(speaker||'').replace(/\\d+$/,'')]||'#444'; }
 // Unified line timestamp = wall-clock time-of-day (same on live push + attach).
 function clockStr(epochMs){ return new Date(epochMs).toLocaleTimeString(); }
 // A live final now carries the STORED label (說話者N while un-promoted, else a
 // real name) so a later promotion can retroactively rename it — collapse to the
-// side label for display only (server already collapses for attach-on-load rows).
+// side label + that cluster's number for display only (server does the same for
+// attach-on-load rows), so distinct unrecognized speakers stay distinguishable.
 function collapseSpeaker(raw, track){
-  if(/^說話者\\d+$/.test(raw||'')) return track==='system' ? '對方' : (track==='mixed' ? '混合' : '我');
-  return raw;
+  const m=/^說話者(\\d+)$/.exec(raw||'');
+  if(!m) return raw;
+  return (track==='system' ? '對方' : (track==='mixed' ? '混合' : '我')) + m[1];
 }
 function appendFinalLine(speaker, text, tstr, raw, track){
   const line=document.createElement('div'); line.className='tline';

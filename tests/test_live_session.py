@@ -537,9 +537,9 @@ def test_store_speaker_keeps_cluster_label_falls_back_to_side():
 
 def test_display_speaker_collapses_only_unpromoted_cluster_labels():
     d = live_session.display_speaker
-    assert d("說話者1", "system") == "對方"     # unpromoted cluster on system -> 對方
-    assert d("說話者2", "mic") == "我"
-    assert d("說話者3", "mixed") == "混合"
+    assert d("說話者1", "system") == "對方1"    # unpromoted cluster on system -> 對方N (distinguishable)
+    assert d("說話者2", "mic") == "我2"
+    assert d("說話者3", "mixed") == "混合3"
     assert d("Scott", "system") == "Scott"      # promoted name passes through
     assert d("對方1", "system") == "對方1"       # post-meeting /diarize label untouched
 
