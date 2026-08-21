@@ -15,3 +15,5 @@ setup.log
 transcript.txt
 *.transcript.txt
 .env
+launcher.log
+meeting.db
